@@ -1,0 +1,1213 @@
+use anyhow::Result;
+use chrono::Utc;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{atomic::AtomicBool, Arc};
+use uuid::Uuid;
+
+use crate::pipelines::github_issues::{fetch_github_issues, repo_to_gh_identifier, FetchIssuesOptions};
+use crate::pipelines::github_prs::{
+    detect_github_login, fetch_github_prs, fetch_inline_review_comments, fetch_pr_comments,
+    FetchPRsOptions, GitHubPR, InlineReviewComment, PRComment,
+};
+use crate::pipelines::pipeline::{make_skipped_result, ParsedTask};
+use crate::pipelines::stage::{ResolvedPrompts, Stage, StageContext, UnaddressedComments};
+use crate::pipelines::stages::agent_loop::AgentLoopStage;
+use crate::pipelines::stages::pr_checkout::PrCheckoutStage;
+use crate::pipelines::stages::pr_comment_responder::PrCommentResponderStage;
+use crate::pipelines::stages::pr_description::PrDescriptionStage;
+use crate::pipelines::stages::pr_review_poster::PrReviewPosterStage;
+use crate::pipelines::stages::pull_request::PullRequestStage;
+use crate::pipelines::stages::review_feedback_loop::ReviewFeedbackLoopStage;
+use crate::pipelines::stores::{
+    HandledIssueRecord, HandledIssueStore, PipelineResult, PrResponseRecord, PrResponseStore,
+    PrReviewRecord, PrReviewStore, RunStore,
+};
+use crate::pipelines::workflow_log::WorkflowLog;
+use crate::pipelines::workspace::WorkspaceManager;
+use crate::providers::provider::LLMProvider;
+use crate::tools::registry::ToolRegistry;
+use crate::types::config::{PipelineConfig, PromptConfig};
+use crate::utils::logger::Logger;
+use crate::utils::prompt_loader::PromptLoader;
+
+// ---------------------------------------------------------------------------
+// ExecutorOptions
+// ---------------------------------------------------------------------------
+
+/// Options supplied to a [`PipelineExecutor`] at construction time.
+pub struct ExecutorOptions {
+    /// LLM provider instance shared across all stages.
+    pub provider: Arc<dyn LLMProvider>,
+    /// Tool registry shared across all stages.
+    pub registry: Arc<ToolRegistry>,
+    /// Append-only store for pipeline run records.
+    pub store: Arc<RunStore>,
+    /// Skip workspace setup (useful for tests and dry-runs).
+    pub no_workspace: bool,
+    /// Target repository in `owner/repo` form or a full GitHub URL.
+    pub target_repo: Option<String>,
+    /// Git transport method: `"ssh"` or `"https"`.
+    pub git_method: Option<String>,
+    /// Absolute path of the harness installation root.
+    pub harness_root: Option<PathBuf>,
+    /// Harness-level prompt overrides (lowest precedence).
+    pub prompts: Option<PromptConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// PipelineExecutor
+// ---------------------------------------------------------------------------
+
+/// Orchestrates all pipeline modes: standard, GitHub Issues, GitHub PRs, and
+/// GitHub PR Responses.
+pub struct PipelineExecutor {
+    config: Arc<PipelineConfig>,
+    opts: ExecutorOptions,
+    issue_store: HandledIssueStore,
+    pr_review_store: PrReviewStore,
+    pr_response_store: PrResponseStore,
+    /// Cached GitHub login for the authenticated user (lazily populated).
+    reviewer_login: tokio::sync::Mutex<Option<String>>,
+}
+
+impl PipelineExecutor {
+    /// Create a new executor for a single pipeline.
+    pub fn new(config: PipelineConfig, opts: ExecutorOptions) -> Self {
+        let store_dir = opts
+            .harness_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self {
+            config: Arc::new(config),
+            issue_store: HandledIssueStore::new(&store_dir),
+            pr_review_store: PrReviewStore::new(&store_dir),
+            pr_response_store: PrResponseStore::new(&store_dir),
+            reviewer_login: tokio::sync::Mutex::new(None),
+            opts,
+        }
+    }
+
+    /// Select and run the appropriate pipeline mode.
+    pub async fn run(&self) -> Result<PipelineResult> {
+        if self.config.github_pr_responses.is_some() {
+            return self.run_pr_response_mode().await;
+        }
+        if self.config.github_prs.is_some() {
+            return self.run_prs_mode().await;
+        }
+        if self.config.github_issues.is_some() {
+            return self.run_issues_mode().await;
+        }
+        self.run_standard_mode().await
+    }
+
+    // ── Shared helpers ────────────────────────────────────────────────────────
+
+    /// Return the GitHub login of the authenticated user, caching after the
+    /// first successful lookup.
+    async fn get_reviewer_login(&self) -> Result<String> {
+        let mut lock = self.reviewer_login.lock().await;
+        if let Some(ref login) = *lock {
+            return Ok(login.clone());
+        }
+        let login = detect_github_login().await?;
+        *lock = Some(login.clone());
+        Ok(login)
+    }
+
+    /// Build [`ResolvedPrompts`] by merging pipeline-level overrides on top of
+    /// harness-level defaults, falling back to conventional file paths under
+    /// `harness_root/prompts/`.
+    fn build_resolved_prompts(&self) -> ResolvedPrompts {
+        let harness_root = self
+            .opts
+            .harness_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+        let root = harness_root.to_string_lossy();
+
+        let default_prompt =
+            |name: &str| -> String { format!("{}/prompts/{}", root, name) };
+
+        let hp = self.opts.prompts.as_ref();
+        let pp = self.config.prompts.as_ref();
+
+        ResolvedPrompts {
+            code_review: pp
+                .and_then(|p| p.code_review.clone())
+                .or_else(|| hp.and_then(|p| p.code_review.clone()))
+                .unwrap_or_else(|| default_prompt("code-review.md")),
+            review_feedback: pp
+                .and_then(|p| p.review_feedback.clone())
+                .or_else(|| hp.and_then(|p| p.review_feedback.clone()))
+                .unwrap_or_else(|| default_prompt("review-feedback.md")),
+            pr_description: pp
+                .and_then(|p| p.pr_description.clone())
+                .or_else(|| hp.and_then(|p| p.pr_description.clone()))
+                .unwrap_or_else(|| default_prompt("pr-description.md")),
+            pr_review: hp
+                .and_then(|p| p.pr_review.clone())
+                .unwrap_or_else(|| default_prompt("pr-review.md")),
+            pr_comment_response: hp
+                .and_then(|p| p.pr_comment_response.clone())
+                .unwrap_or_else(|| default_prompt("pr-comment-response.md")),
+            react_system: hp
+                .and_then(|p| p.react_system.clone())
+                .unwrap_or_else(|| default_prompt("react-system.md")),
+            reflexion_system: hp
+                .and_then(|p| p.reflexion_system.clone())
+                .unwrap_or_else(|| default_prompt("reflexion-system.md")),
+            reflexion_reflect: hp
+                .and_then(|p| p.reflexion_reflect.clone())
+                .unwrap_or_else(|| default_prompt("reflexion-reflect.md")),
+        }
+    }
+
+    /// Construct a base [`StageContext`] without workspace or PR-specific fields.
+    fn make_base_ctx(
+        &self,
+        run_id: &str,
+        parsed_task: ParsedTask,
+        retry_count: usize,
+        workflow_log: Option<WorkflowLog>,
+    ) -> StageContext {
+        let harness_root = self
+            .opts
+            .harness_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        StageContext {
+            config: self.config.clone(),
+            provider: self.opts.provider.clone(),
+            registry: self.opts.registry.clone(),
+            workspace_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            branch: String::new(),
+            parsed_task,
+            harness_root,
+            prompts: self.build_resolved_prompts(),
+            target_repo: self.opts.target_repo.clone(),
+            logger: Logger::new(&self.config.name),
+            run_id: run_id.to_string(),
+            retry_count,
+            review_rounds: 0,
+            agent_result: None,
+            review_result: None,
+            review_feedback: None,
+            pr_url: None,
+            pr_title: None,
+            pr_generated_body: None,
+            reviewing_pr: None,
+            pr_review_result: None,
+            responding_pr: None,
+            unaddressed_comments: None,
+            pr_response_result: None,
+            reviewer_login: None,
+            workflow_log,
+            aborted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    // ── GitHub Issues mode ────────────────────────────────────────────────────
+
+    async fn run_issues_mode(&self) -> Result<PipelineResult> {
+        let issues_cfg = self.config.github_issues.as_ref().unwrap();
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(&self.config.name);
+
+        let gh_repo = issues_cfg
+            .repo
+            .clone()
+            .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+
+        logger.info("Fetching GitHub issues");
+
+        let issues = match fetch_github_issues(&FetchIssuesOptions {
+            repo: gh_repo,
+            assignees: issues_cfg.assignees.clone(),
+            labels: issues_cfg.labels.clone(),
+            limit: issues_cfg.limit,
+        })
+        .await
+        {
+            Ok(i) => i,
+            Err(e) => {
+                let error = e.to_string();
+                logger.error(&format!("Failed to fetch GitHub issues: {}", error));
+                let result =
+                    make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
+                self.opts.store.append(&result).await?;
+                return Ok(result);
+            }
+        };
+
+        logger.info(&format!("Fetched {} issue(s)", issues.len()));
+
+        let mut unhandled = Vec::new();
+        for issue in &issues {
+            if !self
+                .issue_store
+                .is_handled(&self.config.name, issue.number)
+                .await?
+            {
+                unhandled.push(issue.clone());
+            }
+        }
+
+        if unhandled.is_empty() {
+            logger.info("No new issues to process — skipping");
+            let result = make_skipped_result(&self.config.name, &run_id, &started_at, None);
+            self.opts.store.append(&result).await?;
+            return Ok(result);
+        }
+
+        logger.info(&format!(
+            "Processing {} issue(s) sequentially",
+            unhandled.len()
+        ));
+
+        let mut last_result: Option<PipelineResult> = None;
+        for issue in &unhandled {
+            let result = match self.run_single_issue(issue).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let completed_at = Utc::now().to_rfc3339();
+                    PipelineResult {
+                        pipeline_name: self.config.name.clone(),
+                        run_id: Uuid::new_v4().to_string(),
+                        started_at: Utc::now().to_rfc3339(),
+                        completed_at,
+                        success: false,
+                        skipped: false,
+                        error: Some(e.to_string()),
+                        issue_number: Some(issue.number),
+                        retry_count: 0,
+                        review_rounds: 0,
+                        trajectory: vec![],
+                        ..Default::default()
+                    }
+                }
+            };
+
+            self.opts.store.append(&result).await?;
+
+            if result.success && !result.skipped {
+                if let Some(ref pr_url) = result.pr_url {
+                    self.issue_store
+                        .mark_handled_with_number(
+                            &self.config.name,
+                            issue.number,
+                            HandledIssueRecord {
+                                pr_number: None,
+                                issue_url: issue.url.clone(),
+                                issue_title: issue.title.clone(),
+                                issue_repo: issue.repo.clone(),
+                                pr_url: Some(pr_url.clone()),
+                                pr_open: true,
+                                handled_at: Utc::now().to_rfc3339(),
+                                updated_at: Utc::now().to_rfc3339(),
+                            },
+                        )
+                        .await?;
+                }
+            }
+
+            last_result = Some(result);
+        }
+
+        Ok(last_result.unwrap_or_else(|| {
+            make_skipped_result(&self.config.name, &run_id, &started_at, None)
+        }))
+    }
+
+    async fn run_single_issue(
+        &self,
+        issue: &crate::pipelines::github_issues::GitHubIssue,
+    ) -> Result<PipelineResult> {
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(&format!("{}#{}", self.config.name, issue.number));
+
+        let parsed_task = ParsedTask::new(format!(
+            "Fix issue #{}: {}\n\n{}",
+            issue.number,
+            issue.title,
+            issue.body_str()
+        ));
+
+        let wf_log = WorkflowLog::new(
+            &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+            &self.config.name,
+            &run_id,
+        ).await.ok();
+        let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+        let mut workspace_cleanup: Option<(WorkspaceManager, crate::pipelines::workspace::WorkspaceInfo)> = None;
+
+        let result = async {
+            if !self.opts.no_workspace {
+                let ws = WorkspaceManager::new(
+                    self.config.workspace.clone().unwrap_or_default(),
+                    logger.clone(),
+                    self.opts.target_repo.clone(),
+                    self.opts.git_method.as_deref().unwrap_or("https"),
+                );
+                let info = ws.setup(&run_id, Some(issue.number)).await?;
+                ctx.workspace_dir = info.dir.clone();
+                ctx.branch = info.branch.clone();
+                workspace_cleanup = Some((ws, info));
+            }
+
+            AgentLoopStage.run(&mut ctx).await?;
+            ReviewFeedbackLoopStage.run(&mut ctx).await?;
+            PrDescriptionStage.run(&mut ctx).await?;
+            PullRequestStage.run(&mut ctx).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        let completed_at = Utc::now().to_rfc3339();
+
+        if let Some((ws, info)) = workspace_cleanup {
+            ws.teardown(&info).await.ok();
+        }
+
+        match result {
+            Ok(_) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.complete("success").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: true,
+                    skipped: false,
+                    pr_url: ctx.pr_url,
+                    pr_title: ctx.pr_title,
+                    agent_result: ctx.agent_result,
+                    review_result: ctx.review_result,
+                    issue_number: Some(issue.number),
+                    retry_count: 0,
+                    review_rounds: ctx.review_rounds,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.error("executor", &e.to_string()).await;
+                    let _ = log.complete("failed").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: false,
+                    skipped: false,
+                    error: Some(e.to_string()),
+                    issue_number: Some(issue.number),
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    // ── GitHub PRs (review) mode ───────────────────────────────────────────────
+
+    async fn run_prs_mode(&self) -> Result<PipelineResult> {
+        let prs_cfg = self.config.github_prs.as_ref().unwrap();
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(&self.config.name);
+
+        let gh_repo = prs_cfg
+            .repo
+            .clone()
+            .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+
+        logger.info("Fetching PRs with review requested");
+
+        let prs = match fetch_github_prs(&FetchPRsOptions {
+            repo: gh_repo,
+            search: prs_cfg.search.clone(),
+            limit: prs_cfg.limit,
+        })
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let error = e.to_string();
+                logger.error(&format!("Failed to fetch GitHub PRs: {}", error));
+                let result =
+                    make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
+                self.opts.store.append(&result).await?;
+                return Ok(result);
+            }
+        };
+
+        let reviewer_login = match self.get_reviewer_login().await {
+            Ok(l) => l,
+            Err(e) => {
+                let error = e.to_string();
+                logger.error(&format!("Failed to detect GitHub login: {}", error));
+                let result =
+                    make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
+                self.opts.store.append(&result).await?;
+                return Ok(result);
+            }
+        };
+
+        let mut to_review: Vec<&GitHubPR> = Vec::new();
+        for pr in &prs {
+            let record = self
+                .pr_review_store
+                .get_record(&self.config.name, pr.number)
+                .await?;
+            match record {
+                None => {
+                    to_review.push(pr);
+                }
+                Some(ref rec) if rec.head_sha != pr.head_ref_oid => {
+                    logger.info(&format!(
+                        "PR #{} has new commits — re-reviewing",
+                        pr.number
+                    ));
+                    to_review.push(pr);
+                }
+                Some(ref rec) => {
+                    let new_comments =
+                        fetch_pr_comments(&pr.repo, pr.number, Some(rec.last_comment_id))
+                            .await
+                            .unwrap_or_default();
+                    let trigger = format!("@{}", reviewer_login);
+                    if new_comments.iter().any(|c| c.body.trim() == trigger) {
+                        logger.info(&format!(
+                            "PR #{} has a \"{}\" comment — re-reviewing",
+                            pr.number, trigger
+                        ));
+                        to_review.push(pr);
+                    } else {
+                        logger.info(&format!(
+                            "PR #{} already reviewed — skipping",
+                            pr.number
+                        ));
+                    }
+                }
+            }
+        }
+
+        if to_review.is_empty() {
+            logger.info("No new PRs to review — skipping");
+            let result = make_skipped_result(&self.config.name, &run_id, &started_at, None);
+            self.opts.store.append(&result).await?;
+            return Ok(result);
+        }
+
+        let mut last_result: Option<PipelineResult> = None;
+        for pr in to_review {
+            logger.info(&format!("Reviewing PR #{}: {}", pr.number, pr.title));
+            let result = self
+                .run_single_pr_review(pr, &reviewer_login)
+                .await?;
+            self.opts.store.append(&result).await?;
+
+            if result.success && !result.skipped {
+                let all_comments =
+                    fetch_pr_comments(&pr.repo, pr.number, None)
+                        .await
+                        .unwrap_or_default();
+                let last_comment_id = all_comments.iter().map(|c| c.id).max().unwrap_or(0);
+                self.pr_review_store
+                    .mark_reviewed(
+                        &self.config.name,
+                        PrReviewRecord {
+                            pr_number: pr.number,
+                            pr_url: pr.url.clone(),
+                            pr_title: pr.title.clone(),
+                            pr_repo: pr.repo.clone(),
+                            head_sha: pr.head_ref_oid.clone(),
+                            last_comment_id,
+                            reviewed_at: Utc::now().to_rfc3339(),
+                        },
+                    )
+                    .await?;
+            }
+            last_result = Some(result);
+        }
+
+        Ok(last_result.unwrap_or_else(|| {
+            make_skipped_result(&self.config.name, &run_id, &started_at, None)
+        }))
+    }
+
+    async fn run_single_pr_review(
+        &self,
+        pr: &GitHubPR,
+        reviewer_login: &str,
+    ) -> Result<PipelineResult> {
+        // Runtime enforcement: must be claude-loop
+        if self.config.agent_loop.technique != "claude-loop" {
+            return Ok(PipelineResult {
+                pipeline_name: self.config.name.clone(),
+                run_id: Uuid::new_v4().to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                completed_at: Utc::now().to_rfc3339(),
+                success: false,
+                skipped: false,
+                error: Some(format!(
+                    "githubPRs pipelines require agentLoop.technique: \"claude-loop\".\n\n\
+                     The PR review agent must be able to run shell commands (git diff, file reads) \
+                     to inspect the PR changes in the workspace. Harness-native techniques (\"{}\") \
+                     receive only text and cannot access the workspace filesystem.\n\n\
+                     Fix: set agent_loop.technique to \"claude-loop\" in your githubPRs pipeline config.",
+                    self.config.agent_loop.technique
+                )),
+                pr_number: Some(pr.number),
+                retry_count: 0,
+                review_rounds: 0,
+                trajectory: vec![],
+                ..Default::default()
+            });
+        }
+
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(&format!("{}#{}", self.config.name, pr.number));
+
+        let parsed_task =
+            ParsedTask::new(format!("Review PR #{}: {}", pr.number, pr.title));
+        let wf_log = WorkflowLog::new(
+            &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+            &self.config.name,
+            &run_id,
+        ).await.ok();
+        let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+        ctx.reviewing_pr = Some(pr.clone());
+        ctx.reviewer_login = Some(reviewer_login.to_string());
+        ctx.branch = pr.head_ref_name.clone();
+
+        // Load and render the pr-review prompt.
+        let loader = PromptLoader::new(&ctx.harness_root);
+        let mut vars = HashMap::new();
+        vars.insert("pr_title".to_string(), pr.title.clone());
+        vars.insert("pr_author".to_string(), pr.author.login.clone());
+        vars.insert("pr_head_ref".to_string(), pr.head_ref_name.clone());
+        vars.insert("pr_base_ref".to_string(), pr.base_ref_name.clone());
+        vars.insert("pr_body".to_string(), pr.body_str().to_string());
+        if let Ok(rendered) = loader.load(&ctx.prompts.pr_review, &vars).await {
+            ctx.parsed_task.task = rendered;
+        }
+
+        let result = async {
+            if !self.opts.no_workspace {
+                let ws = WorkspaceManager::new(
+                    self.config.workspace.clone().unwrap_or_default(),
+                    logger.clone(),
+                    self.opts.target_repo.clone(),
+                    self.opts.git_method.as_deref().unwrap_or("https"),
+                );
+                let info = ws.setup_for_pr_review(pr, &run_id).await?;
+                ctx.workspace_dir = info.dir;
+                ctx.branch = info.branch;
+            }
+            PrCheckoutStage.run(&mut ctx).await?;
+            AgentLoopStage.run(&mut ctx).await?;
+            PrReviewPosterStage.run(&mut ctx).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        let completed_at = Utc::now().to_rfc3339();
+
+        match result {
+            Ok(_) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.complete("success").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: true,
+                    skipped: false,
+                    pr_number: Some(pr.number),
+                    pr_review_result: ctx.pr_review_result,
+                    agent_result: ctx.agent_result,
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.error("executor", &e.to_string()).await;
+                    let _ = log.complete("failed").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: false,
+                    skipped: false,
+                    error: Some(e.to_string()),
+                    pr_number: Some(pr.number),
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    // ── GitHub PR Response mode ───────────────────────────────────────────────
+
+    async fn run_pr_response_mode(&self) -> Result<PipelineResult> {
+        let resp_cfg = self.config.github_pr_responses.as_ref().unwrap();
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(&self.config.name);
+
+        let gh_repo = resp_cfg
+            .repo
+            .clone()
+            .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+
+        let search = format!(
+            "author:@me{}",
+            resp_cfg
+                .search
+                .as_deref()
+                .map(|s| format!(" {}", s))
+                .unwrap_or_default()
+        );
+
+        let prs = match fetch_github_prs(&FetchPRsOptions {
+            repo: gh_repo,
+            search: Some(search),
+            limit: resp_cfg.limit,
+        })
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let error = e.to_string();
+                logger.error(&format!("Failed to fetch authored PRs: {}", error));
+                let result =
+                    make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
+                self.opts.store.append(&result).await?;
+                return Ok(result);
+            }
+        };
+
+        let reviewer_login = match self.get_reviewer_login().await {
+            Ok(l) => l,
+            Err(e) => {
+                let error = e.to_string();
+                logger.error(&format!("Failed to detect GitHub login: {}", error));
+                let result =
+                    make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
+                self.opts.store.append(&result).await?;
+                return Ok(result);
+            }
+        };
+
+        struct PRWithComments {
+            pr: GitHubPR,
+            inline: Vec<InlineReviewComment>,
+            timeline: Vec<PRComment>,
+        }
+
+        let mut to_respond: Vec<PRWithComments> = Vec::new();
+        for pr in &prs {
+            let record = self
+                .pr_response_store
+                .get_record(&self.config.name, pr.number)
+                .await?;
+            let after_inline = record.as_ref().map(|r| r.last_inline_comment_id);
+            let after_timeline = record.as_ref().map(|r| r.last_timeline_comment_id);
+
+            let inline =
+                fetch_inline_review_comments(&pr.repo, pr.number, after_inline)
+                    .await
+                    .unwrap_or_default();
+            let timeline =
+                fetch_pr_comments(&pr.repo, pr.number, after_timeline)
+                    .await
+                    .unwrap_or_default();
+
+            let new_inline: Vec<_> = inline
+                .into_iter()
+                .filter(|c| c.login != reviewer_login)
+                .collect();
+            let new_timeline: Vec<_> = timeline
+                .into_iter()
+                .filter(|c| c.login != reviewer_login)
+                .collect();
+
+            if new_inline.is_empty() && new_timeline.is_empty() {
+                logger.info(&format!(
+                    "PR #{} has no new reviewer comments — skipping",
+                    pr.number
+                ));
+            } else {
+                logger.info(&format!(
+                    "PR #{} has {} new inline, {} new timeline comment(s)",
+                    pr.number,
+                    new_inline.len(),
+                    new_timeline.len()
+                ));
+                to_respond.push(PRWithComments {
+                    pr: pr.clone(),
+                    inline: new_inline,
+                    timeline: new_timeline,
+                });
+            }
+        }
+
+        if to_respond.is_empty() {
+            let result = make_skipped_result(&self.config.name, &run_id, &started_at, None);
+            self.opts.store.append(&result).await?;
+            return Ok(result);
+        }
+
+        let mut last_result: Option<PipelineResult> = None;
+        for item in to_respond {
+            let result = self
+                .run_single_pr_response(&item.pr, item.inline, item.timeline, &reviewer_login)
+                .await?;
+            self.opts.store.append(&result).await?;
+
+            if result.success && !result.skipped {
+                let all_inline =
+                    fetch_inline_review_comments(&item.pr.repo, item.pr.number, None)
+                        .await
+                        .unwrap_or_default();
+                let all_timeline =
+                    fetch_pr_comments(&item.pr.repo, item.pr.number, None)
+                        .await
+                        .unwrap_or_default();
+                let last_inline_id = all_inline.iter().map(|c| c.id).max().unwrap_or(0);
+                let last_timeline_id = all_timeline.iter().map(|c| c.id).max().unwrap_or(0);
+
+                self.pr_response_store
+                    .mark_responded(
+                        &self.config.name,
+                        PrResponseRecord {
+                            pr_number: item.pr.number,
+                            pr_url: item.pr.url.clone(),
+                            pr_repo: item.pr.repo.clone(),
+                            head_sha: result
+                                .pr_response_result
+                                .as_ref()
+                                .map(|r| r.new_head_sha.clone())
+                                .unwrap_or_default(),
+                            last_inline_comment_id: last_inline_id,
+                            last_timeline_comment_id: last_timeline_id,
+                            responded_at: Utc::now().to_rfc3339(),
+                        },
+                    )
+                    .await?;
+            }
+            last_result = Some(result);
+        }
+
+        Ok(last_result.unwrap_or_else(|| {
+            make_skipped_result(&self.config.name, &run_id, &started_at, None)
+        }))
+    }
+
+    async fn run_single_pr_response(
+        &self,
+        pr: &GitHubPR,
+        inline: Vec<InlineReviewComment>,
+        timeline: Vec<PRComment>,
+        reviewer_login: &str,
+    ) -> Result<PipelineResult> {
+        if self.config.agent_loop.technique != "claude-loop" {
+            return Ok(PipelineResult {
+                pipeline_name: self.config.name.clone(),
+                run_id: Uuid::new_v4().to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                completed_at: Utc::now().to_rfc3339(),
+                success: false,
+                skipped: false,
+                error: Some(format!(
+                    "githubPRResponses pipelines require agentLoop.technique: \"claude-loop\".\n\n\
+                     Fix: set agent_loop.technique to \"claude-loop\".",
+                )),
+                pr_number: Some(pr.number),
+                retry_count: 0,
+                review_rounds: 0,
+                trajectory: vec![],
+                ..Default::default()
+            });
+        }
+
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(&format!("{}#{}", self.config.name, pr.number));
+
+        let parsed_task = ParsedTask::new(format!(
+            "Address review comments on PR #{}: {}",
+            pr.number, pr.title
+        ));
+        let wf_log = WorkflowLog::new(
+            &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+            &self.config.name,
+            &run_id,
+        ).await.ok();
+        let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+        ctx.responding_pr = Some(pr.clone());
+        ctx.unaddressed_comments = Some(UnaddressedComments {
+            inline: inline.clone(),
+            timeline: timeline.clone(),
+        });
+        ctx.reviewer_login = Some(reviewer_login.to_string());
+        ctx.branch = pr.head_ref_name.clone();
+
+        // Render the pr-comment-response prompt.
+        let loader = PromptLoader::new(&ctx.harness_root);
+        let mut vars = HashMap::new();
+        vars.insert("pr_title".to_string(), pr.title.clone());
+        vars.insert("pr_author".to_string(), pr.author.login.clone());
+        vars.insert("pr_head_ref".to_string(), pr.head_ref_name.clone());
+        vars.insert("pr_base_ref".to_string(), pr.base_ref_name.clone());
+        vars.insert("pr_url".to_string(), pr.url.clone());
+        vars.insert(
+            "inline_comments".to_string(),
+            render_inline_comments(&inline),
+        );
+        vars.insert(
+            "timeline_comments".to_string(),
+            render_timeline_comments(&timeline),
+        );
+        if let Ok(rendered) = loader
+            .load(&ctx.prompts.pr_comment_response, &vars)
+            .await
+        {
+            ctx.parsed_task.task = rendered;
+        }
+
+        let result = async {
+            if !self.opts.no_workspace {
+                let ws = WorkspaceManager::new(
+                    self.config.workspace.clone().unwrap_or_default(),
+                    logger.clone(),
+                    self.opts.target_repo.clone(),
+                    self.opts.git_method.as_deref().unwrap_or("https"),
+                );
+                let info = ws.setup_for_pr_review(pr, &run_id).await?;
+                ctx.workspace_dir = info.dir;
+                ctx.branch = info.branch;
+            }
+            AgentLoopStage.run(&mut ctx).await?;
+            ReviewFeedbackLoopStage.run(&mut ctx).await?;
+            PullRequestStage.run(&mut ctx).await?;
+            PrCommentResponderStage.run(&mut ctx).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        let completed_at = Utc::now().to_rfc3339();
+
+        match result {
+            Ok(_) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.complete("success").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: true,
+                    skipped: false,
+                    pr_url: ctx.pr_url,
+                    pr_number: Some(pr.number),
+                    pr_response_result: ctx.pr_response_result,
+                    agent_result: ctx.agent_result,
+                    review_result: ctx.review_result,
+                    retry_count: 0,
+                    review_rounds: ctx.review_rounds,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.error("executor", &e.to_string()).await;
+                    let _ = log.complete("failed").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: false,
+                    skipped: false,
+                    error: Some(e.to_string()),
+                    pr_number: Some(pr.number),
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    // ── Standard mode (no GitHub trigger) ────────────────────────────────────
+
+    async fn run_standard_mode(&self) -> Result<PipelineResult> {
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(&self.config.name);
+
+        let parsed_task = ParsedTask::new("standard-pipeline-task");
+        let wf_log = WorkflowLog::new(
+            &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+            &self.config.name,
+            &run_id,
+        ).await.ok();
+        let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+
+        let result = async {
+            if !self.opts.no_workspace {
+                let ws = WorkspaceManager::new(
+                    self.config.workspace.clone().unwrap_or_default(),
+                    logger.clone(),
+                    self.opts.target_repo.clone(),
+                    self.opts.git_method.as_deref().unwrap_or("https"),
+                );
+                let info = ws.setup(&run_id, None).await?;
+                ctx.workspace_dir = info.dir.clone();
+                ctx.branch = info.branch.clone();
+            }
+            AgentLoopStage.run(&mut ctx).await?;
+            ReviewFeedbackLoopStage.run(&mut ctx).await?;
+            PrDescriptionStage.run(&mut ctx).await?;
+            PullRequestStage.run(&mut ctx).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        let completed_at = Utc::now().to_rfc3339();
+
+        match result {
+            Ok(_) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.complete("success").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: true,
+                    skipped: false,
+                    pr_url: ctx.pr_url,
+                    pr_title: ctx.pr_title,
+                    agent_result: ctx.agent_result,
+                    review_result: ctx.review_result,
+                    retry_count: 0,
+                    review_rounds: ctx.review_rounds,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.error("executor", &e.to_string()).await;
+                    let _ = log.complete("failed").await;
+                }
+                Ok(PipelineResult {
+                    pipeline_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: false,
+                    skipped: false,
+                    error: Some(e.to_string()),
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering helpers
+// ---------------------------------------------------------------------------
+
+/// Render a list of inline review comments into a Markdown-style summary.
+fn render_inline_comments(comments: &[InlineReviewComment]) -> String {
+    if comments.is_empty() {
+        return "(none)".to_string();
+    }
+    comments
+        .iter()
+        .map(|c| {
+            let hunk_lines: Vec<&str> = c
+                .diff_hunk
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .filter(|l| !l.starts_with("@@"))
+                .collect();
+            let hunk_excerpt = hunk_lines
+                .iter()
+                .rev()
+                .take(3)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hunk_part = if hunk_excerpt.is_empty() {
+                String::new()
+            } else {
+                format!("> ```diff\n{}\n```\n", hunk_excerpt)
+            };
+            format!(
+                "**`{}` line {}** — @{}:\n{}> {}",
+                c.path,
+                c.line.unwrap_or(0),
+                c.login,
+                hunk_part,
+                c.body
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Render a list of timeline (issue-level) comments into plain-text.
+fn render_timeline_comments(comments: &[PRComment]) -> String {
+    if comments.is_empty() {
+        return "(none)".to_string();
+    }
+    comments
+        .iter()
+        .map(|c| format!("@{}: {}", c.login, c.body))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipelines::github_prs::{InlineReviewComment, PRComment};
+
+    #[test]
+    fn test_render_inline_comments_empty() {
+        assert_eq!(render_inline_comments(&[]), "(none)");
+    }
+
+    #[test]
+    fn test_render_timeline_comments_empty() {
+        assert_eq!(render_timeline_comments(&[]), "(none)");
+    }
+
+    #[test]
+    fn test_render_inline_comments_one() {
+        let comment = InlineReviewComment {
+            id: 1,
+            login: "alice".into(),
+            body: "Fix this".into(),
+            path: "src/foo.rs".into(),
+            line: Some(42),
+            diff_hunk: None,
+            created_at: "".into(),
+            in_reply_to_id: None,
+        };
+        let result = render_inline_comments(&[comment]);
+        assert!(result.contains("src/foo.rs"));
+        assert!(result.contains("42"));
+        assert!(result.contains("alice"));
+        assert!(result.contains("Fix this"));
+    }
+
+    #[test]
+    fn test_render_inline_comments_with_hunk() {
+        let comment = InlineReviewComment {
+            id: 2,
+            login: "bob".into(),
+            body: "See hunk".into(),
+            path: "lib.rs".into(),
+            line: Some(10),
+            diff_hunk: Some("@@ -1,3 +1,4 @@\n context\n-old\n+new".into()),
+            created_at: "".into(),
+            in_reply_to_id: None,
+        };
+        let result = render_inline_comments(&[comment]);
+        assert!(result.contains("```diff"));
+        assert!(result.contains("context"));
+    }
+
+    #[test]
+    fn test_render_timeline_comments_one() {
+        let comment = PRComment {
+            id: 1,
+            login: "bob".into(),
+            body: "LGTM".into(),
+            created_at: "".into(),
+        };
+        let result = render_timeline_comments(&[comment]);
+        assert_eq!(result, "@bob: LGTM");
+    }
+
+    #[test]
+    fn test_render_timeline_comments_multiple() {
+        let comments = vec![
+            PRComment {
+                id: 1,
+                login: "alice".into(),
+                body: "Nice".into(),
+                created_at: "".into(),
+            },
+            PRComment {
+                id: 2,
+                login: "bob".into(),
+                body: "LGTM".into(),
+                created_at: "".into(),
+            },
+        ];
+        let result = render_timeline_comments(&comments);
+        assert!(result.contains("@alice: Nice"));
+        assert!(result.contains("@bob: LGTM"));
+    }
+
+    #[test]
+    fn test_render_inline_comments_no_line() {
+        let comment = InlineReviewComment {
+            id: 3,
+            login: "carol".into(),
+            body: "Typo".into(),
+            path: "main.rs".into(),
+            line: None,
+            diff_hunk: None,
+            created_at: "".into(),
+            in_reply_to_id: None,
+        };
+        let result = render_inline_comments(&[comment]);
+        assert!(result.contains("main.rs"));
+        assert!(result.contains("line 0"));
+    }
+}

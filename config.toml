@@ -1,0 +1,74 @@
+# SousDev configuration
+# Prep, review, and plate your PRs automatically.
+#
+# This is the reference config. Copy and edit it for your project.
+# The CLI auto-discovers this file by walking up from CWD.
+
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+# The repository to operate on. Required when running standalone.
+# Accepts "owner/repo", "https://github.com/owner/repo.git", or
+# "git@github.com:owner/repo.git".
+target_repo = "your-org/your-repo"
+
+# How "owner/repo" shorthands are expanded into clone URLs.
+# "ssh"   → git@github.com:owner/repo.git
+# "https" → https://github.com/owner/repo.git  (default)
+git_method = "ssh"
+
+[logging]
+level = "info"    # "silent", "info", or "debug"
+pretty = false
+
+# ---- Prompt overrides (all optional) ----
+# Paths are relative to this config file's directory.
+# Omit a key to use the built-in default from prompts/.
+#
+# [prompts]
+# code_review       = "prompts/code-review.md"
+# review_feedback   = "prompts/review-feedback.md"
+# pr_description    = "prompts/pr-description.md"
+# pr_review         = "prompts/pr-review.md"
+# pr_comment_response = "prompts/pr-comment-response.md"
+
+# ---- Per-technique defaults (all optional) ----
+[techniques.react]
+max_iterations = 10
+
+[techniques.reflexion]
+max_trials = 3
+
+[techniques.tree_of_thoughts]
+branching = 3
+strategy = "bfs"
+max_depth = 4
+score_threshold = 0.7
+
+[techniques.self_consistency]
+samples = 5
+temperature = 0.8
+
+[techniques.critique_loop]
+max_rounds = 3
+
+[techniques.skeleton_of_thought]
+max_points = 8
+parallel_expansion = true
+
+[techniques.multi_agent_debate]
+num_agents = 3
+rounds = 2
+aggregation = "judge"
+
+# ---- Pipelines ----
+# Pipelines are configured programmatically in Rust (closures can't be
+# serialised to TOML). See the README for examples of how to define
+# pipelines in your main.rs or lib.rs.
+#
+# The four pipeline modes:
+#
+#   github_issues       — fetch assigned issues, fix them, open PRs
+#   github_prs          — review PRs where your review is requested
+#   github_pr_responses — address reviewer comments on your open PRs
+#   trigger + parser    — run a shell command, act on its output

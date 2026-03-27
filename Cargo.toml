@@ -1,0 +1,72 @@
+[package]
+name = "sousdev"
+version = "0.1.0"
+edition = "2021"
+description = "Prep, review, and plate your PRs automatically."
+default-run = "sousdev"
+
+[[bin]]
+name = "sousdev"
+path = "src/main.rs"
+
+[lib]
+name = "sousdev"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for LLM providers
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Cron scheduling
+tokio-cron-scheduler = "0.13"
+
+# Config file loading (TOML)
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Async trait support
+async-trait = "0.1"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Regex
+regex = "1"
+
+# Directories
+dirs = "5"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Futures utilities
+futures = "0.3"
+
+# Tempfile
+tempfile = "3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.13"
+tempfile = "3"
+wiremock = "0.6"
+
+[profile.release]
+opt-level = 3
