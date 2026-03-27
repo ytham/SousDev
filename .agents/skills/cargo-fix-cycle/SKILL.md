@@ -62,7 +62,7 @@ Must show: `test result: ok. N passed; 0 failed; 0 ignored`
 - **Adding a field to `StageContext`**: You must also add it to `make_base_ctx()` in
   executor.rs AND to every test file that constructs a `StageContext` manually
   (trigger.rs, parse.rs, pr_checkout.rs).
-- **Adding a field to `PipelineResult`**: Mark it `#[serde(skip_serializing_if = "Option::is_none")]`
+- **Adding a field to `WorkflowResult`**: Mark it `#[serde(skip_serializing_if = "Option::is_none")]`
   if optional, or add a `Default` value.
 - **Adding a field to `ResolvedPrompts`**: Update `build_resolved_prompts()` in executor.rs
   AND `DEFAULT_RESOLVED_PROMPTS` equivalent in test helpers.

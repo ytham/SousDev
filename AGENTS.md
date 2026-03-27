@@ -4,7 +4,7 @@
 
 SousDev is a Rust CLI daemon that runs autonomous agentic workflows on a cron schedule. It watches GitHub repos and handles issues, PR reviews, and reviewer comments using AI agents that edit code, run tests, and post results.
 
-Four pipeline modes: bug autofix (`github_issues`), PR reviewer (`github_prs`), PR comment responder (`github_pr_responses`), shell trigger (`trigger`).
+Four workflow modes: bug autofix (`github_issues`), PR reviewer (`github_prs`), PR comment responder (`github_pr_responses`), shell trigger (`trigger`).
 
 Eight standalone techniques: ReAct, Reflexion, Tree of Thoughts, Self-Consistency, Critique Loop, Plan-and-Solve, Skeleton-of-Thought, Multi-Agent Debate.
 
@@ -32,20 +32,20 @@ Tests are fully mocked — no API keys, no real git, no network calls.
 src/
   main.rs                  CLI (clap). Only place process::exit() is allowed.
   lib.rs                   Library root — re-exports all modules.
-  types/config.rs          HarnessConfig, PipelineConfig, all sub-configs.
+  types/config.rs          HarnessConfig, WorkflowConfig, all sub-configs.
   types/technique.rs       RunResult, TrajectoryStep — fixed return shape.
   utils/                   Logger, PromptLoader ({{var}} substitution), config_loader.
   providers/               LLMProvider trait + Anthropic, OpenAI, Ollama.
   tools/                   ToolRegistry + built-ins (read_file, write_file, shell).
-  pipelines/
-    executor.rs            PipelineExecutor — routes all 4 modes. Most critical file.
+  workflows/
+    executor.rs            WorkflowExecutor — routes all 4 modes. Most critical file.
     stage.rs               Stage trait + StageContext (shared mutable context).
     stores.rs              RunStore, HandledIssueStore, PrReviewStore, PrResponseStore.
     workspace.rs           WorkspaceManager — clone, checkout, reset, teardown.
     github_issues.rs       gh issue list/comment/close wrappers.
     github_prs.rs          gh pr list, inline comments, replies, login detection.
     cron_runner.rs         tokio-cron-scheduler daemon with overlap guard.
-    stages/                11 pipeline stages (trigger → parse → agent → review → PR).
+    stages/                11 workflow stages (trigger → parse → agent → review → PR).
   techniques/              8 standalone reasoning algorithms, each in its own module.
 prompts/                   Editable .md templates with {{variable}} placeholders.
 config.toml                Reference config. Must stay valid and well-commented.
@@ -62,7 +62,7 @@ config.toml                Reference config. Must stay valid and well-commented.
 - **All config fields must be `Option<T>`** with documented defaults.
 - **Error handling:** `anyhow::Result` everywhere. `thiserror` for typed errors.
 - **Async:** tokio with `full` features. All I/O is async. `async_trait` for async trait methods.
-- **Trait objects:** `Arc<dyn LLMProvider>`, `Arc<ToolRegistry>`, `Arc<PipelineConfig>`.
+- **Trait objects:** `Arc<dyn LLMProvider>`, `Arc<ToolRegistry>`, `Arc<WorkflowConfig>`.
 
 ## Conventions
 

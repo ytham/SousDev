@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Root configuration for the agent harness.
 ///
-/// Fields that cannot be serialised (e.g. closure-based pipeline configs) are
+/// Fields that cannot be serialised (e.g. closure-based workflow configs) are
 /// skipped during TOML deserialisation and must be set programmatically.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HarnessConfig {
@@ -24,9 +24,12 @@ pub struct HarnessConfig {
     pub prompts: Option<PromptConfig>,
     /// Per-technique option overrides.
     pub techniques: Option<TechniquesConfig>,
-    /// Pipeline definitions — populated programmatically; skipped in TOML.
-    #[serde(skip)]
-    pub pipelines: Vec<PipelineConfig>,
+    /// Workflow definitions.
+    ///
+    /// Defined as a `[[workflows]]` array-of-tables in `config.toml`.
+    /// Also accepts `[[workflows]]` for backward compatibility.
+    #[serde(default, alias = "pipelines")]
+    pub workflows: Vec<WorkflowConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,44 +158,43 @@ pub struct MultiAgentDebateConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline config  (set programmatically — not deserialised from TOML)
+// Workflow config
 // ---------------------------------------------------------------------------
 
-/// Full configuration for a single pipeline instance.
+/// Full configuration for a single workflow instance.
 ///
-/// `PipelineConfig` is constructed in application code (not loaded from TOML)
-/// because it may embed closures for `buildTask`.  The nested sub-configs
-/// (`GitHubIssuesPipelineConfig`, etc.) *are* serialisable for logging/
-/// debugging purposes.
-#[derive(Debug, Clone, Default)]
-pub struct PipelineConfig {
-    /// Human-readable pipeline name used in logs and run-store keys.
+/// Defined as a `[[workflows]]` array-of-tables in `config.toml`.
+/// All sub-config types are TOML-serialisable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkflowConfig {
+    /// Human-readable workflow name used in logs and run-store keys.
     pub name: String,
     /// cron expression (e.g. `"0 */5 * * * *"`).
     pub schedule: String,
     /// GitHub PR-response trigger settings.
-    pub github_pr_responses: Option<GitHubPRResponsePipelineConfig>,
+    pub github_pr_responses: Option<GitHubPRResponseWorkflowConfig>,
     /// GitHub PR trigger settings.
-    pub github_prs: Option<GitHubPRsPipelineConfig>,
+    pub github_prs: Option<GitHubPRsWorkflowConfig>,
     /// GitHub Issues trigger settings.
-    pub github_issues: Option<GitHubIssuesPipelineConfig>,
+    pub github_issues: Option<GitHubIssuesWorkflowConfig>,
     /// Generic shell-command trigger.
     pub trigger: Option<TriggerConfig>,
     /// Agent loop configuration.
+    #[serde(default)]
     pub agent_loop: AgentLoopConfig,
     /// Workspace (git clone) configuration.
     pub workspace: Option<WorkspaceConfig>,
     /// Pull-request creation configuration.
     pub pull_request: Option<PullRequestConfig>,
-    /// Retry policy for the pipeline.
+    /// Retry policy for the workflow.
     pub retry: Option<RetryConfig>,
-    /// Per-pipeline prompt overrides (take precedence over harness-level).
-    pub prompts: Option<PipelinePromptConfig>,
+    /// Per-workflow prompt overrides (take precedence over harness-level).
+    pub prompts: Option<WorkflowPromptConfig>,
 }
 
-/// Per-pipeline prompt overrides.
+/// Per-workflow prompt overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PipelinePromptConfig {
+pub struct WorkflowPromptConfig {
     pub code_review: Option<String>,
     pub review_feedback: Option<String>,
     pub pr_description: Option<String>,
@@ -202,9 +204,9 @@ pub struct PipelinePromptConfig {
 // GitHub trigger sub-configs
 // ---------------------------------------------------------------------------
 
-/// Trigger pipeline runs from open GitHub Issues.
+/// Trigger workflow runs from open GitHub Issues.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GitHubIssuesPipelineConfig {
+pub struct GitHubIssuesWorkflowConfig {
     /// `owner/repo` — falls back to `HarnessConfig::target_repo` when absent.
     pub repo: Option<String>,
     /// Only process issues assigned to these users; empty = no filter.
@@ -215,9 +217,9 @@ pub struct GitHubIssuesPipelineConfig {
     pub limit: Option<usize>,
 }
 
-/// Trigger pipeline runs from open GitHub Pull Requests.
+/// Trigger workflow runs from open GitHub Pull Requests.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GitHubPRsPipelineConfig {
+pub struct GitHubPRsWorkflowConfig {
     /// `owner/repo`.
     pub repo: Option<String>,
     /// `gh pr list --search` expression.
@@ -226,9 +228,9 @@ pub struct GitHubPRsPipelineConfig {
     pub limit: Option<usize>,
 }
 
-/// Trigger pipeline runs from review comments on GitHub Pull Requests.
+/// Trigger workflow runs from review comments on GitHub Pull Requests.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GitHubPRResponsePipelineConfig {
+pub struct GitHubPRResponseWorkflowConfig {
     /// `owner/repo`.
     pub repo: Option<String>,
     /// `gh pr list --search` expression.
@@ -269,7 +271,7 @@ pub struct AgentLoopConfig {
     pub max_retries: Option<usize>,
     /// Base back-off delay in milliseconds between retries.
     pub backoff_ms: Option<u64>,
-    /// Maximum reviewer → agent feedback rounds before the pipeline fails.
+    /// Maximum reviewer → agent feedback rounds before the workflow fails.
     pub max_review_rounds: Option<usize>,
     /// Maximum inner reasoning iterations passed to the technique.
     pub max_iterations: Option<usize>,
@@ -324,7 +326,7 @@ pub struct PullRequestConfig {
 // Retry
 // ---------------------------------------------------------------------------
 
-/// Retry policy applied at the pipeline level.
+/// Retry policy applied at the workflow level.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetryConfig {
     /// Total attempts (initial + retries).
@@ -346,7 +348,7 @@ mod tests {
         let cfg = HarnessConfig::default();
         assert_eq!(cfg.provider, "");
         assert_eq!(cfg.model, "");
-        assert!(cfg.pipelines.is_empty());
+        assert!(cfg.workflows.is_empty());
     }
 
     #[test]
@@ -384,16 +386,146 @@ memory_window = 5
         assert_eq!(refl.max_trials, Some(3));
         assert_eq!(refl.memory_window, Some(5));
 
-        // pipelines are skipped — must stay empty after deserialisation
-        assert!(cfg.pipelines.is_empty());
+        // No workflows defined — defaults to empty
+        assert!(cfg.workflows.is_empty());
     }
 
     #[test]
-    fn pipeline_config_default() {
-        let pc = PipelineConfig::default();
+    fn workflow_config_default() {
+        let pc = WorkflowConfig::default();
         assert_eq!(pc.name, "");
         assert_eq!(pc.schedule, "");
         assert!(pc.github_issues.is_none());
+    }
+
+    #[test]
+    fn workflow_config_toml_roundtrip() {
+        let toml_src = r#"
+provider = "anthropic"
+model = "claude-opus-4-6"
+
+[[workflows]]
+name = "issue-autofix"
+schedule = "0 */5 * * * *"
+
+[workflows.github_issues]
+repo = "owner/repo"
+labels = ["bug"]
+assignees = ["@me"]
+limit = 3
+
+[workflows.agent_loop]
+technique = "claude-loop"
+max_retries = 1
+max_review_rounds = 2
+
+[workflows.agent_loop.external_agent]
+timeout_secs = 300
+
+[workflows.workspace]
+base_branch = "main"
+branch_prefix = "harness/issue-"
+
+[workflows.pull_request]
+draft = false
+labels = ["harness", "bug-fix"]
+
+[workflows.retry]
+max_attempts = 2
+backoff_ms = 10000
+
+[[workflows]]
+name = "pr-reviewer"
+schedule = "*/30 * * * *"
+
+[workflows.github_prs]
+limit = 5
+
+[workflows.agent_loop]
+technique = "claude-loop"
+"#;
+        let cfg: HarnessConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.workflows.len(), 2);
+
+        // First workflow
+        let p0 = &cfg.workflows[0];
+        assert_eq!(p0.name, "issue-autofix");
+        assert_eq!(p0.schedule, "0 */5 * * * *");
+        assert_eq!(p0.agent_loop.technique, "claude-loop");
+        assert_eq!(p0.agent_loop.max_retries, Some(1));
+        assert_eq!(p0.agent_loop.max_review_rounds, Some(2));
+        assert_eq!(
+            p0.agent_loop.external_agent.as_ref().unwrap().timeout_secs,
+            Some(300)
+        );
+
+        let gi = p0.github_issues.as_ref().unwrap();
+        assert_eq!(gi.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(gi.labels.as_ref().unwrap(), &["bug"]);
+        assert_eq!(gi.assignees.as_ref().unwrap(), &["@me"]);
+        assert_eq!(gi.limit, Some(3));
+
+        let ws = p0.workspace.as_ref().unwrap();
+        assert_eq!(ws.base_branch.as_deref(), Some("main"));
+        assert_eq!(ws.branch_prefix.as_deref(), Some("harness/issue-"));
+
+        let pr = p0.pull_request.as_ref().unwrap();
+        assert_eq!(pr.draft, Some(false));
+        assert_eq!(pr.labels.as_ref().unwrap(), &["harness", "bug-fix"]);
+
+        let retry = p0.retry.as_ref().unwrap();
+        assert_eq!(retry.max_attempts, Some(2));
+        assert_eq!(retry.backoff_ms, Some(10000));
+
+        // Second workflow
+        let p1 = &cfg.workflows[1];
+        assert_eq!(p1.name, "pr-reviewer");
+        assert_eq!(p1.schedule, "*/30 * * * *");
+        assert_eq!(p1.agent_loop.technique, "claude-loop");
+        assert!(p1.github_prs.is_some());
+        assert_eq!(p1.github_prs.as_ref().unwrap().limit, Some(5));
+    }
+
+    #[test]
+    fn workflow_config_minimal_toml() {
+        // Workflow with only name/schedule and defaulted agent_loop
+        let toml_src = r#"
+provider = "test"
+model = "test"
+
+[[workflows]]
+name = "minimal"
+schedule = "* * * * *"
+"#;
+        let cfg: HarnessConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.workflows.len(), 1);
+        assert_eq!(cfg.workflows[0].name, "minimal");
+        assert_eq!(cfg.workflows[0].agent_loop.technique, "");
+        assert!(cfg.workflows[0].github_issues.is_none());
+        assert!(cfg.workflows[0].workspace.is_none());
+    }
+
+    #[test]
+    fn workflow_config_pr_response_toml() {
+        let toml_src = r#"
+provider = "test"
+model = "test"
+
+[[workflows]]
+name = "pr-responder"
+schedule = "*/15 * * * *"
+
+[workflows.github_pr_responses]
+limit = 5
+
+[workflows.agent_loop]
+technique = "claude-loop"
+"#;
+        let cfg: HarnessConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.workflows.len(), 1);
+        let p = &cfg.workflows[0];
+        assert!(p.github_pr_responses.is_some());
+        assert_eq!(p.github_pr_responses.as_ref().unwrap().limit, Some(5));
     }
 
     #[test]
@@ -404,7 +536,7 @@ assignees = ["alice", "bob"]
 labels = ["bug"]
 limit = 5
 "#;
-        let cfg: GitHubIssuesPipelineConfig = toml::from_str(toml_src).unwrap();
+        let cfg: GitHubIssuesWorkflowConfig = toml::from_str(toml_src).unwrap();
         assert_eq!(cfg.repo.as_deref(), Some("owner/repo"));
         assert_eq!(cfg.assignees.as_ref().unwrap().len(), 2);
         assert_eq!(cfg.limit, Some(5));

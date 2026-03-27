@@ -30,7 +30,8 @@ pub enum Aggregation {
 }
 
 impl Aggregation {
-    pub fn from_str(s: &str) -> Self {
+    /// Parse an aggregation strategy from a string.
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "majority" => Self::Majority,
             _ => Self::Judge,
@@ -60,7 +61,7 @@ pub async fn run_multi_agent_debate(opts: Options) -> Result<RunResult> {
     let aggregation = opts
         .aggregation
         .as_deref()
-        .map(Aggregation::from_str)
+        .map(Aggregation::parse)
         .unwrap_or(Aggregation::Judge);
 
     let mut trajectory: Vec<TrajectoryStep> = Vec::new();
@@ -258,10 +259,10 @@ mod tests {
 
     #[test]
     fn test_aggregation_from_str() {
-        assert_eq!(Aggregation::from_str("judge"), Aggregation::Judge);
-        assert_eq!(Aggregation::from_str("majority"), Aggregation::Majority);
-        assert_eq!(Aggregation::from_str("MAJORITY"), Aggregation::Majority);
-        assert_eq!(Aggregation::from_str("unknown"), Aggregation::Judge);
+        assert_eq!(Aggregation::parse("judge"), Aggregation::Judge);
+        assert_eq!(Aggregation::parse("majority"), Aggregation::Majority);
+        assert_eq!(Aggregation::parse("MAJORITY"), Aggregation::Majority);
+        assert_eq!(Aggregation::parse("unknown"), Aggregation::Judge);
     }
 
     #[test]

@@ -266,7 +266,7 @@ async fn produce_reflection(
     harness_root: Option<&std::path::PathBuf>,
 ) -> Result<String> {
     let loader = harness_root
-        .map(|r| PromptLoader::new(r))
+        .map(PromptLoader::new)
         .unwrap_or_else(|| PromptLoader::new("."));
     let mut vars = HashMap::new();
     vars.insert("task".to_string(), task.to_string());

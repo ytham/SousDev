@@ -17,7 +17,7 @@ with AI agents that edit code, run tests, open PRs, and post review comments.
 **Tagline:** "Prep, review, and plate your PRs automatically."
 
 Two layers:
-1. **Pipelines** (primary) — four cron-scheduled workflow modes
+1. **Workflows** (primary) — four cron-scheduled workflow modes
 2. **Techniques** (secondary) — eight standalone agentic reasoning algorithms
 
 ---
@@ -26,8 +26,8 @@ Two layers:
 
 | Binary | Required by | Purpose |
 |---|---|---|
-| `git` | all pipeline modes | clone, branch, commit, push, diff |
-| `gh` (GitHub CLI) | all pipeline modes | issue/PR list, create, comment, API calls |
+| `git` | all workflow modes | clone, branch, commit, push, diff |
+| `gh` (GitHub CLI) | all workflow modes | issue/PR list, create, comment, API calls |
 | `claude` | `claude-loop` technique | AI agent CLI (`--print --dangerously-skip-permissions`) |
 | `codex` | `codex-loop` technique | AI agent CLI (`--quiet`) |
 | `gemini` | `gemini-loop` technique | AI agent CLI (`--yolo`) |
@@ -65,9 +65,9 @@ sousdev/
 │   └── reflexion-reflect.md         Reflexion self-reflection prompt
 └── src/
     ├── main.rs                      CLI entry point (clap). Only place process::exit() allowed.
-    ├── lib.rs                       Re-exports: types, utils, providers, tools, pipelines, techniques
+    ├── lib.rs                       Re-exports: types, utils, providers, tools, workflows, techniques
     ├── types/
-    │   ├── config.rs                HarnessConfig, PipelineConfig, all sub-configs
+    │   ├── config.rs                HarnessConfig, WorkflowConfig, all sub-configs
     │   └── technique.rs             RunResult, TrajectoryStep, StepType
     ├── utils/
     │   ├── logger.rs                Logger (wraps tracing with prefix)
@@ -81,10 +81,10 @@ sousdev/
     ├── tools/
     │   ├── registry.rs              ToolRegistry, Tool, ToolExecutor trait
     │   └── built_ins.rs             readFile, writeFile, shell
-    ├── pipelines/
-    │   ├── pipeline.rs              ParsedTask, make_skipped_result
+    ├── workflows/
+    │   ├── workflow.rs              ParsedTask, make_skipped_result
     │   ├── stage.rs                 Stage trait, StageContext, ResolvedPrompts
-    │   ├── executor.rs              PipelineExecutor — all 4 modes
+    │   ├── executor.rs              WorkflowExecutor — all 4 modes
     │   ├── cron_runner.rs           tokio-cron-scheduler daemon
     │   ├── workspace.rs             WorkspaceManager (clone, checkout, reset, teardown)
     │   ├── github_issues.rs         fetch_github_issues, comment, close, detect_repo
@@ -92,7 +92,7 @@ sousdev/
     │   ├── stores.rs                RunStore + HandledIssueStore + PrReviewStore + PrResponseStore
     │   └── stages/
     │       ├── trigger.rs           Shell command → stdout
-    │       ├── parse.rs             stdout → ParsedTask | SkipPipelineSignal
+    │       ├── parse.rs             stdout → ParsedTask | SkipWorkflowSignal
     │       ├── agent_loop.rs        Retry loop with resume context
     │       ├── external_agent_loop.rs  Spawn agent CLIs, stream-json parser
     │       ├── reviewer.rs          Claude review + LLM-judge strategies
@@ -115,7 +115,7 @@ sousdev/
 
 ---
 
-## The four pipeline modes
+## The four workflow modes
 
 ### Mode routing (executor)
 
@@ -161,7 +161,7 @@ PullRequestStage
   → gh pr list --head <branch> (skip if PR exists)
   → gh pr create --title ... --body-file <tmpfile>
 
-HandledIssueStore.mark_handled(pipeline, issue_number, record)
+HandledIssueStore.mark_handled(workflow, issue_number, record)
   — ONLY when success && pr_url.is_some()
 ```
 
@@ -181,7 +181,7 @@ fetchGitHubPRs(search="review-requested:@me is:open [extra]", limit)
 detectGitHubLogin() → cached as reviewer_login
 
 for each PR:
-  PrReviewStore.get_record(pipeline, pr_number)
+  PrReviewStore.get_record(workflow, pr_number)
     no record       → review
     different SHA    → review (new commits)
     same SHA         → fetch timeline comments after lastCommentId
@@ -201,7 +201,7 @@ PrReviewPosterStage
   → post inline comments via gh api
   → post summary via gh pr comment
 
-PrReviewStore.mark_reviewed(pipeline, record)
+PrReviewStore.mark_reviewed(workflow, record)
   lastCommentId = max(id) across all timeline comments
 ```
 
@@ -219,7 +219,7 @@ fetchGitHubPRs(search="author:@me [extra]", limit)
 detectGitHubLogin() → cached
 
 for each PR:
-  PrResponseStore.get_record(pipeline, pr_number)
+  PrResponseStore.get_record(workflow, pr_number)
   fetchInlineReviewComments(repo, pr, afterId=record.lastInlineCommentId)
     → only root comments (in_reply_to_id is None)
   fetchPRComments(repo, pr, afterId=record.lastTimelineCommentId)
@@ -236,7 +236,7 @@ PrCommentResponderStage
   → for each inline comment: reply_to_inline_comment(repo, comment_id, body)
   → post_summary_comment(repo, pr_number, summary)
 
-PrResponseStore.mark_responded(pipeline, record)
+PrResponseStore.mark_responded(workflow, record)
   lastInlineCommentId = max(id) across all inline root comments
   lastTimelineCommentId = max(id) across all timeline comments
 ```
@@ -247,7 +247,7 @@ PrResponseStore.mark_responded(pipeline, record)
 
 ```
 TriggerStage  → sh -c <command>, store stdout in metadata
-ParseStage    → call parser(stdout) → ParsedTask | None (→ SkipPipelineSignal)
+ParseStage    → call parser(stdout) → ParsedTask | None (→ SkipWorkflowSignal)
 WorkspaceManager.setup(run_id, None)
 AgentLoopStage → ReviewFeedbackLoopStage → PrDescriptionStage → PullRequestStage
 ```
@@ -270,7 +270,7 @@ Only `Err` for unrecoverable errors.
 ### StageContext — all fields
 
 ```
-config: Arc<PipelineConfig>
+config: Arc<WorkflowConfig>
 provider: Arc<dyn LLMProvider>
 registry: Arc<ToolRegistry>
 workspace_dir: PathBuf
@@ -315,7 +315,7 @@ pr_comment_response, react_system, reflexion_system, reflexion_reflect
 
 Resolution precedence (low → high):
 ```
-{harness_root}/prompts/{name}.md  →  HarnessConfig.prompts.*  →  PipelineConfig.prompts.*
+{harness_root}/prompts/{name}.md  →  HarnessConfig.prompts.*  →  WorkflowConfig.prompts.*
 ```
 
 ---
@@ -343,9 +343,9 @@ task: String, context: Option<String>, metadata: Option<HashMap<String, Value>>
 ```
 `full_text()` → task + "\n\nAdditional context:\n{context}" if present
 
-### PipelineResult
+### WorkflowResult
 ```
-pipeline_name, run_id, started_at, completed_at: String
+workflow_name, run_id, started_at, completed_at: String
 success, skipped: bool
 pr_url, pr_title, error: Option<String>
 pr_number, issue_number: Option<u64>
@@ -675,21 +675,21 @@ Regex: `r"^[\w.\-]+/[\w.\-]+$"` (simple), `r"github\.com[:/]([\w.\-]+/[\w.\-]+?)
 All JSON, gitignored. Written with `serde_json::to_string_pretty`. Atomic read-full → modify → write-full.
 
 ### `.sousdev-runs.json`
-JSON array: `[PipelineResult, ...]`
+JSON array: `[WorkflowResult, ...]`
 
 ### `.sousdev-handled-issues.json`
 ```json
-{ "<pipeline_name>": { "<issue_number>": HandledIssueRecord } }
+{ "<workflow_name>": { "<issue_number>": HandledIssueRecord } }
 ```
 
 ### `.sousdev-reviewed-prs.json`
 ```json
-{ "<pipeline_name>": { "<pr_number>": PrReviewRecord } }
+{ "<workflow_name>": { "<pr_number>": PrReviewRecord } }
 ```
 
 ### `.sousdev-pr-responses.json`
 ```json
-{ "<pipeline_name>": { "<pr_number>": PrResponseRecord } }
+{ "<workflow_name>": { "<pr_number>": PrResponseRecord } }
 ```
 
 ---
@@ -900,23 +900,23 @@ git_method: Option<String>        // "ssh" | "https" (default "https")
 logging: Option<LoggingConfig>    // { level?, pretty? }
 prompts: Option<PromptConfig>     // 8 optional string fields
 techniques: Option<TechniquesConfig>  // 8 optional technique config blocks
-pipelines: Vec<PipelineConfig>    // #[serde(skip)] — set programmatically
+workflows: Vec<WorkflowConfig>    // #[serde(skip)] — set programmatically
 ```
 
-## PipelineConfig — full type
+## WorkflowConfig — full type
 
 ```
 name: String
 schedule: String                  // cron expression
-github_pr_responses: Option<GitHubPRResponsePipelineConfig>
-github_prs: Option<GitHubPRsPipelineConfig>
-github_issues: Option<GitHubIssuesPipelineConfig>
+github_pr_responses: Option<GitHubPRResponseWorkflowConfig>
+github_prs: Option<GitHubPRsWorkflowConfig>
+github_issues: Option<GitHubIssuesWorkflowConfig>
 trigger: Option<TriggerConfig>
 agent_loop: AgentLoopConfig       // { technique, external_agent?, max_retries?, backoff_ms?, max_review_rounds?, max_iterations? }
 workspace: Option<WorkspaceConfig>  // { repo_url?, base_branch?, branch_prefix?, workspaces_dir? }
 pull_request: Option<PullRequestConfig>  // { title?, body?, draft?, labels? }
 retry: Option<RetryConfig>        // { max_attempts?, backoff_ms? }
-prompts: Option<PipelinePromptConfig>  // { code_review?, review_feedback?, pr_description? }
+prompts: Option<WorkflowPromptConfig>  // { code_review?, review_feedback?, pr_description? }
 ```
 
 ---
@@ -924,8 +924,8 @@ prompts: Option<PipelinePromptConfig>  // { code_review?, review_feedback?, pr_d
 ## CLI commands
 
 ```
-sousdev list                              list configured pipelines
-sousdev workflow <name> [--no-workspace]  run pipeline immediately
+sousdev list                              list configured workflows
+sousdev workflow <name> [--no-workspace]  run workflow immediately
 sousdev start [--no-workspace]            start cron daemon
 sousdev status [<name>] [--limit N]       show run history
 sousdev logs <name> <run-id-prefix>       full trajectory for a run
@@ -941,7 +941,7 @@ Global: `--config <path>`, `--help`, `--version`
 ## Cron runner
 
 ```
-for each pipeline:
+for each workflow:
   schedule cron job via tokio_cron_scheduler
   on tick:
     if overlap_guard locked: skip
@@ -949,7 +949,7 @@ for each pipeline:
 graceful shutdown: tokio::signal::ctrl_c → sched.shutdown()
 ```
 
-Overlap guard: `Arc<Mutex<bool>>` per pipeline name.
+Overlap guard: `Arc<Mutex<bool>>` per workflow name.
 
 ---
 

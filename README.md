@@ -79,11 +79,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 cp config.toml my-project/config.toml
 # Edit target_repo, git_method, etc.
 
-# List configured pipelines
+# List configured workflows
 cargo run --release -- list
 
-# Run a pipeline once (no cron)
-cargo run --release -- workflow github-bug-autofix
+# Run a workflow once (no cron)
+cargo run --release -- workflow github-issue-autofix
 
 # Start the cron daemon
 cargo run --release -- start
@@ -112,17 +112,17 @@ max_iterations = 10
 max_trials = 3
 ```
 
-Pipelines are configured programmatically in Rust because they use closures (`buildTask`, `filter`, `parser`) that can't be serialised to TOML:
+Workflows are configured programmatically in Rust because they use closures (`buildTask`, `filter`, `parser`) that can't be serialised to TOML:
 
 ```rust
 use sousdev::types::config::*;
-use sousdev::pipelines::pipeline::ParsedTask;
+use sousdev::workflows::workflow::ParsedTask;
 
-let pipeline = PipelineConfig {
-    name: "github-bug-autofix".into(),
+let workflow = WorkflowConfig {
+    name: "github-issue-autofix".into(),
     schedule: "0 * * * *".into(), // every hour
 
-    github_issues: Some(GitHubIssuesPipelineConfig {
+    github_issues: Some(GitHubIssuesWorkflowConfig {
         assignees: Some(vec!["@me".into()]),
         labels: Some(vec!["bug".into()]),
         limit: Some(3),
@@ -160,7 +160,7 @@ let pipeline = PipelineConfig {
 ## CLI commands
 
 ```bash
-sousdev list                              # list configured pipelines
+sousdev list                              # list configured workflows
 sousdev workflow <name>                   # run immediately (ignores cron)
 sousdev workflow <name> --no-workspace    # run in CWD, skip git clone
 sousdev start                             # start cron daemon
@@ -176,7 +176,7 @@ sousdev technique <name>                  # details + paper citation
 
 ## Standalone techniques
 
-Eight agentic reasoning algorithms, usable independently or inside pipelines:
+Eight agentic reasoning algorithms, usable independently or inside workflows:
 
 | Technique | What it does | Paper |
 |---|---|---|
@@ -218,19 +218,19 @@ All state and logs live under `output/` (gitignored). SousDev manages this autom
 
 ```
 output/
-├── runs.json                    Run history for all pipelines
-├── handled-issues.json          Issues processed by bug-autofix pipelines
-├── reviewed-prs.json            PRs reviewed by reviewer pipelines
-├── pr-responses.json            PR comment cursors for responder pipelines
+├── runs.json                    Run history for all workflows
+├── handled-issues.json          Issues processed by issue-autofix workflows
+├── reviewed-prs.json            PRs reviewed by reviewer workflows
+├── pr-responses.json            PR comment cursors for responder workflows
 └── logs/
-    ├── github-bug-autofix/      Per-run structured log files
+    ├── github-issue-autofix/      Per-run structured log files
     │   ├── <run-id>.json
     │   └── ...
     ├── github-pr-reviewer/
     └── github-pr-responder/
 ```
 
-Each run log is a JSON file with a header (pipeline name, run ID, status) and a timestamped
+Each run log is a JSON file with a header (workflow name, run ID, status) and a timestamped
 `entries` array — designed for a TUI with scrollable per-run views and status tabs.
 
 ---
@@ -254,15 +254,15 @@ sousdev/
     ├── utils/                   ← logger, prompt loader, config loader
     ├── providers/               ← LLMProvider trait + Anthropic/OpenAI/Ollama
     ├── tools/                   ← ToolRegistry + read_file/write_file/shell
-    ├── pipelines/
-    │   ├── executor.rs          ← PipelineExecutor (all 4 modes)
+    ├── workflows/
+    │   ├── executor.rs          ← WorkflowExecutor (all 4 modes)
     │   ├── github_issues.rs     ← fetch issues, comment, close
     │   ├── github_prs.rs        ← fetch PRs, post comments, reply
     │   ├── stores.rs            ← RunStore + 3 deduplication stores (in output/)
     │   ├── workspace.rs         ← WorkspaceManager (clone, checkout, reset)
-    │   ├── workflow_log.rs      ← per-run structured logs (output/logs/<pipeline>/<run>.json)
+    │   ├── workflow_log.rs      ← per-run structured logs (output/logs/<workflow>/<run>.json)
     │   ├── cron_runner.rs       ← tokio-cron-scheduler daemon
-    │   └── stages/              ← all 11 pipeline stages
+    │   └── stages/              ← all 11 workflow stages
     └── techniques/              ← 8 standalone reasoning algorithms
 ```
 

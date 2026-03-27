@@ -24,7 +24,7 @@ pub fn init_logger(level: &str, pretty: bool) {
 
 /// A lightweight structured logger that tags every message with a name prefix.
 ///
-/// Wrap a pipeline or stage name once at construction time and call the
+/// Wrap a workflow or stage name once at construction time and call the
 /// convenience methods throughout the component's lifetime.
 ///
 /// All output goes through [`tracing`] so it is captured by the global

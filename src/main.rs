@@ -4,12 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use sousdev::{
-    pipelines::{
+    workflows::{
         cron_runner::CronRunner,
-        executor::{ExecutorOptions, PipelineExecutor},
-        stores::{PipelineResult, RunStore},
+        executor::{ExecutorOptions, WorkflowExecutor},
+        stores::{WorkflowResult, RunStore},
     },
     providers::resolve_provider,
+    tui::events::TuiEventSender,
     techniques::{
         critique_loop::{run_critique_loop, CritiqueLoopOptions},
         multi_agent_debate::{run_multi_agent_debate, Options as MultiAgentDebateOptions},
@@ -44,28 +45,28 @@ struct Cli {
     config: Option<PathBuf>,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List all configured pipelines.
+    /// List all configured workflows.
     List,
 
-    /// Run a pipeline immediately (ignores cron schedule).
+    /// Run a workflow immediately (ignores cron schedule).
     Workflow {
         name: String,
         #[arg(long, help = "Skip workspace cloning, run in CWD")]
         no_workspace: bool,
     },
 
-    /// Start the cron daemon for all configured pipelines.
+    /// Start the cron daemon for all configured workflows.
     Start {
-        #[arg(long, help = "Skip workspace cloning for all pipelines")]
+        #[arg(long, help = "Skip workspace cloning for all workflows")]
         no_workspace: bool,
     },
 
-    /// Show recent pipeline run history.
+    /// Show recent workflow run history.
     Status {
         name: Option<String>,
         #[arg(
@@ -77,47 +78,51 @@ enum Commands {
         limit: usize,
     },
 
-    /// Show full trajectory for a specific pipeline run.
+    /// Show full trajectory for a specific workflow run.
     Logs { name: String, run_id: String },
 
     /// Run a technique directly against a task.
-    Run {
-        technique: String,
-        #[arg(short, long)]
-        task: String,
-        #[arg(long)]
-        max_iterations: Option<usize>,
-        #[arg(long)]
-        max_trials: Option<usize>,
-        #[arg(long)]
-        samples: Option<usize>,
-        #[arg(long)]
-        temperature: Option<f64>,
-        #[arg(long)]
-        branching: Option<usize>,
-        #[arg(long)]
-        strategy: Option<String>,
-        #[arg(long)]
-        max_depth: Option<usize>,
-        #[arg(long)]
-        max_rounds: Option<usize>,
-        #[arg(long)]
-        num_agents: Option<usize>,
-        #[arg(long)]
-        rounds: Option<usize>,
-        #[arg(long)]
-        aggregation: Option<String>,
-        #[arg(long)]
-        max_points: Option<usize>,
-        #[arg(long)]
-        no_parallel: bool,
-    },
+    Run(Box<RunArgs>),
 
     /// List all available standalone techniques.
     Techniques,
 
     /// Show details for a specific technique.
     Technique { name: String },
+}
+
+/// Arguments for the `run` subcommand, boxed to reduce enum size.
+#[derive(clap::Args)]
+struct RunArgs {
+    technique: String,
+    #[arg(short, long)]
+    task: String,
+    #[arg(long)]
+    max_iterations: Option<usize>,
+    #[arg(long)]
+    max_trials: Option<usize>,
+    #[arg(long)]
+    samples: Option<usize>,
+    #[arg(long)]
+    temperature: Option<f64>,
+    #[arg(long)]
+    branching: Option<usize>,
+    #[arg(long)]
+    strategy: Option<String>,
+    #[arg(long)]
+    max_depth: Option<usize>,
+    #[arg(long)]
+    max_rounds: Option<usize>,
+    #[arg(long)]
+    num_agents: Option<usize>,
+    #[arg(long)]
+    rounds: Option<usize>,
+    #[arg(long)]
+    aggregation: Option<String>,
+    #[arg(long)]
+    max_points: Option<usize>,
+    #[arg(long)]
+    no_parallel: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +182,7 @@ async fn main() -> Result<()> {
 
     // Technique info commands need no config.
     match &cli.command {
-        Commands::Techniques => {
+        Some(Commands::Techniques) => {
             println!("\nAvailable techniques:\n");
             for (name, desc, _paper) in TECHNIQUES {
                 println!("  {:<26} {}", name, desc);
@@ -186,7 +191,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
 
-        Commands::Technique { name } => {
+        Some(Commands::Technique { name }) => {
             if let Some((_, desc, paper)) = TECHNIQUES.iter().find(|(n, _, _)| *n == name.as_str())
             {
                 println!("\nTechnique: {}", name);
@@ -212,31 +217,41 @@ async fn main() -> Result<()> {
             .await
             .map_err(|e| { eprintln!("Failed to load config:\n{}", e); e })?;
 
-    init_logger(
-        harness_config
-            .logging
-            .as_ref()
-            .and_then(|l| l.level.as_deref())
-            .unwrap_or("info"),
-        harness_config
-            .logging
-            .as_ref()
-            .and_then(|l| l.pretty)
-            .unwrap_or(false),
-    );
+    // Only initialise the tracing-to-stdout logger for non-TUI commands.
+    // The TUI installs a no-op subscriber and receives log data via its
+    // event channel instead.
+    if cli.command.is_some() {
+        init_logger(
+            harness_config
+                .logging
+                .as_ref()
+                .and_then(|l| l.level.as_deref())
+                .unwrap_or("info"),
+            harness_config
+                .logging
+                .as_ref()
+                .and_then(|l| l.pretty)
+                .unwrap_or(false),
+        );
+    }
 
     match cli.command {
+        // ── TUI (default — no subcommand) ─────────────────────────────────────
+        None => {
+            sousdev::tui::run(harness_config, false).await?;
+        }
+
         // ── List ──────────────────────────────────────────────────────────────
-        Commands::List => {
-            let pipelines = &harness_config.pipelines;
-            if pipelines.is_empty() {
+        Some(Commands::List) => {
+            let workflows = &harness_config.workflows;
+            if workflows.is_empty() {
                 println!(
-                    "\nNo pipelines configured. Add a `pipelines` array to config.toml.\n"
+                    "\nNo workflows configured. Add a `[[workflows]]` section to config.toml.\n"
                 );
                 return Ok(());
             }
-            println!("\nConfigured pipelines ({}):\n", pipelines.len());
-            for p in pipelines {
+            println!("\nConfigured workflows ({}):\n", workflows.len());
+            for p in workflows {
                 println!("  {:<30} schedule: {}", p.name, p.schedule);
                 println!("  {:<30} technique: {}", "", p.agent_loop.technique);
                 println!();
@@ -244,19 +259,19 @@ async fn main() -> Result<()> {
         }
 
         // ── Workflow ──────────────────────────────────────────────────────────
-        Commands::Workflow { name, no_workspace } => {
-            let pipeline = harness_config
-                .pipelines
+        Some(Commands::Workflow { name, no_workspace }) => {
+            let workflow = harness_config
+                .workflows
                 .iter()
                 .find(|p| p.name == name)
                 .ok_or_else(|| {
                     let names: Vec<_> = harness_config
-                        .pipelines
+                        .workflows
                         .iter()
                         .map(|p| p.name.as_str())
                         .collect();
                     anyhow::anyhow!(
-                        "Pipeline \"{}\" not found. Available: {}",
+                        "Workflow \"{}\" not found. Available: {}",
                         name,
                         names.join(", ")
                     )
@@ -266,10 +281,10 @@ async fn main() -> Result<()> {
             let provider = resolve_provider(&harness_config)?;
             let store = Arc::new(RunStore::new(&harness_root));
 
-            println!("\nRunning pipeline \"{}\"…\n", name);
+            println!("\nRunning workflow \"{}\"…\n", name);
 
-            let executor = PipelineExecutor::new(
-                pipeline,
+            let executor = WorkflowExecutor::new(
+                workflow,
                 ExecutorOptions {
                     provider,
                     registry: Arc::new(ToolRegistry::new()),
@@ -279,22 +294,23 @@ async fn main() -> Result<()> {
                     git_method: harness_config.git_method.clone(),
                     harness_root: Some(harness_root.clone()),
                     prompts: harness_config.prompts.clone(),
+                    tui_tx: TuiEventSender::noop(),
                 },
             );
 
             let result = executor.run().await?;
-            print_pipeline_result(&result);
+            print_workflow_result(&result);
             std::process::exit(if result.success { 0 } else { 1 });
         }
 
         // ── Start ─────────────────────────────────────────────────────────────
-        Commands::Start { no_workspace } => {
+        Some(Commands::Start { no_workspace }) => {
             let runner = CronRunner::new(harness_config, no_workspace);
             runner.start().await?;
         }
 
         // ── Status ────────────────────────────────────────────────────────────
-        Commands::Status { name, limit } => {
+        Some(Commands::Status { name, limit }) => {
             let store = RunStore::new(&harness_root);
             let history = store.get_history(name.as_deref(), limit).await?;
             if history.is_empty() {
@@ -302,13 +318,13 @@ async fn main() -> Result<()> {
                     .as_deref()
                     .map(|n| format!(" for \"{}\"", n))
                     .unwrap_or_default();
-                println!("\nNo runs found{}. Run a pipeline first.\n", qualifier);
+                println!("\nNo runs found{}. Run a workflow first.\n", qualifier);
                 return Ok(());
             }
-            println!("\nPipeline run history ({} runs):\n", history.len());
+            println!("\nWorkflow run history ({} runs):\n", history.len());
             println!(
                 "{:<28} {:<10} {:<22} {:<10} PR",
-                "PIPELINE", "RUN ID", "STARTED", "STATUS"
+                "WORKFLOW", "RUN ID", "STARTED", "STATUS"
             );
             println!("{}", "─".repeat(90));
             for r in history.iter().rev() {
@@ -324,14 +340,14 @@ async fn main() -> Result<()> {
                 let pr = r.pr_url.as_deref().unwrap_or("—");
                 println!(
                     "{:<28} {:<10} {:<22} {:<10} {}",
-                    r.pipeline_name, short_id, started, status, pr
+                    r.workflow_name, short_id, started, status, pr
                 );
             }
             println!();
         }
 
         // ── Logs ──────────────────────────────────────────────────────────────
-        Commands::Logs { name, run_id } => {
+        Some(Commands::Logs { name, run_id }) => {
             let store = RunStore::new(&harness_root);
             let history = store.get_history(Some(&name), 200).await?;
             let run = history
@@ -339,13 +355,13 @@ async fn main() -> Result<()> {
                 .find(|r| r.run_id.starts_with(&run_id))
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "No run found for pipeline \"{}\" with ID starting \"{}\"",
+                        "No run found for workflow \"{}\" with ID starting \"{}\"",
                         name,
                         run_id
                     )
                 })?;
 
-            println!("\nPipeline: {}", run.pipeline_name);
+            println!("\nWorkflow: {}", run.workflow_name);
             println!("Run ID:   {}", run.run_id);
             println!("Started:  {}", run.started_at);
             println!(
@@ -380,23 +396,24 @@ async fn main() -> Result<()> {
         }
 
         // ── Run ───────────────────────────────────────────────────────────────
-        Commands::Run {
-            technique,
-            task,
-            max_iterations,
-            max_trials,
-            samples,
-            temperature,
-            branching,
-            strategy,
-            max_depth,
-            max_rounds,
-            num_agents,
-            rounds,
-            aggregation,
-            max_points,
-            no_parallel,
-        } => {
+        Some(Commands::Run(args)) => {
+            let RunArgs {
+                technique,
+                task,
+                max_iterations,
+                max_trials,
+                samples,
+                temperature,
+                branching,
+                strategy,
+                max_depth,
+                max_rounds,
+                num_agents,
+                rounds,
+                aggregation,
+                max_points,
+                no_parallel,
+            } = *args;
             let provider = resolve_provider(&harness_config)?;
             let registry = Arc::new(ToolRegistry::new());
 
@@ -606,7 +623,7 @@ async fn main() -> Result<()> {
         }
 
         // Already handled above; unreachable here.
-        Commands::Techniques | Commands::Technique { .. } => unreachable!(),
+        Some(Commands::Techniques) | Some(Commands::Technique { .. }) => unreachable!(),
     }
 
     Ok(())
@@ -616,7 +633,7 @@ async fn main() -> Result<()> {
 // Display helpers
 // ---------------------------------------------------------------------------
 
-fn print_pipeline_result(result: &PipelineResult) {
+fn print_workflow_result(result: &WorkflowResult) {
     let sep = "─".repeat(60);
     let icon = if result.skipped {
         "⏭"
@@ -637,7 +654,7 @@ fn print_pipeline_result(result: &PipelineResult) {
     println!(
         "{} {} | {} | run {}",
         icon,
-        result.pipeline_name,
+        result.workflow_name,
         status,
         &result.run_id[..8.min(result.run_id.len())]
     );

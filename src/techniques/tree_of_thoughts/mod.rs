@@ -14,7 +14,7 @@
 //!   3. Prune children below `score_threshold`.
 //!   4. Keep the top-`branching` survivors as the new frontier (BFS) or
 //!      recurse into the best child immediately (DFS).
-//! Return the answer from the highest-scoring leaf.
+//!      Return the answer from the highest-scoring leaf.
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -169,7 +169,7 @@ async fn bfs_search(
             for child in children {
                 if child.score >= score_threshold {
                     // Track best leaf as we go.
-                    if best_leaf.as_ref().map_or(true, |b: &ThoughtNode| child.score > b.score) {
+                    if best_leaf.as_ref().is_none_or(|b: &ThoughtNode| child.score > b.score) {
                         best_leaf = Some(child.clone());
                     }
                     next_frontier.push(child);
@@ -250,7 +250,7 @@ async fn dfs_recurse(
         if child.score < score_threshold {
             continue;
         }
-        if best.as_ref().map_or(true, |b: &ThoughtNode| child.score > b.score) {
+        if best.as_ref().is_none_or(|b: &ThoughtNode| child.score > b.score) {
             *best = Some(child.clone());
         }
         // Use a Box to avoid recursive async – use a stack instead.

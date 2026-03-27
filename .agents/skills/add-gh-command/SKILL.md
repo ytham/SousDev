@@ -11,8 +11,8 @@ GitHub (e.g. fetching data, posting comments, creating resources).
 ## Steps
 
 1. **Decide which file** the function belongs in:
-   - Issue-related → `src/pipelines/github_issues.rs`
-   - PR-related → `src/pipelines/github_prs.rs`
+   - Issue-related → `src/workflows/github_issues.rs`
+   - PR-related → `src/workflows/github_prs.rs`
    - New resource type → consider a new `github_<resource>.rs` module
 
 2. **Write the function** following the established pattern:

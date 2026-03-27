@@ -5,7 +5,7 @@
 # The CLI auto-discovers this file by walking up from CWD.
 
 provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+model = "claude-opus-4-6"
 
 # The repository to operate on. Required when running standalone.
 # Accepts "owner/repo", "https://github.com/owner/repo.git", or
@@ -62,13 +62,91 @@ rounds = 2
 aggregation = "judge"
 
 # ---- Pipelines ----
-# Pipelines are configured programmatically in Rust (closures can't be
-# serialised to TOML). See the README for examples of how to define
-# pipelines in your main.rs or lib.rs.
-#
-# The four pipeline modes:
-#
+# Define one or more workflows as [[workflows]] sections.
+# Each workflow has a name, cron schedule, and one trigger mode:
 #   github_issues       — fetch assigned issues, fix them, open PRs
 #   github_prs          — review PRs where your review is requested
 #   github_pr_responses — address reviewer comments on your open PRs
-#   trigger + parser    — run a shell command, act on its output
+#   trigger             — run a shell command, act on its output
+
+# ── Issue autofix workflow ─────────────────────────────────────────────
+# Runs every hour. Fetches open issues assigned to you with the "bug"
+# label, clones the repo, runs Claude to fix the issue, self-reviews
+# the diff, and opens a pull request.
+
+[[workflows]]
+name = "issue-autofix"
+schedule = "0 0 * * * *"      # every hour (sec min hour day month weekday)
+
+[workflows.github_issues]
+# repo defaults to target_repo — omit unless targeting a different repo
+assignees = ["@me"]
+labels = ["bug"]
+limit = 3
+
+[workflows.agent_loop]
+technique = "claude-loop"
+max_retries = 1               # 2 total attempts
+max_review_rounds = 1         # 1 reviewer → agent feedback round
+
+[workflows.agent_loop.external_agent]
+timeout_secs = 300            # 5 minutes per agent invocation
+
+[workflows.workspace]
+base_branch = "main"
+branch_prefix = "harness/issue-"
+# workspaces_dir = "~/my-workspaces"  # default: ~/agent-harness/workspaces
+
+[workflows.pull_request]
+draft = false
+labels = ["harness", "bug-fix"]
+
+[workflows.retry]
+max_attempts = 2
+backoff_ms = 10000
+
+# ── PR reviewer workflow ───────────────────────────────────────────────
+# Runs every 30 minutes. Reviews PRs where your review has been
+# requested. Posts inline comments and a summary.
+#
+# Re-review triggers:
+#   - New commits pushed to the PR (head SHA changed)
+#   - A "@<your-login>" comment posted since the last review
+
+[[workflows]]
+name = "pr-reviewer"
+schedule = "0 */5 * * * *"
+
+[workflows.github_prs]
+# search = "label:needs-review"  # optional extra search qualifiers
+limit = 5
+
+[workflows.agent_loop]
+technique = "claude-loop"        # required for PR review
+
+[workflows.agent_loop.external_agent]
+timeout_secs = 300
+
+[workflows.workspace]
+base_branch = "main"
+
+# ── PR comment responder workflow ──────────────────────────────────────
+# Runs every 15 minutes. Checks your open PRs for new reviewer comments,
+# addresses them by editing code and pushing commits, then replies.
+
+[[workflows]]
+name = "pr-responder"
+schedule = "0 */5 * * * *"
+
+[workflows.github_pr_responses]
+limit = 5
+
+[workflows.agent_loop]
+technique = "claude-loop"        # required for PR responses
+max_retries = 1
+
+[workflows.agent_loop.external_agent]
+timeout_secs = 300
+
+[workflows.workspace]
+base_branch = "main"
