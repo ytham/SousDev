@@ -18,6 +18,18 @@ pub struct HarnessConfig {
     pub target_repo: Option<String>,
     /// Git transport method: `"ssh"` or `"https"` (default `"https"`).
     pub git_method: Option<String>,
+    /// System prompt injected into every agent invocation.
+    ///
+    /// Can be an inline string or a path to a `.md` template file.
+    /// The template supports `{{blocked_commands}}` substitution.
+    /// Defaults to `prompts/system.md` when absent.
+    pub system_prompt: Option<String>,
+    /// Shell commands the agent must never run.
+    ///
+    /// Rendered into the system prompt via `{{blocked_commands}}`.
+    /// Example: `["rm -rf /", "docker system prune"]`.
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
     /// Structured logging options.
     pub logging: Option<LoggingConfig>,
     /// Prompt template overrides.

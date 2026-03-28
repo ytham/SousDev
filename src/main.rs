@@ -6,7 +6,7 @@ use std::sync::Arc;
 use sousdev::{
     workflows::{
         cron_runner::CronRunner,
-        executor::{ExecutorOptions, WorkflowExecutor},
+        executor::{resolve_system_prompt, ExecutorOptions, WorkflowExecutor},
         stores::{WorkflowResult, RunStore},
     },
     providers::resolve_provider,
@@ -294,6 +294,7 @@ async fn main() -> Result<()> {
                     git_method: harness_config.git_method.clone(),
                     harness_root: Some(harness_root.clone()),
                     prompts: harness_config.prompts.clone(),
+                    system_prompt: resolve_system_prompt(&harness_config, &harness_root),
                     tui_tx: TuiEventSender::noop(),
                 },
             );

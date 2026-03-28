@@ -75,7 +75,7 @@ async fn run_claude_review(ctx: &mut StageContext) -> Result<()> {
         ..Default::default()
     };
     let adapter = claude_adapter(ExternalAgentRunOptions::default());
-    let review_run = run_external_agent_loop(&review_prompt, ctx, &adapter, &opts).await?;
+    let review_run = run_external_agent_loop(&review_prompt, ctx, &adapter, &opts, ctx.system_prompt.as_deref()).await?;
 
     let is_approved = review_run.answer.contains(APPROVAL_TOKEN);
     let score = if is_approved { 10.0 } else { 4.0 };
