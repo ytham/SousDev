@@ -177,6 +177,8 @@ pub struct WorkflowConfig {
     pub github_prs: Option<GitHubPRsWorkflowConfig>,
     /// GitHub Issues trigger settings.
     pub github_issues: Option<GitHubIssuesWorkflowConfig>,
+    /// Linear Issues trigger settings.
+    pub linear_issues: Option<LinearIssuesWorkflowConfig>,
     /// Generic shell-command trigger.
     pub trigger: Option<TriggerConfig>,
     /// Agent loop configuration.
@@ -213,6 +215,24 @@ pub struct GitHubIssuesWorkflowConfig {
     pub assignees: Option<Vec<String>>,
     /// Only process issues carrying all of these labels; empty = no filter.
     pub labels: Option<Vec<String>>,
+    /// Maximum number of issues to process per cron tick.
+    pub limit: Option<usize>,
+}
+
+/// Trigger workflow runs from open Linear issues.
+///
+/// The git repository to clone is taken from `HarnessConfig::target_repo`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LinearIssuesWorkflowConfig {
+    /// Linear team key (e.g. `"ENG"`).  Required.
+    pub team: String,
+    /// Only process issues in these states (e.g. `["Todo", "Backlog"]`).
+    /// Defaults to `["Todo"]` when absent.
+    pub states: Option<Vec<String>>,
+    /// Only process issues carrying all of these labels.
+    pub labels: Option<Vec<String>>,
+    /// Only process issues assigned to this user (display name).
+    pub assignee: Option<String>,
     /// Maximum number of issues to process per cron tick.
     pub limit: Option<usize>,
 }
@@ -540,6 +560,67 @@ limit = 5
         assert_eq!(cfg.repo.as_deref(), Some("owner/repo"));
         assert_eq!(cfg.assignees.as_ref().unwrap().len(), 2);
         assert_eq!(cfg.limit, Some(5));
+    }
+
+    #[test]
+    fn linear_issues_config_serde() {
+        let toml_src = r#"
+team = "ENG"
+states = ["Todo", "Backlog"]
+labels = ["bug"]
+assignee = "Alice"
+limit = 5
+"#;
+        let cfg: LinearIssuesWorkflowConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.team, "ENG");
+        assert_eq!(cfg.states.as_ref().unwrap(), &["Todo", "Backlog"]);
+        assert_eq!(cfg.labels.as_ref().unwrap(), &["bug"]);
+        assert_eq!(cfg.assignee.as_deref(), Some("Alice"));
+        assert_eq!(cfg.limit, Some(5));
+    }
+
+    #[test]
+    fn linear_issues_config_minimal() {
+        let toml_src = r#"
+team = "ENG"
+"#;
+        let cfg: LinearIssuesWorkflowConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.team, "ENG");
+        assert!(cfg.states.is_none());
+        assert!(cfg.labels.is_none());
+        assert!(cfg.assignee.is_none());
+        assert!(cfg.limit.is_none());
+    }
+
+    #[test]
+    fn workflow_config_linear_issues_toml() {
+        let toml_src = r#"
+provider = "test"
+model = "test"
+
+[[workflows]]
+name = "linear-autofix"
+schedule = "0 0 * * * *"
+
+[workflows.linear_issues]
+team = "ENG"
+states = ["Todo"]
+labels = ["bug"]
+limit = 3
+
+[workflows.agent_loop]
+technique = "claude-loop"
+"#;
+        let cfg: HarnessConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.workflows.len(), 1);
+        let wf = &cfg.workflows[0];
+        assert_eq!(wf.name, "linear-autofix");
+        assert!(wf.github_issues.is_none());
+        assert!(wf.linear_issues.is_some());
+        let li = wf.linear_issues.as_ref().unwrap();
+        assert_eq!(li.team, "ENG");
+        assert_eq!(li.states.as_ref().unwrap(), &["Todo"]);
+        assert_eq!(li.limit, Some(3));
     }
 
     #[test]

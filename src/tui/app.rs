@@ -381,7 +381,7 @@ impl App {
                     // Scroll to bottom (auto-tail).
                     self.log_scroll = 0;
                 }
-                KeyCode::Esc => {
+                KeyCode::Char(':') => {
                     self.input_mode = InputMode::Command;
                 }
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1102,11 +1102,12 @@ mod tests {
     // ── Command mode ──────────────────────────────────────────────────────
 
     #[test]
-    fn test_esc_enters_command_mode() {
+    fn test_colon_enters_command_mode() {
         let mut app = App::new();
         assert_eq!(app.input_mode, InputMode::Normal);
-        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Command);
+        // Esc dismisses back to normal
         app.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Normal);
     }
@@ -1114,7 +1115,7 @@ mod tests {
     #[test]
     fn test_quit_from_command_mode() {
         let mut app = App::new();
-        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('q'), KeyModifiers::empty());
         assert!(app.should_quit);
     }
@@ -1122,7 +1123,7 @@ mod tests {
     #[test]
     fn test_pause_returns_to_normal() {
         let mut app = App::new();
-        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Command);
         app.handle_key(KeyCode::Char('p'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -1132,7 +1133,7 @@ mod tests {
     #[test]
     fn test_unknown_command_returns_to_normal() {
         let mut app = App::new();
-        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Command);
         app.handle_key(KeyCode::Char('z'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Normal);
@@ -1265,7 +1266,7 @@ mod tests {
         assert!(app.workflows[0].enabled);
 
         // Enter command mode, press 'e'
-        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('e'), KeyModifiers::empty());
 
         // Should have toggled and returned to normal mode
