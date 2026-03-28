@@ -6,6 +6,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use uuid::Uuid;
 
 use crate::workflows::github_issues::{fetch_github_issues, repo_to_gh_identifier, FetchIssuesOptions};
+use crate::workflows::linear_issues::{fetch_linear_issues, FetchLinearIssuesOptions};
 use crate::workflows::github_prs::{
     detect_github_login, fetch_github_prs, fetch_inline_review_comments, fetch_pr_comments,
     FetchPRsOptions, GitHubPR, InlineReviewComment, PRComment,
@@ -74,6 +75,50 @@ pub struct WorkflowExecutor {
     reviewer_login: tokio::sync::Mutex<Option<String>>,
 }
 
+/// Source-agnostic issue representation used by the executor.
+///
+/// Both GitHub and Linear issues are mapped to this before the executor
+/// processes them through the stage workflow.
+#[derive(Debug, Clone)]
+struct IssueItem {
+    /// Unique numeric identifier (GitHub issue number or Linear number).
+    number: u64,
+    /// Human-readable identifier (e.g. `"#42"` or `"ENG-42"`).
+    display_id: String,
+    /// Issue title.
+    title: String,
+    /// Issue body/description.
+    body: String,
+    /// URL to the issue.
+    url: String,
+    /// Repository or project identifier for the handled-issue record.
+    repo: String,
+}
+
+impl IssueItem {
+    fn from_github(issue: &crate::workflows::github_issues::GitHubIssue) -> Self {
+        Self {
+            number: issue.number,
+            display_id: format!("#{}", issue.number),
+            title: issue.title.clone(),
+            body: issue.body_str().to_string(),
+            url: issue.url.clone(),
+            repo: issue.repo.clone(),
+        }
+    }
+
+    fn from_linear(issue: &crate::workflows::linear_issues::LinearIssue, repo: &str) -> Self {
+        Self {
+            number: issue.number,
+            display_id: issue.identifier.clone(),
+            title: issue.title.clone(),
+            body: issue.description_str().to_string(),
+            url: issue.url.clone(),
+            repo: repo.to_string(),
+        }
+    }
+}
+
 impl WorkflowExecutor {
     /// Create a new executor for a single workflow.
     pub fn new(config: WorkflowConfig, opts: ExecutorOptions) -> Self {
@@ -99,7 +144,7 @@ impl WorkflowExecutor {
         if self.config.github_prs.is_some() {
             return self.run_prs_mode().await;
         }
-        if self.config.github_issues.is_some() {
+        if self.config.github_issues.is_some() || self.config.linear_issues.is_some() {
             return self.run_issues_mode().await;
         }
         self.run_standard_mode().await
@@ -245,50 +290,90 @@ impl WorkflowExecutor {
         }
     }
 
-    // ── GitHub Issues mode ────────────────────────────────────────────────────
+    // ── Issues mode (GitHub or Linear) ──────────────────────────────────────
 
     async fn run_issues_mode(&self) -> Result<WorkflowResult> {
-        let issues_cfg = self.config.github_issues.as_ref().unwrap();
         let run_id = Uuid::new_v4().to_string();
         let started_at = Utc::now().to_rfc3339();
         let logger = Logger::new(&self.config.name);
 
-        let gh_repo = issues_cfg
-            .repo
-            .clone()
-            .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+        // Fetch issues from the configured source (GitHub or Linear).
+        let items: Vec<IssueItem> = if let Some(ref linear_cfg) = self.config.linear_issues {
+            let repo = self.opts.target_repo.clone().unwrap_or_default();
 
-        logger.info("Fetching GitHub issues");
+            logger.info("Fetching Linear issues");
 
-        let issues = match fetch_github_issues(&FetchIssuesOptions {
-            repo: gh_repo,
-            assignees: issues_cfg.assignees.clone(),
-            labels: issues_cfg.labels.clone(),
-            limit: issues_cfg.limit,
-        })
-        .await
-        {
-            Ok(i) => i,
-            Err(e) => {
-                let error = e.to_string();
-                logger.error(&format!("Failed to fetch GitHub issues: {}", error));
-                let result =
-                    make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
-                self.opts.store.append(&result).await?;
-                return Ok(result);
-            }
+            let issues = match fetch_linear_issues(&FetchLinearIssuesOptions {
+                team: linear_cfg.team.clone(),
+                states: linear_cfg.states.clone(),
+                labels: linear_cfg.labels.clone(),
+                assignee: linear_cfg.assignee.clone(),
+                limit: linear_cfg.limit,
+            })
+            .await
+            {
+                Ok(i) => i,
+                Err(e) => {
+                    let error = e.to_string();
+                    logger.error(&format!("Failed to fetch Linear issues: {}", error));
+                    let result =
+                        make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
+                    self.opts.store.append(&result).await?;
+                    return Ok(result);
+                }
+            };
+
+            issues.iter().map(|i| IssueItem::from_linear(i, &repo)).collect()
+        } else if let Some(ref issues_cfg) = self.config.github_issues {
+            let gh_repo = issues_cfg
+                .repo
+                .clone()
+                .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+
+            logger.info("Fetching GitHub issues");
+
+            let issues = match fetch_github_issues(&FetchIssuesOptions {
+                repo: gh_repo,
+                assignees: issues_cfg.assignees.clone(),
+                labels: issues_cfg.labels.clone(),
+                limit: issues_cfg.limit,
+            })
+            .await
+            {
+                Ok(i) => i,
+                Err(e) => {
+                    let error = e.to_string();
+                    logger.error(&format!("Failed to fetch GitHub issues: {}", error));
+                    let result =
+                        make_skipped_result(&self.config.name, &run_id, &started_at, Some(&error));
+                    self.opts.store.append(&result).await?;
+                    return Ok(result);
+                }
+            };
+
+            issues.iter().map(IssueItem::from_github).collect()
+        } else {
+            // Neither source configured — should not happen (caught by mode routing).
+            let result = make_skipped_result(
+                &self.config.name,
+                &run_id,
+                &started_at,
+                Some("No issue source configured (github_issues or linear_issues)"),
+            );
+            self.opts.store.append(&result).await?;
+            return Ok(result);
         };
 
-        logger.info(&format!("Fetched {} issue(s)", issues.len()));
+        logger.info(&format!("Fetched {} issue(s)", items.len()));
 
         let mut unhandled = Vec::new();
-        for issue in &issues {
+        for item in &items {
             if !self
                 .issue_store
-                .is_handled(&self.config.name, issue.number)
+                .is_handled(&self.config.name, item.number)
                 .await?
             {
-                unhandled.push(issue.clone());
+                unhandled.push(item.clone());
             }
         }
 
@@ -305,8 +390,8 @@ impl WorkflowExecutor {
         ));
 
         let mut last_result: Option<WorkflowResult> = None;
-        for issue in &unhandled {
-            let result = match self.run_single_issue(issue).await {
+        for item in &unhandled {
+            let result = match self.run_single_issue(item).await {
                 Ok(r) => r,
                 Err(e) => {
                     let completed_at = Utc::now().to_rfc3339();
@@ -318,7 +403,7 @@ impl WorkflowExecutor {
                         success: false,
                         skipped: false,
                         error: Some(e.to_string()),
-                        issue_number: Some(issue.number),
+                        issue_number: Some(item.number),
                         retry_count: 0,
                         review_rounds: 0,
                         trajectory: vec![],
@@ -334,12 +419,12 @@ impl WorkflowExecutor {
                     self.issue_store
                         .mark_handled_with_number(
                             &self.config.name,
-                            issue.number,
+                            item.number,
                             HandledIssueRecord {
                                 pr_number: None,
-                                issue_url: issue.url.clone(),
-                                issue_title: issue.title.clone(),
-                                issue_repo: issue.repo.clone(),
+                                issue_url: item.url.clone(),
+                                issue_title: item.title.clone(),
+                                issue_repo: item.repo.clone(),
                                 pr_url: Some(pr_url.clone()),
                                 pr_open: true,
                                 handled_at: Utc::now().to_rfc3339(),
@@ -360,17 +445,17 @@ impl WorkflowExecutor {
 
     async fn run_single_issue(
         &self,
-        issue: &crate::workflows::github_issues::GitHubIssue,
+        issue: &IssueItem,
     ) -> Result<WorkflowResult> {
         let run_id = Uuid::new_v4().to_string();
         let started_at = Utc::now().to_rfc3339();
-        let logger = Logger::new(format!("{}#{}", self.config.name, issue.number));
+        let logger = Logger::new(format!("{} {}", self.config.name, issue.display_id));
 
         let parsed_task = ParsedTask::new(format!(
-            "Fix issue #{}: {}\n\n{}",
-            issue.number,
+            "Fix issue {}: {}\n\n{}",
+            issue.display_id,
             issue.title,
-            issue.body_str()
+            issue.body
         ));
 
         let wf_log = WorkflowLog::with_tui_sender(
@@ -386,7 +471,7 @@ impl WorkflowExecutor {
             workflow_name: self.config.name.clone(),
             run_id: run_id.clone(),
             mode: WorkflowMode::Issues,
-            item_label: Some(format!("issue #{}", issue.number)),
+            item_label: Some(format!("issue {}", issue.display_id)),
         });
 
         let result = async {

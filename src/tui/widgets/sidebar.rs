@@ -3,17 +3,31 @@
 /// The selected workflow is marked with a `>` indicator.  Each stage in the
 /// flowchart is rendered with a status symbol:
 ///   `[ ]` pending, `[>]` running, `[+]` done, `[!]` failed.
+///
+/// Styled with a subtle background color, no borders.
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::{App, StageStatus, WorkflowStatus};
+use crate::tui::ui::BG_SIDEBAR;
 
 /// Draw the sidebar in the given area.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
+    let bg = Style::default().bg(BG_SIDEBAR);
     let mut lines: Vec<Line> = Vec::new();
+
+    // Title line.
+    lines.push(Line::from(Span::styled(
+        " Workflows",
+        Style::default()
+            .fg(Color::DarkGray)
+            .bg(BG_SIDEBAR)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
 
     for (i, wf) in app.workflows.iter().enumerate() {
         let is_selected = i == app.selected;
@@ -30,29 +44,25 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         };
 
         let name_style = if !wf.enabled {
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM)
+            bg.fg(Color::DarkGray).add_modifier(Modifier::DIM)
         } else if is_selected {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
+            bg.fg(Color::White).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            bg.fg(Color::Gray)
         };
 
         let enabled_tag = if wf.enabled { "" } else { " OFF" };
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", indicator), Style::default().fg(status_color)),
+            Span::styled(format!(" {} ", indicator), bg.fg(status_color)),
             Span::styled(wf.name.clone(), name_style),
-            Span::styled(enabled_tag, Style::default().fg(Color::DarkGray)),
+            Span::styled(enabled_tag, bg.fg(Color::DarkGray)),
         ]));
 
         // Human-readable schedule line.
         let schedule_text = describe_cron(&wf.schedule);
         lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(schedule_text, Style::default().fg(Color::DarkGray)),
+            Span::styled("   ", bg),
+            Span::styled(schedule_text, bg.fg(Color::DarkGray)),
         ]));
 
         // Compact flowchart for each stage.
@@ -69,15 +79,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 StageStatus::Failed => ("[!]", Color::Red),
             };
 
-            // Abbreviate long stage names to fit the sidebar.
             let short_name = abbreviate_stage(stage);
             lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(symbol, Style::default().fg(color)),
-                Span::raw(" "),
+                Span::styled("   ", bg),
+                Span::styled(symbol, bg.fg(color)),
+                Span::styled(" ", bg),
                 Span::styled(
                     short_name,
-                    Style::default().fg(if status == StageStatus::Running {
+                    bg.fg(if status == StageStatus::Running {
                         Color::Yellow
                     } else {
                         Color::Gray
@@ -94,20 +103,12 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     if app.workflows.is_empty() {
         lines.push(Line::from(Span::styled(
-            " No workflows",
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(Span::styled(
-            " configured",
-            Style::default().fg(Color::DarkGray),
+            " No workflows configured",
+            bg.fg(Color::DarkGray),
         )));
     }
 
-    let block = Block::default()
-        .title(" Workflows ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
+    let block = Block::default().style(bg);
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
 }
@@ -279,21 +280,19 @@ mod tests {
 
     #[test]
     fn test_fallback_for_complex_expressions() {
-        // Expressions we don't handle fall through to the raw string.
-        assert_eq!(describe_cron("0 0 9 1 * *"), "0 0 9 1 * *"); // specific day
-        assert_eq!(describe_cron("0 0 9 * * 1"), "0 0 9 * * 1"); // specific dow
-        assert_eq!(describe_cron("0 0 9 * 6 *"), "0 0 9 * 6 *"); // specific month
+        assert_eq!(describe_cron("0 0 9 1 * *"), "0 0 9 1 * *");
+        assert_eq!(describe_cron("0 0 9 * * 1"), "0 0 9 * * 1");
+        assert_eq!(describe_cron("0 0 9 * 6 *"), "0 0 9 * 6 *");
     }
 
     #[test]
     fn test_fallback_wrong_field_count() {
-        assert_eq!(describe_cron("* * * * *"), "* * * * *"); // 5 fields
+        assert_eq!(describe_cron("* * * * *"), "* * * * *");
         assert_eq!(describe_cron(""), "");
     }
 
     #[test]
     fn test_actual_config_schedules() {
-        // The three schedules from config.toml:
         assert_eq!(describe_cron("0 0 * * * *"), "every hour");
         assert_eq!(describe_cron("0 */30 * * * *"), "every 30 min");
         assert_eq!(describe_cron("0 */15 * * * *"), "every 15 min");

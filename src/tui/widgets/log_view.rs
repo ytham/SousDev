@@ -3,30 +3,21 @@
 /// Shows the name and repo of the selected workflow at the top, then
 /// streams log lines below.  Supports scroll via `log_scroll` offset
 /// (0 = auto-tail to the bottom).
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+///
+/// Styled with subtle background colors, no borders.
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::tui::app::App;
+use crate::tui::ui::{BG_HEADER, BG_LOGS};
 
-/// Draw the log view in the given area.
-pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(1),    // log content
-        ])
-        .split(area);
+/// Draw the info bar showing the selected workflow name, repo, status, and key hints.
+pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let bg = Style::default().bg(BG_HEADER);
 
-    draw_header(f, app, chunks[0]);
-    draw_logs(f, app, chunks[1]);
-}
-
-/// Draw the header bar showing the selected workflow name and repo.
-fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let (title, repo) = match app.selected_workflow() {
         Some(wf) => (
             wf.name.clone(),
@@ -47,41 +38,46 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         _ => Color::DarkGray,
     };
 
-    let line = Line::from(vec![
+    // First line: workflow info.
+    let info_line = Line::from(vec![
         Span::styled(
             format!(" {} ", title),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            bg.fg(Color::White).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("| {} ", repo), Style::default().fg(Color::Cyan)),
-        Span::styled(format!("| {} ", status), Style::default().fg(status_color)),
+        Span::styled(format!(" {} ", repo), bg.fg(Color::Cyan)),
+        Span::styled(format!(" {} ", status), bg.fg(status_color)),
     ]);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+    // Second line: key hints.
+    let hints_line = Line::from(vec![
+        Span::styled(" : ", bg.fg(Color::White)),
+        Span::styled("commands  ", bg.fg(Color::DarkGray)),
+        Span::styled("↑↓ ", bg.fg(Color::White)),
+        Span::styled("select  ", bg.fg(Color::DarkGray)),
+        Span::styled("pgup/pgdn ", bg.fg(Color::White)),
+        Span::styled("scroll", bg.fg(Color::DarkGray)),
+    ]);
 
-    let paragraph = Paragraph::new(line).block(block);
+    let block = Block::default().style(bg);
+    let paragraph = Paragraph::new(vec![info_line, hints_line]).block(block);
     f.render_widget(paragraph, area);
 }
 
 /// Draw the scrollable log content.
-fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
+pub fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
+    let bg = Style::default().bg(BG_LOGS);
+    let block = Block::default().style(bg);
     let inner = block.inner(area);
-    f.render_widget(block, area);
+    f.render_widget(block.clone(), area);
 
     let wf = match app.selected_workflow() {
         Some(wf) => wf,
         None => {
             let empty = Paragraph::new(Span::styled(
                 " Waiting for workflows...",
-                Style::default().fg(Color::DarkGray),
-            ));
+                bg.fg(Color::DarkGray),
+            ))
+            .block(Block::default().style(bg));
             f.render_widget(empty, inner);
             return;
         }
@@ -90,13 +86,14 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     if wf.logs.is_empty() {
         let empty = Paragraph::new(Span::styled(
             " Waiting for activity...",
-            Style::default().fg(Color::DarkGray),
-        ));
+            bg.fg(Color::DarkGray),
+        ))
+        .block(Block::default().style(bg));
         f.render_widget(empty, inner);
         return;
     }
 
-    let visible_height = inner.height as usize;
+    let visible_height = area.height as usize;
     let total = wf.logs.len();
 
     // log_scroll == 0 means auto-tail (show the last N lines).
@@ -121,19 +118,19 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
             };
 
             Line::from(vec![
+                Span::styled(" ", bg),
                 Span::styled(
                     format!("{:<5} ", log.level.to_uppercase()),
-                    Style::default().fg(level_color),
+                    bg.fg(level_color),
                 ),
-                Span::styled(
-                    format!("[{}] ", log.stage),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(&log.message),
+                Span::styled(format!("[{}] ", log.stage), bg.fg(Color::DarkGray)),
+                Span::styled(log.message.clone(), bg.fg(Color::Gray)),
             ])
         })
         .collect();
 
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    f.render_widget(paragraph, inner);
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().style(bg));
+    f.render_widget(paragraph, area);
 }

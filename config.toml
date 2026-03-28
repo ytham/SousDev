@@ -70,19 +70,33 @@ aggregation = "judge"
 #   trigger             — run a shell command, act on its output
 
 # ── Issue autofix workflow ─────────────────────────────────────────────
-# Runs every hour. Fetches open issues assigned to you with the "bug"
-# label, clones the repo, runs Claude to fix the issue, self-reviews
-# the diff, and opens a pull request.
+# Runs every hour. Fetches open issues, clones the repo, runs Claude to
+# fix the issue, self-reviews the diff, and opens a pull request.
+#
+# Issue source: choose ONE of `github_issues` or `linear_issues`.
 
 [[workflows]]
 name = "issue-autofix"
 schedule = "0 0 * * * *"      # every hour (sec min hour day month weekday)
 
+# ── Option A: GitHub Issues (default) ─────────────────────────────────
 [workflows.github_issues]
 # repo defaults to target_repo — omit unless targeting a different repo
 assignees = ["@me"]
 labels = ["bug"]
 limit = 3
+
+# ── Option B: Linear Issues (uncomment to use instead of GitHub) ──────
+# Requires LINEAR_API_KEY environment variable.
+# Uses target_repo above for the git repo to clone.
+# Comment out [workflows.github_issues] above before enabling.
+#
+# [workflows.linear_issues]
+# team = "ENG"                   # Linear team key (required)
+# states = ["Todo"]              # issue states to fetch (default: ["Todo"])
+# labels = ["bug"]               # only issues with these labels
+# assignee = "Alice"             # only issues assigned to this user
+# limit = 3
 
 [workflows.agent_loop]
 technique = "claude-loop"

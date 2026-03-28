@@ -70,7 +70,7 @@ impl CronRunner {
             WorkflowMode::PrResponse
         } else if config.github_prs.is_some() {
             WorkflowMode::PrReview
-        } else if config.github_issues.is_some() {
+        } else if config.github_issues.is_some() || config.linear_issues.is_some() {
             WorkflowMode::Issues
         } else {
             WorkflowMode::Standard
