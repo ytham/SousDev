@@ -19,7 +19,7 @@ pub struct TrajectoryStep {
 }
 
 /// The semantic role a [`TrajectoryStep`] plays in the reasoning loop.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StepType {
     Thought,

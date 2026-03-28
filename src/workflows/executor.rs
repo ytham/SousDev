@@ -507,6 +507,9 @@ impl WorkflowExecutor {
                 if let Some(ref log) = wf_log {
                     let _ = log.complete("success").await;
                 }
+                let trajectory = ctx.agent_result.as_ref()
+                    .map(|r| r.trajectory.clone())
+                    .unwrap_or_default();
                 Ok(WorkflowResult {
                     workflow_name: self.config.name.clone(),
                     run_id,
@@ -521,7 +524,7 @@ impl WorkflowExecutor {
                     issue_number: Some(issue.number),
                     retry_count: 0,
                     review_rounds: ctx.review_rounds,
-                    trajectory: vec![],
+                    trajectory,
                     ..Default::default()
                 })
             }
@@ -768,6 +771,9 @@ impl WorkflowExecutor {
                 if let Some(ref log) = wf_log {
                     let _ = log.complete("success").await;
                 }
+                let trajectory = ctx.agent_result.as_ref()
+                    .map(|r| r.trajectory.clone())
+                    .unwrap_or_default();
                 Ok(WorkflowResult {
                     workflow_name: self.config.name.clone(),
                     run_id,
@@ -780,7 +786,7 @@ impl WorkflowExecutor {
                     agent_result: ctx.agent_result,
                     retry_count: 0,
                     review_rounds: 0,
-                    trajectory: vec![],
+                    trajectory,
                     ..Default::default()
                 })
             }
@@ -1069,6 +1075,9 @@ impl WorkflowExecutor {
                 if let Some(ref log) = wf_log {
                     let _ = log.complete("success").await;
                 }
+                let trajectory = ctx.agent_result.as_ref()
+                    .map(|r| r.trajectory.clone())
+                    .unwrap_or_default();
                 Ok(WorkflowResult {
                     workflow_name: self.config.name.clone(),
                     run_id,
@@ -1083,7 +1092,7 @@ impl WorkflowExecutor {
                     review_result: ctx.review_result,
                     retry_count: 0,
                     review_rounds: ctx.review_rounds,
-                    trajectory: vec![],
+                    trajectory,
                     ..Default::default()
                 })
             }
@@ -1160,6 +1169,9 @@ impl WorkflowExecutor {
                 if let Some(ref log) = wf_log {
                     let _ = log.complete("success").await;
                 }
+                let trajectory = ctx.agent_result.as_ref()
+                    .map(|r| r.trajectory.clone())
+                    .unwrap_or_default();
                 Ok(WorkflowResult {
                     workflow_name: self.config.name.clone(),
                     run_id,
@@ -1173,7 +1185,7 @@ impl WorkflowExecutor {
                     review_result: ctx.review_result,
                     retry_count: 0,
                     review_rounds: ctx.review_rounds,
-                    trajectory: vec![],
+                    trajectory,
                     ..Default::default()
                 })
             }

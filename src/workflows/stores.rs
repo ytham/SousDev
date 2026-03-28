@@ -36,9 +36,9 @@ pub struct WorkflowResult {
     pub retry_count: usize,
     pub review_rounds: usize,
     pub trajectory: Vec<crate::types::technique::TrajectoryStep>,
-    #[serde(skip, default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_result: Option<crate::types::technique::RunResult>,
-    #[serde(skip, default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub review_result: Option<crate::techniques::critique_loop::CritiqueLoopResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_review_result: Option<PrReviewResult>,
