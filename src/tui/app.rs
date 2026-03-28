@@ -158,6 +158,15 @@ fn contains(r: &ratatui::layout::Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
+/// A temporary toast notification shown in the TUI.
+#[derive(Debug, Clone)]
+pub struct Toast {
+    /// Message to display.
+    pub message: String,
+    /// When the toast expires and should stop rendering.
+    pub expires_at: std::time::Instant,
+}
+
 /// The full TUI application state.
 pub struct App {
     /// All registered workflows.
@@ -182,6 +191,8 @@ pub struct App {
     pub layout: PanelLayout,
     /// Current text selection state.
     pub selection: TextSelection,
+    /// Active toast notification (auto-expires).
+    pub toast: Option<Toast>,
 }
 
 impl Default for App {
@@ -205,6 +216,7 @@ impl App {
             session_dirty: false,
             layout: PanelLayout::default(),
             selection: TextSelection::default(),
+            toast: None,
         }
     }
 
@@ -547,8 +559,25 @@ impl App {
         }
     }
 
+    /// Show a toast notification that auto-expires after the given duration.
+    pub fn show_toast(&mut self, message: &str, duration: Duration) {
+        self.toast = Some(Toast {
+            message: message.to_string(),
+            expires_at: std::time::Instant::now() + duration,
+        });
+    }
+
+    /// Clear the toast if it has expired.
+    pub fn tick_toast(&mut self) {
+        if let Some(ref toast) = self.toast {
+            if std::time::Instant::now() >= toast.expires_at {
+                self.toast = None;
+            }
+        }
+    }
+
     /// Extract selected text from the log pane and copy to clipboard.
-    fn copy_selection_to_clipboard(&self) {
+    fn copy_selection_to_clipboard(&mut self) {
         if self.selection.panel != Some(Panel::Logs) {
             return;
         }
@@ -605,7 +634,9 @@ impl App {
         }
 
         let text = selected_lines.join("\n");
-        let _ = cli_clipboard::set_contents(text);
+        if cli_clipboard::set_contents(text).is_ok() {
+            self.show_toast("Copied to clipboard", Duration::from_secs(6));
+        }
     }
 
     fn find_workflow_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
@@ -696,6 +727,9 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
         while let Ok(tui_event) = rx.try_recv() {
             app.handle_tui_event(tui_event);
         }
+
+        // Expire stale toasts.
+        app.tick_toast();
 
         // Persist session to disk if it changed.
         if app.session_dirty {

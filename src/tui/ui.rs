@@ -4,7 +4,9 @@
 /// between panels.  Panels extend to the terminal edges.
 /// The info bar sits at the bottom of the main pane.
 use ratatui::layout::Rect;
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::App;
@@ -78,4 +80,39 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     log_view::draw_header(f, app, info_area);
     command_menu::draw(f, app);
+    draw_toast(f, app);
+}
+
+/// Draw a toast notification in the bottom-right corner if one is active.
+fn draw_toast(f: &mut Frame, app: &App) {
+    let toast = match &app.toast {
+        Some(t) => t,
+        None => return,
+    };
+
+    let area = f.area();
+    let msg = &toast.message;
+    // Pad with spaces on each side.
+    let width = (msg.len() as u16) + 4;
+    let height = 1u16;
+
+    if area.width < width + 2 || area.height < height + 2 {
+        return;
+    }
+
+    let toast_area = Rect {
+        x: area.x + area.width - width - 1,
+        y: area.y + area.height - height - 2,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, toast_area);
+
+    let bg = Style::default()
+        .bg(Color::Rgb(50, 160, 80))
+        .fg(Color::White);
+    let line = Line::from(vec![Span::styled(format!("  {}  ", msg), bg)]);
+    let paragraph = Paragraph::new(line).block(Block::default().style(bg));
+    f.render_widget(paragraph, toast_area);
 }
