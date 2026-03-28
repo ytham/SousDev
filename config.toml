@@ -17,6 +17,17 @@ target_repo = "your-org/your-repo"
 # "https" → https://github.com/owner/repo.git  (default)
 git_method = "ssh"
 
+# ---- System prompt ----
+# Injected into every agent invocation (Claude via --system-prompt flag,
+# codex/gemini prepended to the task text).
+# Defaults to prompts/system.md when absent.
+# Can be an inline string or a path to a .md file.
+# system_prompt = "prompts/system.md"
+
+# Shell commands the agent must never run.
+# Rendered into the system prompt via the {{blocked_commands}} placeholder.
+blocked_commands = []
+
 [logging]
 level = "info"    # "silent", "info", or "debug"
 pretty = false

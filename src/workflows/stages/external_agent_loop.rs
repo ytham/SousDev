@@ -35,6 +35,8 @@ pub struct ExternalAgentAdapter {
     pub binary: String,
     /// How the prompt is delivered to the process.
     pub prompt_delivery: PromptDelivery,
+    /// Whether the CLI supports a `--system-prompt` flag.
+    pub supports_system_prompt: bool,
     /// Closure that builds the argument list for the CLI invocation.
     pub build_args: BuildArgsFn,
 }
@@ -69,6 +71,7 @@ pub fn claude_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter
         name: "claude".to_string(),
         binary: "claude".to_string(),
         prompt_delivery: PromptDelivery::Stdin,
+        supports_system_prompt: true,
         build_args: Box::new(move |options| {
             let model = options
                 .model
@@ -105,6 +108,7 @@ pub fn codex_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter 
         name: "codex".to_string(),
         binary: "codex".to_string(),
         prompt_delivery: PromptDelivery::Argument,
+        supports_system_prompt: false,
         build_args: Box::new(move |options| {
             let model = options
                 .model
@@ -133,6 +137,7 @@ pub fn gemini_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter
         name: "gemini".to_string(),
         binary: "gemini".to_string(),
         prompt_delivery: PromptDelivery::Argument,
+        supports_system_prompt: false,
         build_args: Box::new(move |options| {
             let model = options
                 .model
@@ -162,12 +167,17 @@ pub fn gemini_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter
 /// Spawn an external agent CLI, deliver the prompt, wait for it to exit, and
 /// return a [`RunResult`] describing the outcome.
 ///
+/// When `system_prompt` is `Some`, it is injected via the adapter's native
+/// system prompt mechanism (e.g. `--system-prompt` for Claude).  For adapters
+/// that lack a native flag, the system prompt is prepended to the task text.
+///
 /// The process is killed if it does not exit within `timeout_secs`.
 pub async fn run_external_agent_loop(
     prompt: &str,
     ctx: &StageContext,
     adapter: &ExternalAgentAdapter,
     options: &ExternalAgentRunOptions,
+    system_prompt: Option<&str>,
 ) -> Result<RunResult> {
     let start = std::time::Instant::now();
     let cwd = options
@@ -178,9 +188,26 @@ pub async fn run_external_agent_loop(
 
     let mut args = (adapter.build_args)(options);
 
+    // Inject the system prompt via the adapter's native mechanism.
+    if let Some(sp) = system_prompt {
+        if adapter.supports_system_prompt {
+            args.push("--system-prompt".to_string());
+            args.push(sp.to_string());
+        }
+    }
+
+    // Build the effective prompt — for adapters without native system prompt
+    // support, prepend it to the task text.
+    let effective_prompt = match system_prompt {
+        Some(sp) if !adapter.supports_system_prompt => {
+            format!("<system>\n{}\n</system>\n\n{}", sp, prompt)
+        }
+        _ => prompt.to_string(),
+    };
+
     // Append the prompt as the last arg for Argument-delivery adapters.
     if adapter.prompt_delivery == PromptDelivery::Argument {
-        args.push(prompt.to_string());
+        args.push(effective_prompt.clone());
     }
 
     ctx.logger.info(&format!(
@@ -199,7 +226,7 @@ pub async fn run_external_agent_loop(
     // Write the prompt to stdin, then close stdin.
     if adapter.prompt_delivery == PromptDelivery::Stdin {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(prompt.as_bytes()).await?;
+            stdin.write_all(effective_prompt.as_bytes()).await?;
             // `stdin` is dropped here, which closes the pipe.
         }
     }

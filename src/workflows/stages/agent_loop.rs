@@ -68,18 +68,20 @@ impl Stage for AgentLoopStage {
                 extra_flags: ext_cfg.extra_flags.clone(),
             };
 
+            let sys_prompt = ctx.system_prompt.as_deref();
+
             let result = match technique.as_str() {
                 "claude-loop" => {
                     let adapter = claude_adapter(ExternalAgentRunOptions::default());
-                    run_external_agent_loop(&task_text, ctx, &adapter, &opts).await
+                    run_external_agent_loop(&task_text, ctx, &adapter, &opts, sys_prompt).await
                 }
                 "codex-loop" => {
                     let adapter = codex_adapter(ExternalAgentRunOptions::default());
-                    run_external_agent_loop(&task_text, ctx, &adapter, &opts).await
+                    run_external_agent_loop(&task_text, ctx, &adapter, &opts, sys_prompt).await
                 }
                 "gemini-loop" => {
                     let adapter = gemini_adapter(ExternalAgentRunOptions::default());
-                    run_external_agent_loop(&task_text, ctx, &adapter, &opts).await
+                    run_external_agent_loop(&task_text, ctx, &adapter, &opts, sys_prompt).await
                 }
                 other => Err(anyhow::anyhow!(
                     "Unknown technique: '{}'. Harness-native techniques \

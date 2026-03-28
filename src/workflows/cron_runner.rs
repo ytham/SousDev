@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_cron_scheduler::{Job, JobScheduler};
 
-use crate::workflows::executor::{ExecutorOptions, WorkflowExecutor};
+use crate::workflows::executor::{resolve_system_prompt, ExecutorOptions, WorkflowExecutor};
 use crate::workflows::stores::{WorkflowResult, RunStore};
 use crate::providers::resolve_provider;
 use crate::tools::registry::ToolRegistry;
@@ -185,6 +185,10 @@ impl CronRunner {
                         }
                     };
 
+                    let harness_root = std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."));
+                    let system_prompt = resolve_system_prompt(&config_clone, &harness_root);
+
                     let opts = ExecutorOptions {
                         provider,
                         registry: Arc::new(ToolRegistry::new()),
@@ -192,8 +196,9 @@ impl CronRunner {
                         no_workspace,
                         target_repo: config_clone.target_repo.clone(),
                         git_method: config_clone.git_method.clone(),
-                        harness_root: std::env::current_dir().ok(),
+                        harness_root: Some(harness_root),
                         prompts: config_clone.prompts.clone(),
+                        system_prompt,
                         tui_tx: tui_tx.clone(),
                     };
 

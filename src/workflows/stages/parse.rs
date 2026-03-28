@@ -94,6 +94,7 @@ mod tests {
             },
             harness_root: std::path::PathBuf::from("/tmp"),
             prompts: ResolvedPrompts::default(),
+            system_prompt: None,
             target_repo: None,
             logger: Logger::new("test"),
             run_id: "test-run".into(),

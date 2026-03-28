@@ -68,6 +68,8 @@ pub struct StageContext {
     pub harness_root: PathBuf,
     /// Resolved prompt templates for all stages.
     pub prompts: ResolvedPrompts,
+    /// Resolved system prompt text (injected into every agent invocation).
+    pub system_prompt: Option<String>,
     /// Optional `owner/repo` string passed down from harness config.
     pub target_repo: Option<String>,
     /// Structured logger for the workflow.

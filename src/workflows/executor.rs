@@ -55,6 +55,8 @@ pub struct ExecutorOptions {
     pub harness_root: Option<PathBuf>,
     /// Harness-level prompt overrides (lowest precedence).
     pub prompts: Option<PromptConfig>,
+    /// Resolved system prompt text (already template-substituted).
+    pub system_prompt: Option<String>,
     /// TUI event sender for real-time UI updates (no-op in headless mode).
     pub tui_tx: TuiEventSender,
 }
@@ -117,6 +119,54 @@ impl IssueItem {
             repo: repo.to_string(),
         }
     }
+}
+
+/// Resolve the system prompt from config.
+///
+/// Loads the template (inline string or `.md` file), then substitutes
+/// `{{blocked_commands}}` with the formatted blocked commands list.
+/// Returns `None` if no system prompt is configured and the default
+/// `prompts/system.md` does not exist.
+pub fn resolve_system_prompt(config: &crate::types::config::HarnessConfig, harness_root: &std::path::Path) -> Option<String> {
+    // Load the template: explicit config value, or default file.
+    let template = if let Some(ref sp) = config.system_prompt {
+        // Check if it's a file path.
+        if !sp.contains('\n') && (sp.ends_with(".md") || sp.ends_with(".txt") || sp.ends_with(".prompt")) {
+            let path = if std::path::Path::new(sp).is_absolute() {
+                PathBuf::from(sp)
+            } else {
+                harness_root.join(sp)
+            };
+            std::fs::read_to_string(path).ok()
+        } else {
+            // Inline template string.
+            Some(sp.clone())
+        }
+    } else {
+        // Try the default prompts/system.md
+        let default_path = harness_root.join("prompts").join("system.md");
+        if default_path.exists() {
+            std::fs::read_to_string(default_path).ok()
+        } else {
+            None
+        }
+    };
+
+    let template = template?;
+
+    // Build the blocked commands section.
+    let blocked_section = if config.blocked_commands.is_empty() {
+        String::new()
+    } else {
+        let mut section = String::from("\nBlocked commands — you must NEVER run these:\n");
+        for cmd in &config.blocked_commands {
+            section.push_str(&format!("- `{}`\n", cmd));
+        }
+        section
+    };
+
+    let rendered = template.replace("{{blocked_commands}}", &blocked_section);
+    Some(rendered.trim().to_string())
 }
 
 impl WorkflowExecutor {
@@ -268,6 +318,7 @@ impl WorkflowExecutor {
             parsed_task,
             harness_root,
             prompts: self.build_resolved_prompts(),
+            system_prompt: self.opts.system_prompt.clone(),
             target_repo: self.opts.target_repo.clone(),
             logger: Logger::new(&self.config.name),
             run_id: run_id.to_string(),
@@ -1355,6 +1406,87 @@ mod tests {
         let result = render_timeline_comments(&comments);
         assert!(result.contains("@alice: Nice"));
         assert!(result.contains("@bob: LGTM"));
+    }
+
+    // ── resolve_system_prompt ──────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_system_prompt_default_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let prompts_dir = dir.path().join("prompts");
+        std::fs::create_dir_all(&prompts_dir).unwrap();
+        std::fs::write(
+            prompts_dir.join("system.md"),
+            "You are an agent.\n{{blocked_commands}}\n",
+        )
+        .unwrap();
+
+        let config = crate::types::config::HarnessConfig {
+            blocked_commands: vec!["rm -rf /".into(), "docker system prune".into()],
+            ..Default::default()
+        };
+
+        let result = resolve_system_prompt(&config, dir.path());
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("You are an agent."));
+        assert!(text.contains("rm -rf /"));
+        assert!(text.contains("docker system prune"));
+        assert!(text.contains("NEVER"));
+    }
+
+    #[test]
+    fn test_resolve_system_prompt_inline() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = crate::types::config::HarnessConfig {
+            system_prompt: Some("Custom system prompt.\n{{blocked_commands}}".into()),
+            blocked_commands: vec!["shutdown -h now".into()],
+            ..Default::default()
+        };
+
+        let result = resolve_system_prompt(&config, dir.path());
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(text.contains("Custom system prompt."));
+        assert!(text.contains("shutdown -h now"));
+    }
+
+    #[test]
+    fn test_resolve_system_prompt_no_blocked_commands() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = crate::types::config::HarnessConfig {
+            system_prompt: Some("Just a prompt.\n{{blocked_commands}}".into()),
+            ..Default::default()
+        };
+
+        let result = resolve_system_prompt(&config, dir.path());
+        let text = result.unwrap();
+        assert!(text.contains("Just a prompt."));
+        // No blocked commands section rendered.
+        assert!(!text.contains("NEVER"));
+    }
+
+    #[test]
+    fn test_resolve_system_prompt_no_config_no_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = crate::types::config::HarnessConfig::default();
+        let result = resolve_system_prompt(&config, dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_system_prompt_file_path_in_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("my-system.md"), "Custom file content.").unwrap();
+
+        let config = crate::types::config::HarnessConfig {
+            system_prompt: Some("my-system.md".into()),
+            ..Default::default()
+        };
+
+        let result = resolve_system_prompt(&config, dir.path());
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Custom file content."));
     }
 
     #[test]
