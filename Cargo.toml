@@ -65,6 +65,7 @@ tempfile = "3"
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"
+cli-clipboard = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
