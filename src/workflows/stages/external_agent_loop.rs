@@ -229,49 +229,59 @@ pub async fn run_external_agent_loop(
         stdout_raw.trim().to_string()
     };
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let trajectory = vec![
-        TrajectoryStep {
-            index: 0,
-            step_type: StepType::Thought,
-            content: format!(
-                "[{} prompt]\n{}",
-                adapter.name,
-                &prompt[..prompt.len().min(500)]
-            ),
-            timestamp: now.clone(),
-            metadata: HashMap::from([
-                (
-                    "stage".to_string(),
-                    serde_json::Value::String("prompt".to_string()),
+    // Build a rich trajectory from the agent output.
+    let trajectory = if adapter.name == "claude" {
+        parse_claude_stream_trajectory(&stdout_raw, &adapter.name)
+    } else {
+        // For non-Claude agents, create a minimal 2-step trajectory.
+        let now = chrono::Utc::now().to_rfc3339();
+        vec![
+            TrajectoryStep {
+                index: 0,
+                step_type: StepType::Thought,
+                content: format!(
+                    "[{} prompt]\n{}",
+                    adapter.name,
+                    &prompt[..prompt.len().min(500)]
                 ),
-                (
-                    "agent".to_string(),
-                    serde_json::Value::String(adapter.name.clone()),
+                timestamp: now.clone(),
+                metadata: HashMap::new(),
+            },
+            TrajectoryStep {
+                index: 1,
+                step_type: StepType::Observation,
+                content: format!(
+                    "[{} output]\n{}",
+                    adapter.name,
+                    &answer[..answer.len().min(2000)]
                 ),
-            ]),
-        },
-        TrajectoryStep {
-            index: 1,
-            step_type: StepType::Thought,
-            content: format!(
-                "[{} output]\n{}",
-                adapter.name,
-                &answer[..answer.len().min(2000)]
-            ),
-            timestamp: now,
-            metadata: HashMap::from([
-                (
+                timestamp: now,
+                metadata: HashMap::from([(
                     "exit_code".to_string(),
                     serde_json::Value::Number(exit_code.into()),
-                ),
-                (
-                    "agent".to_string(),
-                    serde_json::Value::String(adapter.name.clone()),
-                ),
-            ]),
-        },
-    ];
+                )]),
+            },
+        ]
+    };
+
+    // Also emit trajectory steps to the workflow log for TUI display.
+    if let Some(ref log) = ctx.workflow_log {
+        for step in &trajectory {
+            let level = match step.step_type {
+                StepType::Thought => "info",
+                StepType::Action => "info",
+                StepType::Observation => "debug",
+                StepType::Reflection => "info",
+            };
+            let prefix = match step.step_type {
+                StepType::Thought => "thought",
+                StepType::Action => "tool",
+                StepType::Observation => "result",
+                StepType::Reflection => "reflect",
+            };
+            let _ = log.log(level, prefix, &step.content).await;
+        }
+    }
 
     if !success {
         ctx.logger.error(&format!(
@@ -308,6 +318,133 @@ pub async fn run_external_agent_loop(
 // ---------------------------------------------------------------------------
 // Claude stream-json parser
 // ---------------------------------------------------------------------------
+
+/// Parse Claude's `stream-json` output into a rich trajectory of steps.
+///
+/// The stream contains JSON lines with these event types:
+/// - `{"type":"assistant","message":{"content":[...]}}` — assistant messages
+///   containing `"type":"text"` (thoughts) and `"type":"tool_use"` (tool calls)
+/// - `{"type":"tool","content":[{"type":"tool_result",...}]}` — tool results
+/// - `{"type":"result",...}` — final result (skipped, captured elsewhere)
+fn parse_claude_stream_trajectory(stdout: &str, agent_name: &str) -> Vec<TrajectoryStep> {
+    let mut steps = Vec::new();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match event_type {
+            "assistant" => {
+                let content_blocks = event
+                    .pointer("/message/content")
+                    .and_then(|c| c.as_array());
+                if let Some(blocks) = content_blocks {
+                    for block in blocks {
+                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match block_type {
+                            "text" => {
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    let text = text.trim();
+                                    if !text.is_empty() {
+                                        steps.push(TrajectoryStep {
+                                            index: steps.len(),
+                                            step_type: StepType::Thought,
+                                            content: text.to_string(),
+                                            timestamp: now.clone(),
+                                            metadata: HashMap::new(),
+                                        });
+                                    }
+                                }
+                            }
+                            "tool_use" => {
+                                let tool_name = block
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("unknown");
+                                let input = block
+                                    .get("input")
+                                    .map(|i| {
+                                        serde_json::to_string_pretty(i)
+                                            .unwrap_or_else(|_| i.to_string())
+                                    })
+                                    .unwrap_or_default();
+                                // Truncate large inputs (file contents, etc.)
+                                let input_display = if input.len() > 500 {
+                                    format!("{}…", &input[..500])
+                                } else {
+                                    input.clone()
+                                };
+                                steps.push(TrajectoryStep {
+                                    index: steps.len(),
+                                    step_type: StepType::Action,
+                                    content: format!("{}: {}", tool_name, input_display),
+                                    timestamp: now.clone(),
+                                    metadata: HashMap::from([(
+                                        "tool".to_string(),
+                                        serde_json::Value::String(tool_name.to_string()),
+                                    )]),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            "tool" => {
+                let content_blocks = event.get("content").and_then(|c| c.as_array());
+                if let Some(blocks) = content_blocks {
+                    for block in blocks {
+                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if block_type == "tool_result" {
+                            let output = block
+                                .get("output")
+                                .and_then(|o| o.as_str())
+                                .unwrap_or("");
+                            let output_display = if output.len() > 500 {
+                                format!("{}…", &output[..500])
+                            } else {
+                                output.to_string()
+                            };
+                            steps.push(TrajectoryStep {
+                                index: steps.len(),
+                                step_type: StepType::Observation,
+                                content: output_display,
+                                timestamp: now.clone(),
+                                metadata: HashMap::new(),
+                            });
+                        }
+                    }
+                }
+            }
+            // Skip "result" events — the final answer is extracted separately.
+            _ => {}
+        }
+    }
+
+    // If parsing yielded nothing (non-stream output), fall back to a minimal summary.
+    if steps.is_empty() {
+        let answer = extract_claude_final_answer(stdout)
+            .unwrap_or_else(|| stdout.chars().take(2000).collect());
+        steps.push(TrajectoryStep {
+            index: 0,
+            step_type: StepType::Thought,
+            content: format!("[{} output]\n{}", agent_name, answer),
+            timestamp: now,
+            metadata: HashMap::new(),
+        });
+    }
+
+    steps
+}
 
 /// Extract the final answer from `claude --output-format=stream-json` stdout.
 ///
@@ -377,6 +514,92 @@ mod tests {
             extract_claude_final_answer(stdout),
             Some("ok".to_string())
         );
+    }
+
+    // ── Claude stream-json trajectory parsing ──────────────────────────────
+
+    #[test]
+    fn test_parse_claude_stream_text_and_tool_use() {
+        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Let me read the file first."},{"type":"tool_use","name":"Read","input":{"path":"src/main.rs"}}]}}
+{"type":"tool","content":[{"type":"tool_result","output":"fn main() { }"}]}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I see the issue. Let me fix it."}]}}
+{"type":"result","result":"Fixed the bug."}"#;
+
+        let steps = parse_claude_stream_trajectory(stdout, "claude");
+        assert_eq!(steps.len(), 4);
+        assert_eq!(steps[0].step_type, StepType::Thought);
+        assert!(steps[0].content.contains("read the file"));
+        assert_eq!(steps[1].step_type, StepType::Action);
+        assert!(steps[1].content.contains("Read"));
+        assert!(steps[1].content.contains("src/main.rs"));
+        assert_eq!(steps[2].step_type, StepType::Observation);
+        assert!(steps[2].content.contains("fn main()"));
+        assert_eq!(steps[3].step_type, StepType::Thought);
+        assert!(steps[3].content.contains("fix it"));
+    }
+
+    #[test]
+    fn test_parse_claude_stream_empty_output() {
+        let steps = parse_claude_stream_trajectory("", "claude");
+        // Fallback: one thought step with empty output
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_type, StepType::Thought);
+    }
+
+    #[test]
+    fn test_parse_claude_stream_result_only() {
+        let stdout = r#"{"type":"result","result":"done"}"#;
+        let steps = parse_claude_stream_trajectory(stdout, "claude");
+        // Result events are skipped; fallback kicks in
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].content.contains("done"));
+    }
+
+    #[test]
+    fn test_parse_claude_stream_malformed_lines_skipped() {
+        let stdout = "not json\n{invalid\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}";
+        let steps = parse_claude_stream_trajectory(stdout, "claude");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_type, StepType::Thought);
+        assert_eq!(steps[0].content, "ok");
+    }
+
+    #[test]
+    fn test_parse_claude_stream_tool_use_metadata() {
+        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"path":"foo.rs","content":"hello"}}]}}"#;
+        let steps = parse_claude_stream_trajectory(stdout, "claude");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_type, StepType::Action);
+        assert_eq!(
+            steps[0].metadata.get("tool").and_then(|v| v.as_str()),
+            Some("Write")
+        );
+    }
+
+    #[test]
+    fn test_parse_claude_stream_large_input_truncated() {
+        let big_input = "x".repeat(1000);
+        let stdout = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","input":{{"content":"{}"}}}}]}}}}"#,
+            big_input
+        );
+        let steps = parse_claude_stream_trajectory(&stdout, "claude");
+        assert_eq!(steps.len(), 1);
+        // Content should be truncated with "…"
+        assert!(steps[0].content.len() < 600);
+        assert!(steps[0].content.ends_with('…'));
+    }
+
+    #[test]
+    fn test_parse_claude_stream_steps_indexed() {
+        let stdout = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"a"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"b"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"c"}]}}"#;
+        let steps = parse_claude_stream_trajectory(stdout, "claude");
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].index, 0);
+        assert_eq!(steps[1].index, 1);
+        assert_eq!(steps[2].index, 2);
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub const BG_LOGS: Color = Color::Rgb(20, 20, 28);
 pub const BG_GAP: Color = Color::Reset;
 
 /// Draw the full TUI layout.
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Horizontal split: sidebar | 1-char gap | main pane.
@@ -66,6 +66,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         width: main_area.width,
         height: info_height.min(main_area.height),
     };
+
+    // Store layout for mouse hit-testing.
+    app.layout.sidebar = sidebar_area;
+    app.layout.logs = log_area;
+    app.layout.info_bar = info_area;
 
     sidebar::draw(f, app, sidebar_area);
     if log_area.height > 0 {

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -104,6 +104,60 @@ impl std::fmt::Display for WorkflowStatus {
     }
 }
 
+/// Which panel a mouse event landed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    Sidebar,
+    Logs,
+    InfoBar,
+    None,
+}
+
+/// Active text selection state for the log pane.
+#[derive(Debug, Clone, Default)]
+pub struct TextSelection {
+    /// Whether a drag is in progress.
+    pub active: bool,
+    /// Panel where the drag started.
+    pub panel: Option<Panel>,
+    /// Anchor row (terminal y) where the drag started.
+    pub start_row: u16,
+    /// Anchor column (terminal x) where the drag started.
+    pub start_col: u16,
+    /// Current row (terminal y) of the drag.
+    pub end_row: u16,
+    /// Current column (terminal x) of the drag.
+    pub end_col: u16,
+}
+
+/// Computed panel rectangles for hit-testing mouse events.
+#[derive(Debug, Clone, Default)]
+pub struct PanelLayout {
+    pub sidebar: ratatui::layout::Rect,
+    pub logs: ratatui::layout::Rect,
+    pub info_bar: ratatui::layout::Rect,
+}
+
+impl PanelLayout {
+    /// Determine which panel a terminal coordinate falls in.
+    pub fn hit_test(&self, col: u16, row: u16) -> Panel {
+        if contains(&self.logs, col, row) {
+            Panel::Logs
+        } else if contains(&self.sidebar, col, row) {
+            Panel::Sidebar
+        } else if contains(&self.info_bar, col, row) {
+            Panel::InfoBar
+        } else {
+            Panel::None
+        }
+    }
+}
+
+/// Check if a point is inside a Rect.
+fn contains(r: &ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
 /// The full TUI application state.
 pub struct App {
     /// All registered workflows.
@@ -124,6 +178,10 @@ pub struct App {
     pub disabled_workflows: Arc<Mutex<HashSet<String>>>,
     /// Flag set when session needs to be persisted to disk.
     pub session_dirty: bool,
+    /// Computed panel layout (updated each frame by `ui::draw`).
+    pub layout: PanelLayout,
+    /// Current text selection state.
+    pub selection: TextSelection,
 }
 
 impl Default for App {
@@ -145,6 +203,8 @@ impl App {
             project_root: None,
             disabled_workflows: Arc::new(Mutex::new(HashSet::new())),
             session_dirty: false,
+            layout: PanelLayout::default(),
+            selection: TextSelection::default(),
         }
     }
 
@@ -442,6 +502,112 @@ impl App {
         }
     }
 
+    /// Handle a mouse event.
+    pub fn handle_mouse(&mut self, event: MouseEvent) {
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let panel = self.layout.hit_test(event.column, event.row);
+                self.selection = TextSelection {
+                    active: true,
+                    panel: Some(panel),
+                    start_row: event.row,
+                    start_col: event.column,
+                    end_row: event.row,
+                    end_col: event.column,
+                };
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selection.active {
+                    // Clamp drag to the panel where the selection started.
+                    let panel_rect = match self.selection.panel {
+                        Some(Panel::Logs) => &self.layout.logs,
+                        Some(Panel::Sidebar) => &self.layout.sidebar,
+                        Some(Panel::InfoBar) => &self.layout.info_bar,
+                        _ => return,
+                    };
+                    self.selection.end_col =
+                        event.column.max(panel_rect.x).min(panel_rect.x + panel_rect.width - 1);
+                    self.selection.end_row =
+                        event.row.max(panel_rect.y).min(panel_rect.y + panel_rect.height - 1);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.selection.active {
+                    self.copy_selection_to_clipboard();
+                    self.selection.active = false;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                self.log_scroll = self.log_scroll.saturating_add(3);
+            }
+            MouseEventKind::ScrollDown => {
+                self.log_scroll = self.log_scroll.saturating_sub(3);
+            }
+            _ => {}
+        }
+    }
+
+    /// Extract selected text from the log pane and copy to clipboard.
+    fn copy_selection_to_clipboard(&self) {
+        if self.selection.panel != Some(Panel::Logs) {
+            return;
+        }
+
+        let wf = match self.selected_workflow() {
+            Some(wf) => wf,
+            None => return,
+        };
+
+        if wf.logs.is_empty() {
+            return;
+        }
+
+        let log_rect = &self.layout.logs;
+        if log_rect.height == 0 {
+            return;
+        }
+
+        // Determine which log lines are visible (same logic as log_view::draw_logs).
+        let visible_height = log_rect.height as usize;
+        let total = wf.logs.len();
+        let start = if self.log_scroll == 0 {
+            total.saturating_sub(visible_height)
+        } else {
+            total
+                .saturating_sub(visible_height)
+                .saturating_sub(self.log_scroll)
+        };
+
+        // Convert terminal rows to log-line indices.
+        let sel_top = self.selection.start_row.min(self.selection.end_row);
+        let sel_bot = self.selection.start_row.max(self.selection.end_row);
+        let first_log_row = log_rect.y;
+
+        let mut selected_lines = Vec::new();
+        for screen_row in sel_top..=sel_bot {
+            if screen_row < first_log_row {
+                continue;
+            }
+            let line_idx = start + (screen_row - first_log_row) as usize;
+            if line_idx < total {
+                let log = &wf.logs[line_idx];
+                selected_lines.push(format!(
+                    "{:<5} [{}] {}",
+                    log.level.to_uppercase(),
+                    log.stage,
+                    log.message
+                ));
+            }
+        }
+
+        if selected_lines.is_empty() {
+            return;
+        }
+
+        let text = selected_lines.join("\n");
+        let _ = cli_clipboard::set_contents(text);
+    }
+
     fn find_workflow_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
         self.workflows.iter_mut().find(|w| w.name == name)
     }
@@ -524,7 +690,7 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     // Main event loop.
     loop {
         // Draw the UI.
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &mut app))?;
 
         // Process all pending TUI events (non-blocking drain).
         while let Ok(tui_event) = rx.try_recv() {
@@ -552,8 +718,14 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
         // Poll for terminal input events with a short timeout so we keep
         // re-rendering even when no keys are pressed (to show new log lines).
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key_event) = event::read()? {
-                app.handle_key(key_event.code, key_event.modifiers);
+            match event::read()? {
+                Event::Key(key_event) => {
+                    app.handle_key(key_event.code, key_event.modifiers);
+                }
+                Event::Mouse(mouse_event) => {
+                    app.handle_mouse(mouse_event);
+                }
+                _ => {}
             }
         }
 
@@ -1324,6 +1496,132 @@ mod tests {
 
         assert!(app.workflows[0].logs.is_empty());
         assert_eq!(app.workflows[1].logs.len(), 1);
+    }
+
+    // ── Mouse handling ─────────────────────────────────────────────────────
+
+    fn make_mouse_event(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    #[test]
+    fn test_mouse_down_starts_selection() {
+        let mut app = App::new();
+        app.layout.logs = ratatui::layout::Rect::new(27, 0, 80, 20);
+
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            30,
+            5,
+        ));
+
+        assert!(app.selection.active);
+        assert_eq!(app.selection.panel, Some(Panel::Logs));
+        assert_eq!(app.selection.start_col, 30);
+        assert_eq!(app.selection.start_row, 5);
+    }
+
+    #[test]
+    fn test_mouse_drag_clamps_to_panel() {
+        let mut app = App::new();
+        app.layout.logs = ratatui::layout::Rect::new(27, 0, 80, 20);
+
+        // Start selection in logs
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            30,
+            5,
+        ));
+
+        // Drag way past the panel boundary
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            200,
+            30,
+        ));
+
+        // Should be clamped to panel bounds
+        assert!(app.selection.end_col <= 27 + 80 - 1);
+        assert!(app.selection.end_row <= 0 + 20 - 1);
+    }
+
+    #[test]
+    fn test_mouse_up_clears_active() {
+        let mut app = App::new();
+        app.layout.logs = ratatui::layout::Rect::new(27, 0, 80, 20);
+
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            30,
+            5,
+        ));
+        assert!(app.selection.active);
+
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            35,
+            7,
+        ));
+        assert!(!app.selection.active);
+    }
+
+    #[test]
+    fn test_mouse_click_in_sidebar() {
+        let mut app = App::new();
+        app.layout.sidebar = ratatui::layout::Rect::new(0, 0, 26, 30);
+        app.layout.logs = ratatui::layout::Rect::new(27, 0, 80, 20);
+
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            10,
+        ));
+
+        assert!(app.selection.active);
+        assert_eq!(app.selection.panel, Some(Panel::Sidebar));
+    }
+
+    #[test]
+    fn test_mouse_scroll_up_down() {
+        let mut app = App::new();
+        assert_eq!(app.log_scroll, 0);
+
+        app.handle_mouse(make_mouse_event(MouseEventKind::ScrollUp, 30, 5));
+        assert_eq!(app.log_scroll, 3);
+
+        app.handle_mouse(make_mouse_event(MouseEventKind::ScrollUp, 30, 5));
+        assert_eq!(app.log_scroll, 6);
+
+        app.handle_mouse(make_mouse_event(MouseEventKind::ScrollDown, 30, 5));
+        assert_eq!(app.log_scroll, 3);
+
+        app.handle_mouse(make_mouse_event(MouseEventKind::ScrollDown, 30, 5));
+        assert_eq!(app.log_scroll, 0);
+
+        // Can't go below 0
+        app.handle_mouse(make_mouse_event(MouseEventKind::ScrollDown, 30, 5));
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn test_panel_hit_test() {
+        let layout = PanelLayout {
+            sidebar: ratatui::layout::Rect::new(0, 0, 26, 30),
+            logs: ratatui::layout::Rect::new(27, 0, 80, 27),
+            info_bar: ratatui::layout::Rect::new(27, 28, 80, 2),
+        };
+
+        assert_eq!(layout.hit_test(0, 0), Panel::Sidebar);
+        assert_eq!(layout.hit_test(25, 15), Panel::Sidebar);
+        assert_eq!(layout.hit_test(27, 0), Panel::Logs);
+        assert_eq!(layout.hit_test(50, 15), Panel::Logs);
+        assert_eq!(layout.hit_test(30, 28), Panel::InfoBar);
+        assert_eq!(layout.hit_test(26, 15), Panel::None); // the gap
     }
 
     #[test]

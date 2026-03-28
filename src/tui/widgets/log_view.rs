@@ -11,8 +11,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::tui::app::App;
+use crate::tui::app::{App, Panel};
 use crate::tui::ui::{BG_HEADER, BG_LOGS};
+
+/// Highlight background for selected log lines.
+const BG_SELECTION: Color = Color::Rgb(50, 50, 70);
 
 /// Draw the info bar showing the selected workflow name, repo, status, and key hints.
 pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -107,9 +110,23 @@ pub fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     };
     let end = (start + visible_height).min(total);
 
+    // Determine selection range (screen rows).
+    let sel_active = app.selection.active && app.selection.panel == Some(Panel::Logs);
+    let sel_top = app.selection.start_row.min(app.selection.end_row);
+    let sel_bot = app.selection.start_row.max(app.selection.end_row);
+
     let lines: Vec<Line> = wf.logs[start..end]
         .iter()
-        .map(|log| {
+        .enumerate()
+        .map(|(i, log)| {
+            let screen_row = area.y + i as u16;
+            let is_selected = sel_active && screen_row >= sel_top && screen_row <= sel_bot;
+            let row_bg = if is_selected {
+                Style::default().bg(BG_SELECTION)
+            } else {
+                bg
+            };
+
             let level_color = match log.level.as_str() {
                 "error" => Color::Red,
                 "warn" => Color::Yellow,
@@ -118,13 +135,13 @@ pub fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
             };
 
             Line::from(vec![
-                Span::styled(" ", bg),
+                Span::styled(" ", row_bg),
                 Span::styled(
                     format!("{:<5} ", log.level.to_uppercase()),
-                    bg.fg(level_color),
+                    row_bg.fg(level_color),
                 ),
-                Span::styled(format!("[{}] ", log.stage), bg.fg(Color::DarkGray)),
-                Span::styled(log.message.clone(), bg.fg(Color::Gray)),
+                Span::styled(format!("[{}] ", log.stage), row_bg.fg(Color::DarkGray)),
+                Span::styled(log.message.clone(), row_bg.fg(Color::Gray)),
             ])
         })
         .collect();
