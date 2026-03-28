@@ -437,20 +437,24 @@ impl App {
                         self.log_scroll = 0;
                     }
                 }
-                KeyCode::PageUp => {
-                    self.log_scroll = self.log_scroll.saturating_add(10);
+                KeyCode::PageUp | KeyCode::Char('b') => {
+                    // One page up.
+                    let page = self.layout.logs.height.max(1) as usize;
+                    self.log_scroll = self.log_scroll.saturating_add(page);
                 }
-                KeyCode::PageDown => {
-                    self.log_scroll = self.log_scroll.saturating_sub(10);
+                KeyCode::PageDown | KeyCode::Char('f') => {
+                    // One page down.
+                    let page = self.layout.logs.height.max(1) as usize;
+                    self.log_scroll = self.log_scroll.saturating_sub(page);
                 }
-                KeyCode::Home => {
-                    // Scroll to top of logs.
+                KeyCode::Home | KeyCode::Char('B') => {
+                    // Scroll to beginning of logs.
                     if let Some(wf) = self.selected_workflow() {
                         self.log_scroll = wf.logs.len().saturating_sub(1);
                     }
                 }
-                KeyCode::End => {
-                    // Scroll to bottom (auto-tail).
+                KeyCode::End | KeyCode::Char('F') => {
+                    // Scroll to end of logs (auto-tail).
                     self.log_scroll = 0;
                 }
                 KeyCode::Char(':') => {
@@ -1266,26 +1270,33 @@ mod tests {
     }
 
     #[test]
-    fn test_page_up_down_scrolls() {
+    fn test_b_key_scrolls_up_one_page() {
         let mut app = App::new();
+        app.layout.logs = ratatui::layout::Rect::new(27, 0, 80, 20);
         assert_eq!(app.log_scroll, 0);
-        app.handle_key(KeyCode::PageUp, KeyModifiers::empty());
-        assert_eq!(app.log_scroll, 10);
-        app.handle_key(KeyCode::PageUp, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 20); // one page = logs height
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 40);
+    }
+
+    #[test]
+    fn test_f_key_scrolls_down_one_page() {
+        let mut app = App::new();
+        app.layout.logs = ratatui::layout::Rect::new(27, 0, 80, 20);
+        app.log_scroll = 40;
+        app.handle_key(KeyCode::Char('f'), KeyModifiers::empty());
         assert_eq!(app.log_scroll, 20);
-        app.handle_key(KeyCode::PageDown, KeyModifiers::empty());
-        assert_eq!(app.log_scroll, 10);
-        app.handle_key(KeyCode::PageDown, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('f'), KeyModifiers::empty());
         assert_eq!(app.log_scroll, 0);
-        // PageDown at 0 stays at 0
-        app.handle_key(KeyCode::PageDown, KeyModifiers::empty());
+        // f at 0 stays at 0
+        app.handle_key(KeyCode::Char('f'), KeyModifiers::empty());
         assert_eq!(app.log_scroll, 0);
     }
 
     #[test]
-    fn test_home_scrolls_to_top() {
+    fn test_shift_b_scrolls_to_beginning() {
         let mut app = app_with_workflow("p", WorkflowMode::Standard);
-        // Add some log lines
         for i in 0..50 {
             app.workflows[0].logs.push(LogLine {
                 level: "info".into(),
@@ -1293,14 +1304,29 @@ mod tests {
                 message: format!("line {}", i),
             });
         }
-        app.handle_key(KeyCode::Home, KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('B'), KeyModifiers::empty());
         assert_eq!(app.log_scroll, 49); // logs.len() - 1
     }
 
     #[test]
-    fn test_end_scrolls_to_bottom() {
+    fn test_shift_f_scrolls_to_end() {
         let mut app = App::new();
         app.log_scroll = 999;
+        app.handle_key(KeyCode::Char('F'), KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 0);
+    }
+
+    #[test]
+    fn test_page_keys_still_work() {
+        let mut app = App::new();
+        app.layout.logs = ratatui::layout::Rect::new(27, 0, 80, 25);
+        app.handle_key(KeyCode::PageUp, KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 25);
+        app.handle_key(KeyCode::PageDown, KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 0);
+        app.handle_key(KeyCode::Home, KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 0); // no workflows, no logs
+        app.log_scroll = 50;
         app.handle_key(KeyCode::End, KeyModifiers::empty());
         assert_eq!(app.log_scroll, 0);
     }

@@ -370,23 +370,14 @@ fn parse_claude_stream_trajectory(stdout: &str, agent_name: &str) -> Vec<Traject
                                     .get("name")
                                     .and_then(|n| n.as_str())
                                     .unwrap_or("unknown");
-                                let input = block
+                                let input_display = block
                                     .get("input")
-                                    .map(|i| {
-                                        serde_json::to_string_pretty(i)
-                                            .unwrap_or_else(|_| i.to_string())
-                                    })
+                                    .map(|i| format_tool_input(tool_name, i))
                                     .unwrap_or_default();
-                                // Truncate large inputs (file contents, etc.)
-                                let input_display = if input.len() > 500 {
-                                    format!("{}…", &input[..500])
-                                } else {
-                                    input.clone()
-                                };
                                 steps.push(TrajectoryStep {
                                     index: steps.len(),
                                     step_type: StepType::Action,
-                                    content: format!("{}: {}", tool_name, input_display),
+                                    content: input_display,
                                     timestamp: now.clone(),
                                     metadata: HashMap::from([(
                                         "tool".to_string(),
@@ -444,6 +435,92 @@ fn parse_claude_stream_trajectory(stdout: &str, agent_name: &str) -> Vec<Traject
     }
 
     steps
+}
+
+/// Format a tool invocation input as a concise function-call-style string.
+///
+/// Produces output like:
+/// - `Read("src/main.rs", limit=60, offset=130)`
+/// - `Bash("cargo test", timeout=120000)`
+/// - `Grep("pattern", path="src/", include="*.rs")`
+/// - `Write("path/to/file.rs", content=<342 chars>)`
+fn format_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
+    let obj = match input.as_object() {
+        Some(o) => o,
+        None => return format!("{}()", tool_name),
+    };
+
+    if obj.is_empty() {
+        return format!("{}()", tool_name);
+    }
+
+    // Determine the "primary" argument to show first (unkeyed).
+    // Common patterns: file_path, path, command, pattern, query, prompt, content.
+    let primary_keys = [
+        "file_path", "filePath", "command", "pattern", "query", "prompt", "url", "path",
+    ];
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut used_primary = false;
+
+    // Show the primary argument first as a bare quoted string.
+    for key in &primary_keys {
+        if let Some(val) = obj.get(*key) {
+            if let Some(s) = val.as_str() {
+                let display = truncate_str(s, 80);
+                parts.push(format!("\"{}\"", display));
+                used_primary = true;
+                break;
+            }
+        }
+    }
+
+    // Show remaining arguments as key=value pairs.
+    for (key, val) in obj {
+        // Skip the primary key we already showed.
+        if used_primary && primary_keys.contains(&key.as_str()) {
+            if let Some(s) = val.as_str() {
+                // Only skip if this is the one we displayed.
+                let display = truncate_str(s, 80);
+                if parts.first().map(|p| p.as_str()) == Some(&format!("\"{}\"", display)) {
+                    continue;
+                }
+            }
+        }
+
+        let formatted = format_value(key, val);
+        parts.push(formatted);
+    }
+
+    format!("{}({})", tool_name, parts.join(", "))
+}
+
+/// Format a single key=value pair for tool input display.
+fn format_value(key: &str, val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => {
+            // Large string values (file contents, etc.) show length instead.
+            if s.len() > 100 {
+                format!("{}=<{} chars>", key, s.len())
+            } else {
+                format!("{}=\"{}\"", key, s)
+            }
+        }
+        serde_json::Value::Number(n) => format!("{}={}", key, n),
+        serde_json::Value::Bool(b) => format!("{}={}", key, b),
+        serde_json::Value::Array(arr) => format!("{}=[{} items]", key, arr.len()),
+        serde_json::Value::Null => format!("{}=null", key),
+        serde_json::Value::Object(_) => format!("{}={{...}}", key),
+    }
+}
+
+/// Truncate a string for display, appending "…" if needed.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() > max {
+        format!("{}…", &s[..max])
+    } else {
+        s.to_string()
+    }
 }
 
 /// Extract the final answer from `claude --output-format=stream-json` stdout.
@@ -577,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_claude_stream_large_input_truncated() {
+    fn test_parse_claude_stream_large_input_summarized() {
         let big_input = "x".repeat(1000);
         let stdout = format!(
             r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Write","input":{{"content":"{}"}}}}]}}}}"#,
@@ -585,9 +662,9 @@ mod tests {
         );
         let steps = parse_claude_stream_trajectory(&stdout, "claude");
         assert_eq!(steps.len(), 1);
-        // Content should be truncated with "…"
-        assert!(steps[0].content.len() < 600);
-        assert!(steps[0].content.ends_with('…'));
+        // Large content values show char count instead of the full string.
+        assert!(steps[0].content.contains("Write("));
+        assert!(steps[0].content.contains("<1000 chars>"));
     }
 
     #[test]
@@ -600,6 +677,66 @@ mod tests {
         assert_eq!(steps[0].index, 0);
         assert_eq!(steps[1].index, 1);
         assert_eq!(steps[2].index, 2);
+    }
+
+    // ── format_tool_input ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_tool_input_read() {
+        let input = serde_json::json!({
+            "file_path": "src/main.rs",
+            "limit": 60,
+            "offset": 130
+        });
+        let result = format_tool_input("Read", &input);
+        assert_eq!(result, r#"Read("src/main.rs", limit=60, offset=130)"#);
+    }
+
+    #[test]
+    fn test_format_tool_input_bash() {
+        let input = serde_json::json!({
+            "command": "cargo test",
+            "timeout": 120000
+        });
+        let result = format_tool_input("Bash", &input);
+        assert_eq!(result, r#"Bash("cargo test", timeout=120000)"#);
+    }
+
+    #[test]
+    fn test_format_tool_input_grep() {
+        let input = serde_json::json!({
+            "pattern": "fn main",
+            "path": "src/"
+        });
+        let result = format_tool_input("Grep", &input);
+        // "pattern" is the primary key
+        assert!(result.starts_with("Grep(\"fn main\""));
+        assert!(result.contains("path="));
+    }
+
+    #[test]
+    fn test_format_tool_input_write_large_content() {
+        let big_content = "x".repeat(500);
+        let input = serde_json::json!({
+            "file_path": "foo.rs",
+            "content": big_content
+        });
+        let result = format_tool_input("Write", &input);
+        assert!(result.contains("Write(\"foo.rs\""));
+        assert!(result.contains("<500 chars>"));
+        assert!(!result.contains("xxxxx"));
+    }
+
+    #[test]
+    fn test_format_tool_input_empty() {
+        let input = serde_json::json!({});
+        assert_eq!(format_tool_input("Noop", &input), "Noop()");
+    }
+
+    #[test]
+    fn test_format_tool_input_non_object() {
+        let input = serde_json::json!("just a string");
+        assert_eq!(format_tool_input("Noop", &input), "Noop()");
     }
 
     #[test]

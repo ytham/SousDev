@@ -8,7 +8,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::{App, Panel};
@@ -57,8 +57,10 @@ pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("commands  ", bg.fg(Color::DarkGray)),
         Span::styled("↑↓ ", bg.fg(Color::White)),
         Span::styled("select  ", bg.fg(Color::DarkGray)),
-        Span::styled("pgup/pgdn ", bg.fg(Color::White)),
-        Span::styled("scroll", bg.fg(Color::DarkGray)),
+        Span::styled("f/b ", bg.fg(Color::White)),
+        Span::styled("page  ", bg.fg(Color::DarkGray)),
+        Span::styled("F/B ", bg.fg(Color::White)),
+        Span::styled("end/begin", bg.fg(Color::DarkGray)),
     ]);
 
     let block = Block::default().style(bg);
@@ -115,6 +117,9 @@ pub fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     let sel_top = app.selection.start_row.min(app.selection.end_row);
     let sel_bot = app.selection.start_row.max(app.selection.end_row);
 
+    // Maximum content width (excluding the 1-char left padding).
+    let max_width = area.width.saturating_sub(1) as usize;
+
     let lines: Vec<Line> = wf.logs[start..end]
         .iter()
         .enumerate()
@@ -134,6 +139,15 @@ pub fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
                 _ => Color::Blue,
             };
 
+            // Build the raw content, then truncate to panel width.
+            let prefix = format!("{:<5} [{}] ", log.level.to_uppercase(), log.stage);
+            let available = max_width.saturating_sub(prefix.len());
+            let msg = if log.message.len() > available {
+                format!("{}…", &log.message[..available.saturating_sub(1)])
+            } else {
+                log.message.clone()
+            };
+
             Line::from(vec![
                 Span::styled(" ", row_bg),
                 Span::styled(
@@ -141,13 +155,11 @@ pub fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
                     row_bg.fg(level_color),
                 ),
                 Span::styled(format!("[{}] ", log.stage), row_bg.fg(Color::DarkGray)),
-                Span::styled(log.message.clone(), row_bg.fg(Color::Gray)),
+                Span::styled(msg, row_bg.fg(Color::Gray)),
             ])
         })
         .collect();
 
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().style(bg));
+    let paragraph = Paragraph::new(lines).block(Block::default().style(bg));
     f.render_widget(paragraph, area);
 }
