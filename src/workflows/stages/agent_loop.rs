@@ -1,19 +1,28 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+
+use crate::types::technique::RunResult;
+use crate::utils::prompt_loader::PromptLoader;
 use crate::workflows::stage::{Stage, StageContext};
 use crate::workflows::stages::external_agent_loop::{
     claude_adapter, codex_adapter, gemini_adapter, run_external_agent_loop,
     ExternalAgentRunOptions,
 };
-use crate::types::technique::RunResult;
 
 /// Maximum exponential back-off cap (1 minute).
 const MAX_BACKOFF_MS: u64 = 60_000;
 
 /// Routes the agent loop to the correct external CLI or harness-native
 /// technique, applying exponential back-off retries on failure.
+///
+/// Between failed attempts, a reflection step analyzes what went wrong
+/// and produces targeted guidance for the next attempt (inspired by the
+/// Reflexion technique).
 pub struct AgentLoopStage;
 
 #[async_trait]
@@ -40,6 +49,7 @@ impl Stage for AgentLoopStage {
         ));
 
         let mut last_result: Option<RunResult> = None;
+        let mut last_reflection: Option<String> = None;
 
         for attempt in 0..=max_retries {
             if ctx.is_aborted() {
@@ -53,6 +63,7 @@ impl Stage for AgentLoopStage {
                 build_resume_task_text(
                     &base_task_text,
                     last_result.as_ref(),
+                    last_reflection.as_deref(),
                     &ctx.workspace_dir,
                 )
                 .await
@@ -111,7 +122,20 @@ impl Stage for AgentLoopStage {
 
             last_result = Some(result);
 
+            // Generate a reflection before the next attempt (skip on the last).
             if attempt < max_retries {
+                ctx.logger.info("Generating reflection on failed attempt…");
+                last_reflection =
+                    generate_reflection(ctx, &base_task_text, last_result.as_ref()).await;
+
+                if let Some(ref reflection) = last_reflection {
+                    ctx.logger
+                        .info(&format!("Reflection: {}", reflection));
+                    if let Some(ref log) = ctx.workflow_log {
+                        let _ = log.log("info", "reflect", reflection).await;
+                    }
+                }
+
                 let delay =
                     (base_backoff * 2u64.pow(attempt as u32)).min(MAX_BACKOFF_MS);
                 ctx.logger
@@ -132,19 +156,169 @@ impl Stage for AgentLoopStage {
 }
 
 // ---------------------------------------------------------------------------
+// Reflection generator
+// ---------------------------------------------------------------------------
+
+/// Generate a structured reflection on a failed attempt using the Claude CLI.
+///
+/// Loads `prompts/reflect.md`, substitutes variables from the failed result,
+/// and calls the Claude CLI for a concise 3-5 sentence reflection.
+/// Returns `None` if the reflection fails (best-effort — never blocks the retry).
+async fn generate_reflection(
+    ctx: &StageContext,
+    base_task: &str,
+    prior_result: Option<&RunResult>,
+) -> Option<String> {
+    let loader = PromptLoader::new(&ctx.harness_root);
+
+    // Gather template variables.
+    let mut vars = HashMap::new();
+    vars.insert("task".to_string(), base_task.to_string());
+
+    if let Some(result) = prior_result {
+        let answer = if result.answer.len() > 1000 {
+            format!("{}… (truncated)", &result.answer[..1000])
+        } else {
+            result.answer.clone()
+        };
+        vars.insert("agent_output".to_string(), answer);
+        vars.insert(
+            "error".to_string(),
+            result.error.clone().unwrap_or_else(|| "(no error message)".into()),
+        );
+    } else {
+        vars.insert("agent_output".to_string(), "(no output)".into());
+        vars.insert("error".to_string(), "(unknown)".into());
+    }
+
+    // Get git diff --stat.
+    let diff_stat = get_diff_stat(&ctx.workspace_dir).await;
+    vars.insert("diff_stat".to_string(), diff_stat);
+
+    // Load the reflection prompt template.
+    let prompt = match loader.load("prompts/reflect.md", &vars).await {
+        Ok(p) => p,
+        Err(_) => {
+            // Fallback inline template if the file is missing.
+            format!(
+                "Task: {}\n\nPrevious attempt failed with: {}\n\n\
+                 Write a 3-5 sentence reflection: what went wrong and \
+                 what should the next attempt do differently.",
+                base_task,
+                vars.get("error").map(|s| s.as_str()).unwrap_or("unknown")
+            )
+        }
+    };
+
+    // Call Claude CLI for the reflection (lightweight — text output, short).
+    match call_claude_for_reflection(&prompt, ctx).await {
+        Ok(text) => {
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Err(e) => {
+            ctx.logger
+                .info(&format!("Reflection generation failed (continuing): {}", e));
+            None
+        }
+    }
+}
+
+/// Call the Claude CLI with a short prompt and return the text response.
+async fn call_claude_for_reflection(prompt: &str, ctx: &StageContext) -> Result<String> {
+    let mut args = vec![
+        "--print".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+    ];
+
+    if let Some(ref sp) = ctx.system_prompt {
+        args.push("--system-prompt".to_string());
+        args.push(sp.clone());
+    }
+
+    args.push("-".to_string());
+
+    let mut child = Command::new("claude")
+        .args(&args)
+        .current_dir(&ctx.workspace_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(prompt.as_bytes()).await?;
+    }
+
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .map_err(|_| anyhow::anyhow!("Reflection Claude CLI timed out"))??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("Claude CLI failed: {}", &stderr[..stderr.len().min(200)]));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run `git diff HEAD --stat` and return the output (best-effort).
+async fn get_diff_stat(workspace_dir: &std::path::Path) -> String {
+    match Command::new("git")
+        .args(["diff", "HEAD", "--stat"])
+        .current_dir(workspace_dir)
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stat = String::from_utf8_lossy(&output.stdout);
+            let stat = stat.trim();
+            if stat.is_empty() {
+                "(no changes)".into()
+            } else {
+                let lines: Vec<&str> = stat.lines().collect();
+                if lines.len() > 30 {
+                    format!("{}\n… ({} more files)", lines[..30].join("\n"), lines.len() - 30)
+                } else {
+                    stat.to_string()
+                }
+            }
+        }
+        Err(_) => "(git diff unavailable)".into(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resume context builder
 // ---------------------------------------------------------------------------
 
-/// Build an enriched task prompt for a retry, appending context gathered from
-/// the prior attempt.
+/// Build an enriched task prompt for a retry.
+///
+/// When a `reflection` is available, it is used as the primary context signal
+/// (replacing the raw prior answer dump).  When no reflection is available
+/// (fallback), the prior answer and git diff stat are appended directly.
 async fn build_resume_task_text(
     base_task: &str,
     prior_result: Option<&RunResult>,
+    reflection: Option<&str>,
     workspace_dir: &std::path::Path,
 ) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    if let Some(result) = prior_result {
+    // If we have a reflection, use it as the primary signal.
+    if let Some(reflection) = reflection {
+        sections.push(format!(
+            "Reflection from previous failed attempt:\n{}",
+            reflection
+        ));
+    } else if let Some(result) = prior_result {
+        // Fallback: raw prior answer (same as the old behavior).
         if !result.answer.is_empty() {
             let truncated = if result.answer.len() > 1000 {
                 format!("{}\n… (truncated)", &result.answer[..1000])
@@ -155,33 +329,13 @@ async fn build_resume_task_text(
         }
     }
 
-    // Append `git diff HEAD --stat` (best-effort; ignore errors for non-git dirs).
-    if let Ok(output) = Command::new("git")
-        .arg("diff")
-        .arg("HEAD")
-        .arg("--stat")
-        .current_dir(workspace_dir)
-        .output()
-        .await
-    {
-        let stat = String::from_utf8_lossy(&output.stdout);
-        let stat = stat.trim();
-        if !stat.is_empty() {
-            let lines: Vec<&str> = stat.lines().collect();
-            let truncated = if lines.len() > 30 {
-                format!(
-                    "{}\n… ({} more files)",
-                    lines[..30].join("\n"),
-                    lines.len() - 30
-                )
-            } else {
-                stat.to_string()
-            };
-            sections.push(format!(
-                "Files changed by previous attempt (git diff --stat):\n{}",
-                truncated
-            ));
-        }
+    // Always append git diff stat so the agent knows what files were touched.
+    let diff_stat = get_diff_stat(workspace_dir).await;
+    if diff_stat != "(no changes)" && diff_stat != "(git diff unavailable)" {
+        sections.push(format!(
+            "Files changed by previous attempt (git diff --stat):\n{}",
+            diff_stat
+        ));
     }
 
     if sections.is_empty() {
@@ -206,18 +360,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_resume_task_no_prior() {
-        // No prior result, no git repo at /tmp — should just return base task.
         let text =
-            build_resume_task_text("Fix the bug", None, std::path::Path::new("/tmp")).await;
+            build_resume_task_text("Fix the bug", None, None, std::path::Path::new("/tmp")).await;
         assert!(text.starts_with("Fix the bug"));
     }
 
     #[tokio::test]
-    async fn test_build_resume_task_with_prior_answer() {
+    async fn test_build_resume_task_with_prior_answer_no_reflection() {
         let prior = RunResult::failure("test", "err msg", vec![], 100);
         let text = build_resume_task_text(
             "Fix the bug",
             Some(&prior),
+            None,
             std::path::Path::new("/tmp"),
         )
         .await;
@@ -225,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_resume_includes_prior_answer() {
+    async fn test_build_resume_includes_prior_answer_when_no_reflection() {
         let prior = RunResult {
             technique: "test".into(),
             answer: "I tried doing X but it failed.".into(),
@@ -238,22 +392,44 @@ mod tests {
         let text = build_resume_task_text(
             "Fix the bug",
             Some(&prior),
+            None,
             std::path::Path::new("/tmp"),
         )
         .await;
         assert!(text.contains("I tried doing X but it failed."));
+        assert!(text.contains("Previous attempt output"));
     }
 
-    #[test]
-    fn test_agent_loop_stage_name() {
-        assert_eq!(AgentLoopStage.name(), "agent-loop");
-    }
+    #[tokio::test]
+    async fn test_build_resume_with_reflection_replaces_raw_answer() {
+        let prior = RunResult {
+            technique: "test".into(),
+            answer: "Raw output that should not appear.".into(),
+            trajectory: vec![],
+            llm_calls: 1,
+            duration_ms: 500,
+            success: false,
+            error: Some("exit 1".into()),
+        };
+        let reflection = "The test failed because the import was wrong. \
+                          Next attempt should check the module path first.";
+        let text = build_resume_task_text(
+            "Fix the bug",
+            Some(&prior),
+            Some(reflection),
+            std::path::Path::new("/tmp"),
+        )
+        .await;
 
-    // ── Additional tests ─────────────────────────────────────────────────────
+        // Reflection should be included.
+        assert!(text.contains("Reflection from previous failed attempt"));
+        assert!(text.contains("import was wrong"));
+        // Raw answer should NOT be included when reflection is present.
+        assert!(!text.contains("Raw output that should not appear"));
+    }
 
     #[tokio::test]
     async fn test_build_resume_task_text_with_prior_answer_truncated() {
-        // Prior answer longer than 1000 chars should be truncated.
         let long_answer = "X".repeat(2000);
         let prior = RunResult {
             technique: "test".into(),
@@ -267,20 +443,18 @@ mod tests {
         let text = build_resume_task_text(
             "Fix the bug",
             Some(&prior),
+            None,
             std::path::Path::new("/tmp"),
         )
         .await;
         assert!(text.contains("Fix the bug"));
         assert!(text.contains("truncated"));
-        // The included prior output should be at most 1000 X's.
         let x_count = text.matches('X').count();
         assert!(x_count <= 1000, "Expected <= 1000 X's, got {}", x_count);
     }
 
     #[tokio::test]
     async fn test_build_resume_task_text_empty_answer() {
-        // A prior result with an empty answer should not include the
-        // "Previous attempt output" section.
         let prior = RunResult {
             technique: "test".into(),
             answer: String::new(),
@@ -293,10 +467,29 @@ mod tests {
         let text = build_resume_task_text(
             "Do the thing",
             Some(&prior),
+            None,
             std::path::Path::new("/tmp"),
         )
         .await;
         assert!(text.starts_with("Do the thing"));
         assert!(!text.contains("Previous attempt output"));
+    }
+
+    #[tokio::test]
+    async fn test_build_resume_reflection_only_no_prior_result() {
+        let text = build_resume_task_text(
+            "Fix the bug",
+            None,
+            Some("Try a different approach."),
+            std::path::Path::new("/tmp"),
+        )
+        .await;
+        assert!(text.contains("Reflection from previous failed attempt"));
+        assert!(text.contains("Try a different approach."));
+    }
+
+    #[test]
+    fn test_agent_loop_stage_name() {
+        assert_eq!(AgentLoopStage.name(), "agent-loop");
     }
 }
