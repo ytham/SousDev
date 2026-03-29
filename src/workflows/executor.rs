@@ -12,6 +12,15 @@ use crate::workflows::github_prs::{
     FetchPRsOptions, GitHubPR, InlineReviewComment, PRComment,
 };
 use crate::workflows::workflow::{make_skipped_result, ParsedTask};
+
+/// Truncate a string for info panel display.
+fn truncate_title(s: &str, max: usize) -> String {
+    if s.len() > max {
+        format!("{}…", &s[..max.saturating_sub(1)])
+    } else {
+        s.to_string()
+    }
+}
 use crate::workflows::stage::{ResolvedPrompts, Stage, StageContext, UnaddressedComments};
 use crate::workflows::stages::agent_loop::AgentLoopStage;
 use crate::workflows::stages::pr_checkout::PrCheckoutStage;
@@ -30,7 +39,7 @@ use crate::workflows::workspace::WorkspaceManager;
 use crate::providers::provider::LLMProvider;
 use crate::tools::registry::ToolRegistry;
 use crate::types::config::{WorkflowConfig, PromptConfig};
-use crate::tui::events::{WorkflowMode, TuiEvent, TuiEventSender};
+use crate::tui::events::{ItemStatus, ItemSummary, WorkflowMode, TuiEvent, TuiEventSender};
 use crate::utils::logger::Logger;
 use crate::utils::prompt_loader::PromptLoader;
 
@@ -445,6 +454,41 @@ impl WorkflowExecutor {
             unhandled.push(item.clone());
         }
 
+        // Emit item summaries for the TUI info panel.
+        {
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for item in &items {
+                let item_key = item.number.to_string();
+                let is_handled = self
+                    .issue_store
+                    .is_handled(&self.config.name, item.number)
+                    .await
+                    .unwrap_or(false);
+                let in_cooldown = self
+                    .failure_store
+                    .is_in_cooldown(&self.config.name, &item_key)
+                    .await
+                    .unwrap_or(false);
+                let status = if is_handled {
+                    ItemStatus::Success
+                } else if in_cooldown {
+                    ItemStatus::Cooldown
+                } else {
+                    ItemStatus::None
+                };
+                summaries.push(ItemSummary {
+                    id: item.display_id.clone(),
+                    title: truncate_title(&item.title, 50),
+                    url: item.url.clone(),
+                    status,
+                });
+            }
+            self.opts.tui_tx.send(TuiEvent::ItemsSummary {
+                workflow_name: self.config.name.clone(),
+                items: summaries,
+            });
+        }
+
         if unhandled.is_empty() {
             logger.info("No new issues to process — skipping");
             let result = make_skipped_result(&self.config.name, &run_id, &started_at, None);
@@ -747,6 +791,43 @@ impl WorkflowExecutor {
             }
         }
 
+        // Emit item summaries for the TUI info panel.
+        {
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for pr in &prs {
+                let pr_key = format!("pr-{}", pr.number);
+                let in_cooldown = self
+                    .failure_store
+                    .is_in_cooldown(&self.config.name, &pr_key)
+                    .await
+                    .unwrap_or(false);
+                let is_reviewed = self
+                    .pr_review_store
+                    .get_record(&self.config.name, pr.number)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let status = if in_cooldown {
+                    ItemStatus::Cooldown
+                } else if is_reviewed {
+                    ItemStatus::Reviewed
+                } else {
+                    ItemStatus::None
+                };
+                summaries.push(ItemSummary {
+                    id: format!("PR #{}", pr.number),
+                    title: truncate_title(&pr.title, 50),
+                    url: pr.url.clone(),
+                    status,
+                });
+            }
+            self.opts.tui_tx.send(TuiEvent::ItemsSummary {
+                workflow_name: self.config.name.clone(),
+                items: summaries,
+            });
+        }
+
         if to_review.is_empty() {
             logger.info("No new PRs to review — skipping");
             let result = make_skipped_result(&self.config.name, &run_id, &started_at, None);
@@ -1042,6 +1123,33 @@ impl WorkflowExecutor {
                     timeline: new_timeline,
                 });
             }
+        }
+
+        // Emit item summaries for the TUI info panel.
+        {
+            let responded_set: std::collections::HashSet<u64> = to_respond
+                .iter()
+                .map(|r| r.pr.number)
+                .collect();
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for pr in &prs {
+                let has_new_comments = responded_set.contains(&pr.number);
+                let status = if has_new_comments {
+                    ItemStatus::NewComments
+                } else {
+                    ItemStatus::None
+                };
+                summaries.push(ItemSummary {
+                    id: format!("PR #{}", pr.number),
+                    title: truncate_title(&pr.title, 50),
+                    url: pr.url.clone(),
+                    status,
+                });
+            }
+            self.opts.tui_tx.send(TuiEvent::ItemsSummary {
+                workflow_name: self.config.name.clone(),
+                items: summaries,
+            });
         }
 
         if to_respond.is_empty() {

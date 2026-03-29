@@ -3,7 +3,7 @@
 /// The `App` struct holds all mutable state needed to render the dashboard.
 /// The `run_app` function sets up the terminal, spawns the cron scheduler,
 /// and drives the ratatui draw/input loop.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use ratatui::Terminal;
 use tokio::sync::Mutex;
 
 use crate::workflows::cron_runner::CronRunner;
-use crate::tui::events::{WorkflowMode, TuiEvent, TuiEventSender};
+use crate::tui::events::{ItemStatus, ItemSummary, WorkflowMode, TuiEvent, TuiEventSender};
 use crate::tui::session::{self, SessionConfig};
 use crate::tui::ui;
 use crate::types::config::HarnessConfig;
@@ -30,8 +30,10 @@ use crate::types::config::HarnessConfig;
 pub enum InputMode {
     /// Normal mode: up/down selects workflow, page-up/page-down scrolls logs.
     Normal,
-    /// Command mode: activated by Esc, shows the command menu.
+    /// Command mode: activated by `:`, shows the command menu.
     Command,
+    /// Cron edit mode: text input for updating the selected workflow's schedule.
+    CronEdit,
 }
 
 /// A single log line stored per-workflow.
@@ -78,6 +80,8 @@ pub struct WorkflowState {
     pub logs: Vec<LogLine>,
     /// Whether this workflow is enabled (cron ticks are skipped when disabled).
     pub enabled: bool,
+    /// The item label of the currently running item (for info panel updates).
+    pub current_item_label: Option<String>,
 }
 
 /// High-level workflow status.
@@ -110,6 +114,7 @@ pub enum Panel {
     Sidebar,
     Logs,
     InfoBar,
+    InfoPanel,
     None,
 }
 
@@ -136,12 +141,16 @@ pub struct PanelLayout {
     pub sidebar: ratatui::layout::Rect,
     pub logs: ratatui::layout::Rect,
     pub info_bar: ratatui::layout::Rect,
+    pub info_panel: ratatui::layout::Rect,
 }
 
 impl PanelLayout {
     /// Determine which panel a terminal coordinate falls in.
     pub fn hit_test(&self, col: u16, row: u16) -> Panel {
-        if contains(&self.logs, col, row) {
+        // Info panel takes priority (it floats over logs).
+        if self.info_panel.width > 0 && contains(&self.info_panel, col, row) {
+            Panel::InfoPanel
+        } else if contains(&self.logs, col, row) {
             Panel::Logs
         } else if contains(&self.sidebar, col, row) {
             Panel::Sidebar
@@ -193,6 +202,12 @@ pub struct App {
     pub selection: TextSelection,
     /// Active toast notification (auto-expires).
     pub toast: Option<Toast>,
+    /// Text buffer for the cron edit input.
+    pub cron_input: String,
+    /// Whether the info panel is open.
+    pub info_panel_open: bool,
+    /// Per-workflow item summaries for the info panel.
+    pub workflow_items: HashMap<String, Vec<ItemSummary>>,
 }
 
 impl Default for App {
@@ -217,6 +232,9 @@ impl App {
             layout: PanelLayout::default(),
             selection: TextSelection::default(),
             toast: None,
+            cron_input: String::new(),
+            info_panel_open: false,
+            workflow_items: HashMap::new(),
         }
     }
 
@@ -267,6 +285,7 @@ impl App {
                     run_id: None,
                     logs: Vec::new(),
                     enabled,
+                    current_item_label: None,
                 });
             }
 
@@ -299,9 +318,15 @@ impl App {
                 item_label,
                 ..
             } => {
+                // Update info panel: mark the matching item as InProgress.
+                if let Some(ref label) = item_label {
+                    self.update_item_status(&workflow_name, label, ItemStatus::InProgress);
+                }
+
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     wf.status = WorkflowStatus::Running;
                     wf.run_id = Some(run_id);
+                    wf.current_item_label = item_label.clone();
                     // Reset all stage statuses to pending.
                     for s in &mut wf.stage_statuses {
                         *s = StageStatus::Pending;
@@ -315,6 +340,7 @@ impl App {
                         message: label,
                     });
                 }
+
                 // Auto-scroll to bottom when a run starts for the selected workflow.
                 self.log_scroll = 0;
             }
@@ -390,6 +416,12 @@ impl App {
                 pr_url,
                 ..
             } => {
+                let item_label = self
+                    .workflows
+                    .iter()
+                    .find(|w| w.name == workflow_name)
+                    .and_then(|w| w.current_item_label.clone());
+
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     wf.status = if skipped {
                         WorkflowStatus::Skipped
@@ -399,6 +431,7 @@ impl App {
                         WorkflowStatus::Failed
                     };
                     wf.run_id = None;
+                    wf.current_item_label = None;
 
                     let mut msg = format!("Run completed: {}", wf.status);
                     if let Some(url) = pr_url {
@@ -413,6 +446,23 @@ impl App {
                         message: msg,
                     });
                 }
+
+                // Update info panel item status.
+                if let Some(ref label) = item_label {
+                    let new_status = if success {
+                        ItemStatus::Success
+                    } else {
+                        ItemStatus::Error
+                    };
+                    self.update_item_status(&workflow_name, label, new_status);
+                }
+            }
+
+            TuiEvent::ItemsSummary {
+                workflow_name,
+                items,
+            } => {
+                self.workflow_items.insert(workflow_name, items);
             }
 
             TuiEvent::Shutdown => {
@@ -457,6 +507,9 @@ impl App {
                     // Scroll to end of logs (auto-tail).
                     self.log_scroll = 0;
                 }
+                KeyCode::Char('i') => {
+                    self.info_panel_open = !self.info_panel_open;
+                }
                 KeyCode::Char(':') => {
                     self.input_mode = InputMode::Command;
                 }
@@ -478,12 +531,36 @@ impl App {
                     self.toggle_selected_workflow();
                     self.input_mode = InputMode::Normal;
                 }
+                KeyCode::Char('c') => {
+                    // Enter cron edit mode for the selected workflow.
+                    self.cron_input.clear();
+                    if let Some(wf) = self.selected_workflow() {
+                        self.cron_input = wf.schedule.clone();
+                    }
+                    self.input_mode = InputMode::CronEdit;
+                }
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
                 }
                 _ => {
                     self.input_mode = InputMode::Normal;
                 }
+            },
+            InputMode::CronEdit => match key {
+                KeyCode::Enter => {
+                    self.apply_cron_input();
+                    self.input_mode = InputMode::Normal;
+                }
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                }
+                KeyCode::Backspace => {
+                    self.cron_input.pop();
+                }
+                KeyCode::Char(ch) => {
+                    self.cron_input.push(ch);
+                }
+                _ => {}
             },
         }
     }
@@ -523,6 +600,22 @@ impl App {
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let panel = self.layout.hit_test(event.column, event.row);
+
+                // Click in sidebar: select the clicked workflow.
+                if panel == Panel::Sidebar {
+                    if let Some(idx) = self.sidebar_row_to_workflow(event.row) {
+                        if idx != self.selected {
+                            self.selected = idx;
+                            self.log_scroll = 0;
+                        }
+                    }
+                }
+
+                // Click in info panel: open the item's URL.
+                if panel == Panel::InfoPanel {
+                    self.open_info_panel_item(event.row);
+                }
+
                 self.selection = TextSelection {
                     active: true,
                     panel: Some(panel),
@@ -643,8 +736,243 @@ impl App {
         }
     }
 
+    /// Open the URL of an info panel item clicked at a given terminal row.
+    fn open_info_panel_item(&mut self, row: u16) {
+        let panel = &self.layout.info_panel;
+        if panel.height == 0 {
+            return;
+        }
+        // Rows: 0 = title, 1 = separator, 2+ = items.
+        let item_row = row.saturating_sub(panel.y + 2) as usize;
+        let items = self.selected_items();
+        if item_row < items.len() {
+            let url = items[item_row].url.clone();
+            if !url.is_empty() {
+                // Open in default browser (best-effort).
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&url).spawn();
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn();
+
+                self.show_toast("Opened in browser", Duration::from_secs(3));
+            }
+        }
+    }
+
+    /// Map a terminal row in the sidebar to a workflow index.
+    ///
+    /// The sidebar layout is: 2 header lines (title + blank), then per
+    /// workflow: name line + schedule line + N stage lines + 1 separator.
+    fn sidebar_row_to_workflow(&self, row: u16) -> Option<usize> {
+        let sidebar_y = self.layout.sidebar.y;
+        if row < sidebar_y + 2 {
+            return None; // Header area
+        }
+        let mut y = sidebar_y + 2; // After "Workflows" title + blank line
+        for (i, wf) in self.workflows.iter().enumerate() {
+            let height = 2 + wf.stages.len() as u16; // name + schedule + stages
+            if row >= y && row < y + height {
+                return Some(i);
+            }
+            y += height + 1; // +1 for separator blank line
+        }
+        None
+    }
+
+    /// Apply the cron edit input to the selected workflow.
+    ///
+    /// Parses the input as either a 6-field cron expression or a
+    /// human-readable duration (e.g. "15m", "2hr", "2 hours").
+    /// Updates the in-memory workflow state and marks config dirty.
+    pub fn apply_cron_input(&mut self) {
+        let input = self.cron_input.trim().to_string();
+        if input.is_empty() {
+            return;
+        }
+
+        let cron_expr = if looks_like_cron(&input) {
+            input.clone()
+        } else {
+            match parse_human_cron(&input) {
+                Some(expr) => expr,
+                None => {
+                    self.show_toast(
+                        &format!("Invalid schedule: {}", input),
+                        Duration::from_secs(4),
+                    );
+                    return;
+                }
+            }
+        };
+
+        if let Some(wf) = self.workflows.get_mut(self.selected) {
+            let name = wf.name.clone();
+            wf.schedule = cron_expr.clone();
+            wf.logs.push(LogLine {
+                level: "info".into(),
+                stage: "config".into(),
+                message: format!("Schedule updated to: {}", cron_expr),
+            });
+
+            // Persist to config.toml.
+            if let Some(ref root) = self.project_root {
+                update_config_toml_schedule(root, &name, &cron_expr);
+            }
+        }
+
+        self.show_toast("Schedule updated", Duration::from_secs(4));
+    }
+
+    /// Update the status of an item in the info panel by matching the label.
+    ///
+    /// The label is matched against item IDs (e.g. "issue #42" matches "#42",
+    /// "PR #12050" matches "PR #12050").
+    fn update_item_status(&mut self, workflow_name: &str, item_label: &str, status: ItemStatus) {
+        if let Some(items) = self.workflow_items.get_mut(workflow_name) {
+            for item in items.iter_mut() {
+                if item_label.contains(&item.id) {
+                    item.status = status;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Return the items for the currently selected workflow's info panel.
+    pub fn selected_items(&self) -> &[ItemSummary] {
+        let empty: &[ItemSummary] = &[];
+        self.selected_workflow()
+            .and_then(|wf| self.workflow_items.get(&wf.name))
+            .map(|v| v.as_slice())
+            .unwrap_or(empty)
+    }
+
     fn find_workflow_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
         self.workflows.iter_mut().find(|w| w.name == name)
+    }
+}
+
+/// Check if a string looks like a 6-field cron expression.
+fn looks_like_cron(s: &str) -> bool {
+    let fields: Vec<&str> = s.split_whitespace().collect();
+    fields.len() == 6 && fields.iter().all(|f| {
+        f.chars().all(|c| c.is_ascii_digit() || c == '*' || c == '/' || c == '-' || c == ',')
+    })
+}
+
+/// Parse a human-readable duration string into a 6-field cron expression.
+///
+/// Supports formats like: "15m", "15 min", "15mins", "15 minutes",
+/// "2h", "2hr", "2 hours", "30s", "30 sec", "30 seconds".
+/// Case-insensitive.
+///
+/// Returns `None` if the input cannot be parsed.
+fn parse_human_cron(input: &str) -> Option<String> {
+    let input = input.trim().to_lowercase();
+
+    // Try to extract a number and a unit.
+    let mut num_str = String::new();
+    let mut unit_str = String::new();
+    let mut in_unit = false;
+
+    for ch in input.chars() {
+        if !in_unit && (ch.is_ascii_digit() || ch == '.') {
+            num_str.push(ch);
+        } else {
+            in_unit = true;
+            if ch.is_alphabetic() {
+                unit_str.push(ch);
+            }
+        }
+    }
+
+    let n: u64 = num_str.parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+
+    let unit = unit_str.trim();
+
+    match unit {
+        "s" | "sec" | "secs" | "second" | "seconds" => {
+            if n > 59 {
+                return None;
+            }
+            Some(format!("*/{} * * * * *", n))
+        }
+        "m" | "min" | "mins" | "minute" | "minutes" => {
+            if n > 59 {
+                return None;
+            }
+            Some(format!("0 */{} * * * *", n))
+        }
+        "h" | "hr" | "hrs" | "hour" | "hours" => {
+            if n > 23 {
+                return None;
+            }
+            Some(format!("0 0 */{} * * *", n))
+        }
+        _ => None,
+    }
+}
+
+/// Update the schedule for a workflow in `config.toml`.
+///
+/// Reads the file, finds the `[[workflows]]` section with matching name,
+/// and updates the `schedule` value.  Best-effort — if parsing fails,
+/// the file is left unchanged.
+fn update_config_toml_schedule(project_root: &std::path::Path, workflow_name: &str, new_schedule: &str) {
+    let config_path = project_root.join("config.toml");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Strategy: find the [[workflows]] block where name = "workflow_name",
+    // then find the `schedule = "..."` line within that block and replace it.
+    let mut result = String::new();
+    let mut in_target_block = false;
+    let mut schedule_replaced = false;
+
+    for line in content.lines() {
+        // Detect start of a [[workflows]] block.
+        if line.trim() == "[[workflows]]" {
+            in_target_block = false; // Reset — next name= determines if it's our target.
+        }
+
+        // Detect the name field.
+        if line.trim().starts_with("name") {
+            if let Some(val) = extract_toml_string_value(line) {
+                in_target_block = val == workflow_name;
+            }
+        }
+
+        // Replace the schedule line in the target block.
+        if in_target_block && !schedule_replaced && line.trim().starts_with("schedule") {
+            result.push_str(&format!("schedule = \"{}\"", new_schedule));
+            result.push('\n');
+            schedule_replaced = true;
+            continue;
+        }
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    if schedule_replaced {
+        let _ = std::fs::write(&config_path, result);
+    }
+}
+
+/// Extract a quoted string value from a TOML `key = "value"` line.
+fn extract_toml_string_value(line: &str) -> Option<String> {
+    let after_eq = line.split('=').nth(1)?.trim();
+    if after_eq.starts_with('"') && after_eq.ends_with('"') && after_eq.len() >= 2 {
+        Some(after_eq[1..after_eq.len() - 1].to_string())
+    } else {
+        None
     }
 }
 
@@ -1674,6 +2002,7 @@ mod tests {
             sidebar: ratatui::layout::Rect::new(0, 0, 26, 30),
             logs: ratatui::layout::Rect::new(27, 0, 80, 27),
             info_bar: ratatui::layout::Rect::new(27, 28, 80, 2),
+            info_panel: ratatui::layout::Rect::default(),
         };
 
         assert_eq!(layout.hit_test(0, 0), Panel::Sidebar);
@@ -1700,5 +2029,336 @@ mod tests {
         assert_eq!(app.selected_workflow().unwrap().name, "y");
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(app.selected_workflow().unwrap().name, "z");
+    }
+
+    // ── parse_human_cron ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_human_cron_minutes() {
+        assert_eq!(parse_human_cron("5m"), Some("0 */5 * * * *".into()));
+        assert_eq!(parse_human_cron("15min"), Some("0 */15 * * * *".into()));
+        assert_eq!(parse_human_cron("30 mins"), Some("0 */30 * * * *".into()));
+        assert_eq!(parse_human_cron("1 minute"), Some("0 */1 * * * *".into()));
+        assert_eq!(parse_human_cron("45minutes"), Some("0 */45 * * * *".into()));
+    }
+
+    #[test]
+    fn test_parse_human_cron_hours() {
+        assert_eq!(parse_human_cron("1h"), Some("0 0 */1 * * *".into()));
+        assert_eq!(parse_human_cron("2hr"), Some("0 0 */2 * * *".into()));
+        assert_eq!(parse_human_cron("2 hrs"), Some("0 0 */2 * * *".into()));
+        assert_eq!(parse_human_cron("6 hours"), Some("0 0 */6 * * *".into()));
+        assert_eq!(parse_human_cron("12HRS"), Some("0 0 */12 * * *".into()));
+    }
+
+    #[test]
+    fn test_parse_human_cron_seconds() {
+        assert_eq!(parse_human_cron("30s"), Some("*/30 * * * * *".into()));
+        assert_eq!(parse_human_cron("10 sec"), Some("*/10 * * * * *".into()));
+        assert_eq!(parse_human_cron("5seconds"), Some("*/5 * * * * *".into()));
+    }
+
+    #[test]
+    fn test_parse_human_cron_case_insensitive() {
+        assert_eq!(parse_human_cron("5M"), Some("0 */5 * * * *".into()));
+        assert_eq!(parse_human_cron("2HR"), Some("0 0 */2 * * *".into()));
+        assert_eq!(parse_human_cron("10Sec"), Some("*/10 * * * * *".into()));
+    }
+
+    #[test]
+    fn test_parse_human_cron_invalid() {
+        assert_eq!(parse_human_cron(""), None);
+        assert_eq!(parse_human_cron("abc"), None);
+        assert_eq!(parse_human_cron("0m"), None);
+        assert_eq!(parse_human_cron("60m"), None); // >59 minutes
+        assert_eq!(parse_human_cron("24h"), None); // >23 hours
+        assert_eq!(parse_human_cron("60s"), None); // >59 seconds
+        assert_eq!(parse_human_cron("5 days"), None);
+    }
+
+    #[test]
+    fn test_looks_like_cron() {
+        assert!(looks_like_cron("0 */5 * * * *"));
+        assert!(looks_like_cron("0 0 * * * *"));
+        assert!(looks_like_cron("*/10 * * * * *"));
+        assert!(!looks_like_cron("5m"));
+        assert!(!looks_like_cron("every 5 minutes"));
+        assert!(!looks_like_cron("0 * * * *")); // 5 fields, not 6
+    }
+
+    // ── cron edit mode ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_c_command_enters_cron_edit() {
+        let mut app = app_with_workflow("p", WorkflowMode::Standard);
+        app.workflows[0].schedule = "0 */5 * * * *".into();
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        assert_eq!(app.input_mode, InputMode::CronEdit);
+        assert_eq!(app.cron_input, "0 */5 * * * *");
+    }
+
+    #[test]
+    fn test_cron_edit_typing() {
+        let mut app = App::new();
+        app.input_mode = InputMode::CronEdit;
+        app.cron_input.clear();
+        app.handle_key(KeyCode::Char('1'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('5'), KeyModifiers::empty());
+        app.handle_key(KeyCode::Char('m'), KeyModifiers::empty());
+        assert_eq!(app.cron_input, "15m");
+    }
+
+    #[test]
+    fn test_cron_edit_backspace() {
+        let mut app = App::new();
+        app.input_mode = InputMode::CronEdit;
+        app.cron_input = "15m".into();
+        app.handle_key(KeyCode::Backspace, KeyModifiers::empty());
+        assert_eq!(app.cron_input, "15");
+    }
+
+    #[test]
+    fn test_cron_edit_esc_cancels() {
+        let mut app = App::new();
+        app.input_mode = InputMode::CronEdit;
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_apply_cron_input_human() {
+        let mut app = app_with_workflow("p", WorkflowMode::Standard);
+        app.cron_input = "15m".into();
+        app.apply_cron_input();
+        assert_eq!(app.workflows[0].schedule, "0 */15 * * * *");
+    }
+
+    #[test]
+    fn test_apply_cron_input_raw_cron() {
+        let mut app = app_with_workflow("p", WorkflowMode::Standard);
+        app.cron_input = "0 0 */2 * * *".into();
+        app.apply_cron_input();
+        assert_eq!(app.workflows[0].schedule, "0 0 */2 * * *");
+    }
+
+    #[test]
+    fn test_apply_cron_input_invalid_shows_toast() {
+        let mut app = app_with_workflow("p", WorkflowMode::Standard);
+        let old_schedule = app.workflows[0].schedule.clone();
+        app.cron_input = "invalid".into();
+        app.apply_cron_input();
+        // Schedule should not change.
+        assert_eq!(app.workflows[0].schedule, old_schedule);
+        // Toast should show error.
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().message.contains("Invalid"));
+    }
+
+    // ── click to select ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_click_sidebar_selects_workflow() {
+        let mut app = App::new();
+        for name in &["a", "b", "c"] {
+            app.handle_tui_event(TuiEvent::WorkflowRegistered {
+                name: (*name).into(),
+                schedule: "* * * * * *".into(),
+                mode: WorkflowMode::Standard,
+                repo: None,
+            });
+        }
+        app.layout.sidebar = ratatui::layout::Rect::new(0, 0, 26, 30);
+        assert_eq!(app.selected, 0);
+
+        // "a" starts at row 2 (after title + blank), has 2+4=6 lines
+        // "b" starts at row 9 (6 + 1 separator + 2 header)
+        // Click on row 9 should select "b"
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            9,
+        ));
+        // Release immediately so we don't trigger clipboard
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            5,
+            9,
+        ));
+        assert_eq!(app.selected, 1);
+    }
+
+    // ── extract_toml_string_value ─────────────────────────────────────────
+
+    #[test]
+    fn test_extract_toml_string_value() {
+        assert_eq!(
+            extract_toml_string_value(r#"name = "bug-autofix""#),
+            Some("bug-autofix".into())
+        );
+        assert_eq!(
+            extract_toml_string_value(r#"schedule = "0 */5 * * * *""#),
+            Some("0 */5 * * * *".into())
+        );
+        assert_eq!(extract_toml_string_value("name = 42"), None);
+        assert_eq!(extract_toml_string_value("# comment"), None);
+    }
+
+    // ── Info panel ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_i_key_toggles_info_panel() {
+        let mut app = App::new();
+        assert!(!app.info_panel_open);
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        assert!(app.info_panel_open);
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        assert!(!app.info_panel_open);
+    }
+
+    #[test]
+    fn test_items_summary_event_updates_workflow_items() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![
+                ItemSummary {
+                    id: "#42".into(),
+                    title: "Fix bug".into(),
+                    url: "https://github.com/o/r/issues/42".into(),
+                    status: ItemStatus::None,
+                },
+                ItemSummary {
+                    id: "#43".into(),
+                    title: "Add feature".into(),
+                    url: "https://github.com/o/r/issues/43".into(),
+                    status: ItemStatus::Success,
+                },
+            ],
+        });
+        assert_eq!(app.workflow_items.get("p").unwrap().len(), 2);
+        assert_eq!(app.selected_items().len(), 2);
+        assert_eq!(app.selected_items()[0].id, "#42");
+    }
+
+    #[test]
+    fn test_run_started_sets_item_in_progress() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![ItemSummary {
+                id: "#42".into(),
+                title: "Fix".into(),
+                url: "u".into(),
+                status: ItemStatus::None,
+            }],
+        });
+        app.handle_tui_event(TuiEvent::RunStarted {
+            workflow_name: "p".into(),
+            run_id: "r".into(),
+            mode: WorkflowMode::Issues,
+            item_label: Some("issue #42".into()),
+        });
+        assert_eq!(app.selected_items()[0].status, ItemStatus::InProgress);
+    }
+
+    #[test]
+    fn test_run_completed_sets_item_success() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![ItemSummary {
+                id: "#42".into(),
+                title: "Fix".into(),
+                url: "u".into(),
+                status: ItemStatus::InProgress,
+            }],
+        });
+        // First a RunStarted to set current_item_label
+        app.handle_tui_event(TuiEvent::RunStarted {
+            workflow_name: "p".into(),
+            run_id: "r".into(),
+            mode: WorkflowMode::Issues,
+            item_label: Some("issue #42".into()),
+        });
+        app.handle_tui_event(TuiEvent::RunCompleted {
+            workflow_name: "p".into(),
+            run_id: "r".into(),
+            success: true,
+            skipped: false,
+            error: None,
+            pr_url: Some("url".into()),
+        });
+        assert_eq!(app.selected_items()[0].status, ItemStatus::Success);
+    }
+
+    #[test]
+    fn test_run_completed_failure_sets_item_error() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![ItemSummary {
+                id: "#42".into(),
+                title: "Fix".into(),
+                url: "u".into(),
+                status: ItemStatus::None,
+            }],
+        });
+        app.handle_tui_event(TuiEvent::RunStarted {
+            workflow_name: "p".into(),
+            run_id: "r".into(),
+            mode: WorkflowMode::Issues,
+            item_label: Some("issue #42".into()),
+        });
+        app.handle_tui_event(TuiEvent::RunCompleted {
+            workflow_name: "p".into(),
+            run_id: "r".into(),
+            success: false,
+            skipped: false,
+            error: Some("fail".into()),
+            pr_url: None,
+        });
+        assert_eq!(app.selected_items()[0].status, ItemStatus::Error);
+    }
+
+    #[test]
+    fn test_selected_items_empty_when_no_data() {
+        let app = app_with_workflow("p", WorkflowMode::Standard);
+        assert!(app.selected_items().is_empty());
+    }
+
+    #[test]
+    fn test_items_summary_replaces_previous() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![ItemSummary {
+                id: "#1".into(),
+                title: "old".into(),
+                url: "u".into(),
+                status: ItemStatus::None,
+            }],
+        });
+        assert_eq!(app.selected_items().len(), 1);
+
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![
+                ItemSummary {
+                    id: "#1".into(),
+                    title: "new".into(),
+                    url: "u".into(),
+                    status: ItemStatus::Success,
+                },
+                ItemSummary {
+                    id: "#2".into(),
+                    title: "added".into(),
+                    url: "u".into(),
+                    status: ItemStatus::None,
+                },
+            ],
+        });
+        assert_eq!(app.selected_items().len(), 2);
+        assert_eq!(app.selected_items()[0].title, "new");
     }
 }

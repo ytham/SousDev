@@ -119,8 +119,8 @@ timeout_secs = 300            # 5 minutes per agent invocation
 
 [workflows.workspace]
 base_branch = "main"
-branch_prefix = "harness/issue-"
-# workspaces_dir = "~/my-workspaces"  # default: ~/agent-harness/workspaces
+branch_prefix = "sousdev/issue-"
+# workspaces_dir = "~/my-workspaces"  # default: ~/sousdev/workspaces
 
 [workflows.pull_request]
 draft = false

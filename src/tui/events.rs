@@ -74,8 +74,49 @@ pub enum TuiEvent {
         pr_url: Option<String>,
     },
 
+    /// A batch of item summaries for the info panel.
+    ///
+    /// Emitted by the executor after fetching and classifying issues/PRs.
+    /// Replaces the previous item list for this workflow.
+    ItemsSummary {
+        workflow_name: String,
+        items: Vec<ItemSummary>,
+    },
+
     /// The entire cron scheduler is shutting down.
     Shutdown,
+}
+
+/// Summary of a single issue or PR for the info panel.
+#[derive(Debug, Clone)]
+pub struct ItemSummary {
+    /// Human-readable identifier (e.g. `"#42"` or `"PR #12050"`).
+    pub id: String,
+    /// Short title (truncated for display).
+    pub title: String,
+    /// Full URL (GitHub or Linear).
+    pub url: String,
+    /// Current processing status.
+    pub status: ItemStatus,
+}
+
+/// Processing status of an issue or PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemStatus {
+    /// Not yet processed.
+    None,
+    /// Currently being processed by the agent.
+    InProgress,
+    /// Completed successfully (PR opened, review posted, comments addressed).
+    Success,
+    /// Failed (may be in cooldown).
+    Error,
+    /// In failure cooldown — will retry after cooldown expires.
+    Cooldown,
+    /// PR review has been posted (pr-reviewer specific).
+    Reviewed,
+    /// PR has new unaddressed reviewer comments (pr-responder specific).
+    NewComments,
 }
 
 /// Which workflow mode is being executed.
