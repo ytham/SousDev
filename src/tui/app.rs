@@ -206,8 +206,12 @@ pub struct App {
     pub cron_input: String,
     /// Whether the info panel is open.
     pub info_panel_open: bool,
+    /// Index of the highlighted item in the info panel.
+    pub info_panel_selected: usize,
     /// Per-workflow item summaries for the info panel.
     pub workflow_items: HashMap<String, Vec<ItemSummary>>,
+    /// Pending failure cooldown clears (workflow_name, item_key).
+    pub clear_requests: Vec<(String, String)>,
 }
 
 impl Default for App {
@@ -234,7 +238,9 @@ impl App {
             toast: None,
             cron_input: String::new(),
             info_panel_open: false,
+            info_panel_selected: 0,
             workflow_items: HashMap::new(),
+            clear_requests: Vec::new(),
         }
     }
 
@@ -462,6 +468,14 @@ impl App {
                 workflow_name,
                 items,
             } => {
+                // Reset selection when items refresh for the selected workflow.
+                if self
+                    .selected_workflow()
+                    .map(|wf| wf.name == workflow_name)
+                    .unwrap_or(false)
+                {
+                    self.info_panel_selected = 0;
+                }
                 self.workflow_items.insert(workflow_name, items);
             }
 
@@ -472,96 +486,152 @@ impl App {
     }
 
     /// Handle a keyboard event.
+    ///
+    /// Keys are routed to the topmost active context.  Universal keys
+    /// (`Ctrl+C`) are handled first, then the context stack is checked
+    /// in priority order: CronEdit > Command > InfoPanel > Normal.
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) {
+        // Universal: Ctrl+C always quits.
+        if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return;
+        }
+
+        // Route to topmost context.
         match self.input_mode {
-            InputMode::Normal => match key {
-                KeyCode::Up => {
-                    if self.selected > 0 {
-                        self.selected -= 1;
-                        self.log_scroll = 0;
-                    }
-                }
-                KeyCode::Down => {
-                    if self.selected + 1 < self.workflows.len() {
-                        self.selected += 1;
-                        self.log_scroll = 0;
-                    }
-                }
-                KeyCode::PageUp | KeyCode::Char('b') => {
-                    // One page up.
-                    let page = self.layout.logs.height.max(1) as usize;
-                    self.log_scroll = self.log_scroll.saturating_add(page);
-                }
-                KeyCode::PageDown | KeyCode::Char('f') => {
-                    // One page down.
-                    let page = self.layout.logs.height.max(1) as usize;
-                    self.log_scroll = self.log_scroll.saturating_sub(page);
-                }
-                KeyCode::Home | KeyCode::Char('B') => {
-                    // Scroll to beginning of logs.
-                    if let Some(wf) = self.selected_workflow() {
-                        self.log_scroll = wf.logs.len().saturating_sub(1);
-                    }
-                }
-                KeyCode::End | KeyCode::Char('F') => {
-                    // Scroll to end of logs (auto-tail).
+            InputMode::CronEdit => self.handle_key_cron_edit(key),
+            InputMode::Command => self.handle_key_command(key),
+            InputMode::Normal if self.info_panel_open => self.handle_key_info_panel(key),
+            InputMode::Normal => self.handle_key_normal(key),
+        }
+    }
+
+    /// Normal context: workflow selection, log scrolling, panel toggles.
+    fn handle_key_normal(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Up => {
+                if self.selected > 0 {
+                    self.selected -= 1;
                     self.log_scroll = 0;
                 }
-                KeyCode::Char('i') => {
-                    self.info_panel_open = !self.info_panel_open;
+            }
+            KeyCode::Down => {
+                if self.selected + 1 < self.workflows.len() {
+                    self.selected += 1;
+                    self.log_scroll = 0;
                 }
-                KeyCode::Char(':') => {
-                    self.input_mode = InputMode::Command;
+            }
+            KeyCode::PageUp | KeyCode::Char('b') => {
+                let page = self.layout.logs.height.max(1) as usize;
+                self.log_scroll = self.log_scroll.saturating_add(page);
+            }
+            KeyCode::PageDown | KeyCode::Char('f') => {
+                let page = self.layout.logs.height.max(1) as usize;
+                self.log_scroll = self.log_scroll.saturating_sub(page);
+            }
+            KeyCode::Home | KeyCode::Char('B') => {
+                if let Some(wf) = self.selected_workflow() {
+                    self.log_scroll = wf.logs.len().saturating_sub(1);
                 }
-                KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.should_quit = true;
+            }
+            KeyCode::End | KeyCode::Char('F') => {
+                self.log_scroll = 0;
+            }
+            KeyCode::Char('i') => {
+                self.info_panel_open = true;
+                self.info_panel_selected = 0;
+            }
+            KeyCode::Char(':') => {
+                self.input_mode = InputMode::Command;
+            }
+            _ => {}
+        }
+    }
+
+    /// Info panel context: item navigation, clear, open URL.
+    fn handle_key_info_panel(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Up => {
+                self.info_panel_selected = self.info_panel_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let max = self.selected_items().len().saturating_sub(1);
+                if self.info_panel_selected < max {
+                    self.info_panel_selected += 1;
                 }
-                _ => {}
-            },
-            InputMode::Command => match key {
-                KeyCode::Char('q') => {
-                    self.should_quit = true;
+            }
+            KeyCode::Enter => {
+                self.open_selected_info_item();
+            }
+            KeyCode::Char('c') => {
+                self.clear_selected_item();
+            }
+            KeyCode::Char('C') => {
+                self.clear_all_errored_items();
+            }
+            KeyCode::Char('i') | KeyCode::Esc => {
+                self.info_panel_open = false;
+            }
+            KeyCode::Char(':') => {
+                self.input_mode = InputMode::Command;
+            }
+            _ => {}
+        }
+    }
+
+    /// Command menu context: single-key actions.
+    fn handle_key_command(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('p') => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('e') => {
+                self.toggle_selected_workflow();
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('c') => {
+                self.cron_input.clear();
+                if let Some(wf) = self.selected_workflow() {
+                    self.cron_input = wf.schedule.clone();
                 }
-                KeyCode::Char('p') => {
-                    // Pause/resume: abort the currently running workflow.
-                    // (Future: wire into the abort flag on StageContext.)
-                    self.input_mode = InputMode::Normal;
+                self.input_mode = InputMode::CronEdit;
+            }
+            KeyCode::Char('i') => {
+                self.info_panel_open = !self.info_panel_open;
+                if self.info_panel_open {
+                    self.info_panel_selected = 0;
                 }
-                KeyCode::Char('e') => {
-                    self.toggle_selected_workflow();
-                    self.input_mode = InputMode::Normal;
-                }
-                KeyCode::Char('c') => {
-                    // Enter cron edit mode for the selected workflow.
-                    self.cron_input.clear();
-                    if let Some(wf) = self.selected_workflow() {
-                        self.cron_input = wf.schedule.clone();
-                    }
-                    self.input_mode = InputMode::CronEdit;
-                }
-                KeyCode::Esc => {
-                    self.input_mode = InputMode::Normal;
-                }
-                _ => {
-                    self.input_mode = InputMode::Normal;
-                }
-            },
-            InputMode::CronEdit => match key {
-                KeyCode::Enter => {
-                    self.apply_cron_input();
-                    self.input_mode = InputMode::Normal;
-                }
-                KeyCode::Esc => {
-                    self.input_mode = InputMode::Normal;
-                }
-                KeyCode::Backspace => {
-                    self.cron_input.pop();
-                }
-                KeyCode::Char(ch) => {
-                    self.cron_input.push(ch);
-                }
-                _ => {}
-            },
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+            }
+            _ => {
+                self.input_mode = InputMode::Normal;
+            }
+        }
+    }
+
+    /// Cron edit context: text input.
+    fn handle_key_cron_edit(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Enter => {
+                self.apply_cron_input();
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Backspace => {
+                self.cron_input.pop();
+            }
+            KeyCode::Char(ch) => {
+                self.cron_input.push(ch);
+            }
+            _ => {}
         }
     }
 
@@ -607,6 +677,7 @@ impl App {
                         if idx != self.selected {
                             self.selected = idx;
                             self.log_scroll = 0;
+                            self.info_panel_selected = 0;
                         }
                     }
                 }
@@ -736,6 +807,69 @@ impl App {
         }
     }
 
+    /// Clear the status of the currently selected info panel item.
+    ///
+    /// Resets the item to `None` and queues a failure cooldown clear so
+    /// the cron runner will retry it on the next tick.
+    pub fn clear_selected_item(&mut self) {
+        let wf_name = match self.selected_workflow() {
+            Some(wf) => wf.name.clone(),
+            None => return,
+        };
+        if let Some(items) = self.workflow_items.get_mut(&wf_name) {
+            if let Some(item) = items.get_mut(self.info_panel_selected) {
+                if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
+                    item.status = ItemStatus::None;
+                    let item_key = extract_item_key(&item.id);
+                    self.clear_requests.push((wf_name, item_key));
+                    self.show_toast("Cleared — will retry next tick", Duration::from_secs(3));
+                }
+            }
+        }
+    }
+
+    /// Clear all errored/cooldown items for the selected workflow.
+    pub fn clear_all_errored_items(&mut self) {
+        let wf_name = match self.selected_workflow() {
+            Some(wf) => wf.name.clone(),
+            None => return,
+        };
+        let mut count = 0usize;
+        if let Some(items) = self.workflow_items.get_mut(&wf_name) {
+            for item in items.iter_mut() {
+                if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
+                    item.status = ItemStatus::None;
+                    let item_key = extract_item_key(&item.id);
+                    self.clear_requests.push((wf_name.clone(), item_key));
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            self.show_toast(
+                &format!("Cleared {} item{}", count, if count == 1 { "" } else { "s" }),
+                Duration::from_secs(3),
+            );
+        }
+    }
+
+    /// Open the URL of the currently selected info panel item in the browser.
+    fn open_selected_info_item(&mut self) {
+        let items = self.selected_items();
+        if let Some(item) = items.get(self.info_panel_selected) {
+            let url = item.url.clone();
+            if !url.is_empty() {
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&url).spawn();
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn();
+                self.show_toast("Opened in browser", Duration::from_secs(3));
+            }
+        }
+    }
+
     /// Open the URL of an info panel item clicked at a given terminal row.
     fn open_info_panel_item(&mut self, row: u16) {
         let panel = &self.layout.info_panel;
@@ -851,6 +985,20 @@ impl App {
 
     fn find_workflow_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
         self.workflows.iter_mut().find(|w| w.name == name)
+    }
+}
+
+/// Extract a store-compatible item key from an info panel item ID.
+///
+/// - `"#42"` → `"42"` (issue number)
+/// - `"PR #12050"` → `"pr-12050"` (PR key used in FailureCooldownStore)
+fn extract_item_key(id: &str) -> String {
+    if let Some(num) = id.strip_prefix("PR #") {
+        format!("pr-{}", num)
+    } else if let Some(num) = id.strip_prefix('#') {
+        num.to_string()
+    } else {
+        id.to_string()
     }
 }
 
@@ -1078,6 +1226,18 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
             }
             if let Some(ref root) = app.project_root {
                 let _ = session::save_session(root, &app.session).await;
+            }
+        }
+
+        // Process pending failure cooldown clears.
+        if !app.clear_requests.is_empty() {
+            if let Some(ref root) = app.project_root {
+                let store = crate::workflows::stores::FailureCooldownStore::new(root);
+                for (wf_name, item_key) in app.clear_requests.drain(..) {
+                    let _ = store.clear_failure(&wf_name, &item_key).await;
+                }
+            } else {
+                app.clear_requests.clear();
             }
         }
 
@@ -2360,5 +2520,192 @@ mod tests {
         });
         assert_eq!(app.selected_items().len(), 2);
         assert_eq!(app.selected_items()[0].title, "new");
+    }
+
+    // ── Context-based input routing ───────────────────────────────────────
+
+    /// Helper: create an app with info panel open and items loaded.
+    fn app_with_info_panel() -> App {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![
+                ItemSummary {
+                    id: "#1".into(),
+                    title: "First".into(),
+                    url: "https://github.com/o/r/issues/1".into(),
+                    status: ItemStatus::None,
+                },
+                ItemSummary {
+                    id: "#2".into(),
+                    title: "Second".into(),
+                    url: "https://github.com/o/r/issues/2".into(),
+                    status: ItemStatus::Error,
+                },
+                ItemSummary {
+                    id: "#3".into(),
+                    title: "Third".into(),
+                    url: "https://github.com/o/r/issues/3".into(),
+                    status: ItemStatus::Cooldown,
+                },
+            ],
+        });
+        app.info_panel_open = true;
+        app.info_panel_selected = 0;
+        app
+    }
+
+    #[test]
+    fn test_up_down_navigates_info_panel_when_open() {
+        let mut app = app_with_info_panel();
+        assert_eq!(app.info_panel_selected, 0);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 1);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 2);
+        // Can't go past last item.
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 2);
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 1);
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 0);
+        // Can't go below 0.
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 0);
+    }
+
+    #[test]
+    fn test_up_down_switches_workflow_when_panel_closed() {
+        let mut app = App::new();
+        for name in &["a", "b"] {
+            app.handle_tui_event(TuiEvent::WorkflowRegistered {
+                name: (*name).into(),
+                schedule: "* * * * * *".into(),
+                mode: WorkflowMode::Standard,
+                repo: None,
+            });
+        }
+        assert!(!app.info_panel_open);
+        assert_eq!(app.selected, 0);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.selected, 1); // Workflow switched, not info panel.
+    }
+
+    #[test]
+    fn test_info_panel_selected_resets_on_toggle() {
+        let mut app = app_with_info_panel();
+        app.info_panel_selected = 2;
+        // Close and reopen.
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        assert!(!app.info_panel_open);
+        // Open again from normal mode.
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        assert!(app.info_panel_open);
+        assert_eq!(app.info_panel_selected, 0);
+    }
+
+    #[test]
+    fn test_info_panel_selected_resets_on_items_summary() {
+        let mut app = app_with_info_panel();
+        app.info_panel_selected = 2;
+        app.handle_tui_event(TuiEvent::ItemsSummary {
+            workflow_name: "p".into(),
+            items: vec![ItemSummary {
+                id: "#99".into(),
+                title: "New".into(),
+                url: "u".into(),
+                status: ItemStatus::None,
+            }],
+        });
+        assert_eq!(app.info_panel_selected, 0);
+    }
+
+    #[test]
+    fn test_c_clears_selected_errored_item() {
+        let mut app = app_with_info_panel();
+        app.info_panel_selected = 1; // #2 has Error status.
+        assert_eq!(app.selected_items()[1].status, ItemStatus::Error);
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        assert_eq!(app.selected_items()[1].status, ItemStatus::None);
+        assert_eq!(app.clear_requests.len(), 1);
+        assert_eq!(app.clear_requests[0], ("p".into(), "2".into()));
+    }
+
+    #[test]
+    fn test_c_does_not_clear_non_error_item() {
+        let mut app = app_with_info_panel();
+        app.info_panel_selected = 0; // #1 has None status.
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        // Should not clear — it's already None.
+        assert!(app.clear_requests.is_empty());
+    }
+
+    #[test]
+    fn test_shift_c_clears_all_errored() {
+        let mut app = app_with_info_panel();
+        app.handle_key(KeyCode::Char('C'), KeyModifiers::empty());
+        // #2 (Error) and #3 (Cooldown) should both be cleared.
+        assert_eq!(app.selected_items()[1].status, ItemStatus::None);
+        assert_eq!(app.selected_items()[2].status, ItemStatus::None);
+        assert_eq!(app.clear_requests.len(), 2);
+    }
+
+    #[test]
+    fn test_c_does_nothing_when_panel_closed() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        assert!(!app.info_panel_open);
+        // 'c' in Normal mode is unbound — should do nothing.
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        assert!(app.clear_requests.is_empty());
+    }
+
+    #[test]
+    fn test_enter_in_info_panel_shows_toast() {
+        let mut app = app_with_info_panel();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        // Should show "Opened in browser" toast (browser open may fail
+        // in test env but toast is set regardless).
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().message.contains("Opened"));
+    }
+
+    #[test]
+    fn test_esc_closes_info_panel() {
+        let mut app = app_with_info_panel();
+        assert!(app.info_panel_open);
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        assert!(!app.info_panel_open);
+    }
+
+    #[test]
+    fn test_colon_opens_menu_from_info_panel() {
+        let mut app = app_with_info_panel();
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
+        assert_eq!(app.input_mode, InputMode::Command);
+        // Info panel should stay open.
+        assert!(app.info_panel_open);
+    }
+
+    #[test]
+    fn test_esc_from_command_returns_to_info_panel_context() {
+        let mut app = app_with_info_panel();
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
+        assert_eq!(app.input_mode, InputMode::Command);
+        assert!(app.info_panel_open);
+        // Esc from command menu returns to Normal, but info panel is still open.
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.info_panel_open);
+        // Next key should be handled by info panel context.
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 1); // Info panel navigation, not workflow.
+    }
+
+    #[test]
+    fn test_extract_item_key() {
+        assert_eq!(extract_item_key("#42"), "42");
+        assert_eq!(extract_item_key("PR #12050"), "pr-12050");
+        assert_eq!(extract_item_key("ENG-42"), "ENG-42");
     }
 }

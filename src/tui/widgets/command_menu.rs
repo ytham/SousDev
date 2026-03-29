@@ -77,7 +77,14 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
                 .fg(Color::Black)
                 .bg(Color::Rgb(60, 140, 180)),
         ),
-        Span::styled(" pause/resume ", bg.fg(Color::Gray)),
+        Span::styled(" pause/resume  ", bg.fg(Color::Gray)),
+        Span::styled(
+            " i ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Rgb(140, 100, 180)),
+        ),
+        Span::styled(" info ", bg.fg(Color::Gray)),
     ]);
 
     let block = Block::default().style(bg);
