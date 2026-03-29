@@ -207,6 +207,15 @@ impl HandledIssueStore {
         self.write_all(&data).await
     }
 
+    /// Return all handled-issue records for a workflow.
+    pub async fn get_all_records(
+        &self,
+        workflow_name: &str,
+    ) -> Result<HashMap<String, HandledIssueRecord>> {
+        let data = self.read_all().await.unwrap_or_default();
+        Ok(data.get(workflow_name).cloned().unwrap_or_default())
+    }
+
     async fn read_all(
         &self,
     ) -> Result<HashMap<String, HashMap<String, HandledIssueRecord>>> {
@@ -303,6 +312,15 @@ impl PrReviewStore {
         self.write_all(&data).await
     }
 
+    /// Return all PR review records for a workflow.
+    pub async fn get_all_records(
+        &self,
+        workflow_name: &str,
+    ) -> Result<HashMap<String, PrReviewRecord>> {
+        let data = self.read_all().await.unwrap_or_default();
+        Ok(data.get(workflow_name).cloned().unwrap_or_default())
+    }
+
     async fn read_all(&self) -> Result<HashMap<String, HashMap<String, PrReviewRecord>>> {
         if !self.file_path.exists() {
             return Ok(HashMap::new());
@@ -395,6 +413,15 @@ impl PrResponseStore {
             m.remove(&pr_number.to_string());
         }
         self.write_all(&data).await
+    }
+
+    /// Return all PR response records for a workflow.
+    pub async fn get_all_records(
+        &self,
+        workflow_name: &str,
+    ) -> Result<HashMap<String, PrResponseRecord>> {
+        let data = self.read_all().await.unwrap_or_default();
+        Ok(data.get(workflow_name).cloned().unwrap_or_default())
     }
 
     async fn read_all(

@@ -54,7 +54,9 @@ pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     // Second line: key hints.
     let hints_line = Line::from(vec![
         Span::styled(" : ", bg.fg(Color::White)),
-        Span::styled("commands  ", bg.fg(Color::DarkGray)),
+        Span::styled("menu  ", bg.fg(Color::DarkGray)),
+        Span::styled("i ", bg.fg(Color::White)),
+        Span::styled("info  ", bg.fg(Color::DarkGray)),
         Span::styled("↑↓ ", bg.fg(Color::White)),
         Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("f/b ", bg.fg(Color::White)),
