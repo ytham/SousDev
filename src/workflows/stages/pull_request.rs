@@ -77,7 +77,20 @@ impl Stage for PullRequestStage {
 
         // ── 4. Push ──────────────────────────────────────────────────────────
         ctx.logger.info(&format!("Pushing branch: {}", branch));
-        exec_git(&["push", "-u", "origin", branch], dir).await?;
+        match exec_git(&["push", "-u", "origin", branch], dir).await {
+            Ok(_) => {}
+            Err(_) => {
+                // Push rejected — the remote branch has diverged (likely from
+                // a prior run).  Force-push with lease since SousDev owns
+                // these branches.
+                ctx.logger.info("Push rejected — force-pushing with lease");
+                exec_git(
+                    &["push", "--force-with-lease", "-u", "origin", branch],
+                    dir,
+                )
+                .await?;
+            }
+        }
 
         // ── 5. Check for existing open PR on this branch ─────────────────────
         let existing = check_existing_pr(branch, ctx).await;
