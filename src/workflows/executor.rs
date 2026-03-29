@@ -647,6 +647,20 @@ impl WorkflowExecutor {
             }
         };
 
+        // Filter to only PRs where the authenticated user is a requested reviewer.
+        // The `gh pr list --search "review-requested:@me"` query is not strict —
+        // it can return PRs where the user is only mentioned or involved.
+        let prs: Vec<GitHubPR> = prs
+            .into_iter()
+            .filter(|pr| pr.requested_reviewers.iter().any(|r| r == &reviewer_login))
+            .collect();
+
+        logger.info(&format!(
+            "{} PR(s) with review requested from {}",
+            prs.len(),
+            reviewer_login
+        ));
+
         let mut to_review: Vec<&GitHubPR> = Vec::new();
         for pr in &prs {
             let record = self

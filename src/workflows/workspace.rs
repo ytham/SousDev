@@ -206,6 +206,32 @@ impl WorkspaceManager {
             .await?;
         }
 
+        // Fetch the PR's head branch explicitly — the clone may have been
+        // created with `--single-branch` which restricts the fetch refspec
+        // to only the base branch.  Without this, `gh pr checkout` fails
+        // with "cannot set up tracking information" because the remote ref
+        // for the PR's branch doesn't exist locally.
+        self.logger.info(&format!(
+            "Fetching PR #{} head ref: {}",
+            pr.number, pr.head_ref_name
+        ));
+        let fetch_refspec = format!(
+            "+refs/heads/{}:refs/remotes/origin/{}",
+            pr.head_ref_name, pr.head_ref_name
+        );
+        if let Err(e) = self
+            .exec(
+                &["git", "fetch", "--depth=50", "origin", &fetch_refspec],
+                &dir,
+            )
+            .await
+        {
+            self.logger.info(&format!(
+                "Failed to fetch PR head ref (will try gh pr checkout anyway): {}",
+                e
+            ));
+        }
+
         // Check out the PR branch via `gh pr checkout`.
         self.logger.info(&format!(
             "Checking out PR #{} ({})",

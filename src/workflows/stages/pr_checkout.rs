@@ -68,6 +68,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
             repo: "owner/repo".into(),
+            requested_reviewers: vec![],
         }
     }
 

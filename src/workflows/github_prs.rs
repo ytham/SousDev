@@ -24,6 +24,9 @@ pub struct GitHubPR {
     pub created_at: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
+    /// Logins of users whose review has been requested on this PR.
+    #[serde(default)]
+    pub requested_reviewers: Vec<String>,
     /// Populated after fetch; not part of the JSON payload.
     #[serde(skip, default)]
     pub repo: String,
@@ -111,7 +114,7 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
         .arg("--limit")
         .arg(limit.to_string())
         .arg("--json")
-        .arg("number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,createdAt,updatedAt")
+        .arg("number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,createdAt,updatedAt")
         .output()
         .await?;
 
@@ -141,6 +144,11 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
             author: r.author.unwrap_or_default(),
             labels: r.labels.unwrap_or_default(),
             review_decision: r.review_decision.unwrap_or_default(),
+            requested_reviewers: r
+                .review_requests
+                .into_iter()
+                .filter_map(|rr| rr.login)
+                .collect(),
             created_at: r.created_at,
             updated_at: r.updated_at,
             repo: repo.clone(),
@@ -315,10 +323,23 @@ struct RawGhPR {
     labels: Option<Vec<PRLabel>>,
     #[serde(rename = "reviewDecision")]
     review_decision: Option<String>,
+    #[serde(rename = "reviewRequests", default)]
+    review_requests: Vec<RawReviewRequest>,
     #[serde(rename = "createdAt")]
     created_at: String,
     #[serde(rename = "updatedAt")]
     updated_at: String,
+}
+
+/// A review request entry from `gh pr list --json reviewRequests`.
+///
+/// Each entry has a `__typename` of `"User"` or `"Team"`, plus a `login`
+/// (for users) or `name`/`slug` (for teams).  We only extract `login`.
+#[derive(Deserialize)]
+struct RawReviewRequest {
+    login: Option<String>,
+    // Teams have `name` and `slug` instead of `login`.
+    // We ignore them — only user-level requests are matched.
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +376,7 @@ mod tests {
             created_at: "c".into(),
             updated_at: "u".into(),
             repo: "r".into(),
+            requested_reviewers: vec![],
         };
         assert_eq!(pr.body_str(), "");
     }
@@ -375,6 +397,7 @@ mod tests {
             created_at: "c".into(),
             updated_at: "u".into(),
             repo: "r".into(),
+            requested_reviewers: vec![],
         };
         assert_eq!(pr.body_str(), "desc");
     }
@@ -397,6 +420,7 @@ mod tests {
             created_at: "2025-01-01".into(),
             updated_at: "2025-01-02".into(),
             repo: "o/r".into(),
+            requested_reviewers: vec![],
         };
         assert_eq!(pr.body_str(), "This PR adds usage metrics tracking.");
     }
@@ -417,6 +441,7 @@ mod tests {
             created_at: "c".into(),
             updated_at: "u".into(),
             repo: "r".into(),
+            requested_reviewers: vec![],
         };
         assert_eq!(pr.body_str(), "");
     }
