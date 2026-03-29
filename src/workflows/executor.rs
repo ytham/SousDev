@@ -20,6 +20,7 @@ use crate::workflows::stages::pr_description::PrDescriptionStage;
 use crate::workflows::stages::pr_review_poster::PrReviewPosterStage;
 use crate::workflows::stages::pull_request::PullRequestStage;
 use crate::workflows::stages::review_feedback_loop::ReviewFeedbackLoopStage;
+use crate::workflows::stores::FailureCooldownStore;
 use crate::workflows::stores::{
     HandledIssueRecord, HandledIssueStore, WorkflowResult, PrResponseRecord, PrResponseStore,
     PrReviewRecord, PrReviewStore, RunStore,
@@ -73,6 +74,7 @@ pub struct WorkflowExecutor {
     issue_store: HandledIssueStore,
     pr_review_store: PrReviewStore,
     pr_response_store: PrResponseStore,
+    failure_store: FailureCooldownStore,
     /// Cached GitHub login for the authenticated user (lazily populated).
     reviewer_login: tokio::sync::Mutex<Option<String>>,
 }
@@ -181,6 +183,7 @@ impl WorkflowExecutor {
             issue_store: HandledIssueStore::new(&store_dir),
             pr_review_store: PrReviewStore::new(&store_dir),
             pr_response_store: PrResponseStore::new(&store_dir),
+            failure_store: FailureCooldownStore::new(&store_dir),
             reviewer_login: tokio::sync::Mutex::new(None),
             opts,
         }
@@ -419,13 +422,27 @@ impl WorkflowExecutor {
 
         let mut unhandled = Vec::new();
         for item in &items {
-            if !self
+            if self
                 .issue_store
                 .is_handled(&self.config.name, item.number)
                 .await?
             {
-                unhandled.push(item.clone());
+                continue;
             }
+            // Skip items in failure cooldown (prevents infinite retries).
+            let item_key = item.number.to_string();
+            if self
+                .failure_store
+                .is_in_cooldown(&self.config.name, &item_key)
+                .await?
+            {
+                logger.info(&format!(
+                    "Skipping issue {} — in failure cooldown",
+                    item.display_id
+                ));
+                continue;
+            }
+            unhandled.push(item.clone());
         }
 
         if unhandled.is_empty() {
@@ -465,7 +482,13 @@ impl WorkflowExecutor {
 
             self.opts.store.append(&result).await?;
 
+            let item_key = item.number.to_string();
             if result.success && !result.skipped {
+                // Clear any prior failure cooldown on success.
+                let _ = self
+                    .failure_store
+                    .clear_failure(&self.config.name, &item_key)
+                    .await;
                 if let Some(ref pr_url) = result.pr_url {
                     self.issue_store
                         .mark_handled_with_number(
@@ -484,6 +507,16 @@ impl WorkflowExecutor {
                         )
                         .await?;
                 }
+            } else {
+                // Record failure — item will be skipped until cooldown expires.
+                let _ = self
+                    .failure_store
+                    .record_failure(&self.config.name, &item_key)
+                    .await;
+                logger.info(&format!(
+                    "Issue {} entered failure cooldown",
+                    item.display_id
+                ));
             }
 
             last_result = Some(result);
@@ -663,6 +696,20 @@ impl WorkflowExecutor {
 
         let mut to_review: Vec<&GitHubPR> = Vec::new();
         for pr in &prs {
+            // Skip PRs in failure cooldown.
+            let pr_key = format!("pr-{}", pr.number);
+            if self
+                .failure_store
+                .is_in_cooldown(&self.config.name, &pr_key)
+                .await?
+            {
+                logger.info(&format!(
+                    "Skipping PR #{} — in failure cooldown",
+                    pr.number
+                ));
+                continue;
+            }
+
             let record = self
                 .pr_review_store
                 .get_record(&self.config.name, pr.number)
@@ -715,7 +762,12 @@ impl WorkflowExecutor {
                 .await?;
             self.opts.store.append(&result).await?;
 
+            let pr_key = format!("pr-{}", pr.number);
             if result.success && !result.skipped {
+                let _ = self
+                    .failure_store
+                    .clear_failure(&self.config.name, &pr_key)
+                    .await;
                 let all_comments =
                     fetch_pr_comments(&pr.repo, pr.number, None)
                         .await
@@ -735,6 +787,15 @@ impl WorkflowExecutor {
                         },
                     )
                     .await?;
+            } else {
+                let _ = self
+                    .failure_store
+                    .record_failure(&self.config.name, &pr_key)
+                    .await;
+                logger.info(&format!(
+                    "PR #{} entered failure cooldown",
+                    pr.number
+                ));
             }
             last_result = Some(result);
         }

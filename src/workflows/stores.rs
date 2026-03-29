@@ -1277,3 +1277,175 @@ mod tests {
         assert_eq!(rec.head_sha, "s2");
     }
 }
+
+// ---- FailureCooldownStore ---------------------------------------------------
+
+const FAILURE_COOLDOWN_FILE: &str = "failure-cooldowns.json";
+
+/// Default cooldown after a failure: 60 minutes.
+const DEFAULT_COOLDOWN_MINUTES: i64 = 60;
+
+/// A record of a failed attempt with a timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailureRecord {
+    /// When the failure occurred (ISO 8601).
+    pub failed_at: String,
+    /// Number of consecutive failures.
+    pub failure_count: u64,
+}
+
+/// Tracks recent failures per workflow + item to prevent infinite retry loops.
+///
+/// When an issue or PR fails, it is recorded with a timestamp.  Subsequent
+/// ticks skip the item until the cooldown period has elapsed.  The cooldown
+/// doubles with each consecutive failure (exponential backoff capped at 24h).
+pub struct FailureCooldownStore {
+    file_path: PathBuf,
+}
+
+impl FailureCooldownStore {
+    /// Create a new store.
+    pub fn new(project_root: &Path) -> Self {
+        Self {
+            file_path: project_root.join(OUTPUT_DIR).join(FAILURE_COOLDOWN_FILE),
+        }
+    }
+
+    /// Check if an item is currently in cooldown (should be skipped).
+    pub async fn is_in_cooldown(
+        &self,
+        workflow_name: &str,
+        item_id: &str,
+    ) -> Result<bool> {
+        let data = self.read_all().await.unwrap_or_default();
+        let key = format!("{}:{}", workflow_name, item_id);
+        if let Some(record) = data.get(&key) {
+            if let Ok(failed_at) = chrono::DateTime::parse_from_rfc3339(&record.failed_at) {
+                let cooldown_minutes = cooldown_minutes(record.failure_count);
+                let cooldown = chrono::Duration::minutes(cooldown_minutes);
+                let now = chrono::Utc::now();
+                return Ok(now < failed_at + cooldown);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Record a failure for an item.
+    pub async fn record_failure(
+        &self,
+        workflow_name: &str,
+        item_id: &str,
+    ) -> Result<()> {
+        let mut data = self.read_all().await.unwrap_or_default();
+        let key = format!("{}:{}", workflow_name, item_id);
+        let failure_count = data
+            .get(&key)
+            .map(|r| r.failure_count + 1)
+            .unwrap_or(1);
+        data.insert(
+            key,
+            FailureRecord {
+                failed_at: chrono::Utc::now().to_rfc3339(),
+                failure_count,
+            },
+        );
+        self.write_all(&data).await
+    }
+
+    /// Clear the failure record for an item (e.g. on success).
+    pub async fn clear_failure(
+        &self,
+        workflow_name: &str,
+        item_id: &str,
+    ) -> Result<()> {
+        let mut data = self.read_all().await.unwrap_or_default();
+        let key = format!("{}:{}", workflow_name, item_id);
+        data.remove(&key);
+        self.write_all(&data).await
+    }
+
+    async fn read_all(&self) -> Result<HashMap<String, FailureRecord>> {
+        if !self.file_path.exists() {
+            return Ok(HashMap::new());
+        }
+        let content = fs::read_to_string(&self.file_path).await?;
+        let data: HashMap<String, FailureRecord> = serde_json::from_str(&content)?;
+        Ok(data)
+    }
+
+    async fn write_all(&self, data: &HashMap<String, FailureRecord>) -> Result<()> {
+        if let Some(parent) = self.file_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let content = serde_json::to_string_pretty(data)?;
+        fs::write(&self.file_path, content).await?;
+        Ok(())
+    }
+}
+
+/// Exponential backoff for cooldown: 60min, 120min, 240min, ... capped at 24h.
+fn cooldown_minutes(failure_count: u64) -> i64 {
+    let base = DEFAULT_COOLDOWN_MINUTES;
+    let multiplier = 2i64.saturating_pow(failure_count.saturating_sub(1) as u32);
+    (base * multiplier).min(24 * 60)
+}
+
+#[cfg(test)]
+mod failure_cooldown_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_cooldown_minutes_backoff() {
+        assert_eq!(cooldown_minutes(1), 60);
+        assert_eq!(cooldown_minutes(2), 120);
+        assert_eq!(cooldown_minutes(3), 240);
+        assert_eq!(cooldown_minutes(4), 480);
+        assert_eq!(cooldown_minutes(10), 24 * 60); // capped at 24h
+    }
+
+    #[tokio::test]
+    async fn test_no_failure_not_in_cooldown() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        assert!(!store.is_in_cooldown("wf", "42").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_record_failure_enters_cooldown() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        store.record_failure("wf", "42").await.unwrap();
+        assert!(store.is_in_cooldown("wf", "42").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_clear_failure_exits_cooldown() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        store.record_failure("wf", "42").await.unwrap();
+        assert!(store.is_in_cooldown("wf", "42").await.unwrap());
+        store.clear_failure("wf", "42").await.unwrap();
+        assert!(!store.is_in_cooldown("wf", "42").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_different_workflows_independent() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        store.record_failure("wf1", "42").await.unwrap();
+        assert!(store.is_in_cooldown("wf1", "42").await.unwrap());
+        assert!(!store.is_in_cooldown("wf2", "42").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_failures_increase_count() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        store.record_failure("wf", "1").await.unwrap();
+        store.record_failure("wf", "1").await.unwrap();
+        store.record_failure("wf", "1").await.unwrap();
+        let data = store.read_all().await.unwrap();
+        assert_eq!(data.get("wf:1").unwrap().failure_count, 3);
+    }
+}

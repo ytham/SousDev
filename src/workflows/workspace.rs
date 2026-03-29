@@ -163,7 +163,24 @@ impl WorkspaceManager {
         if git_dir.exists() {
             self.logger
                 .info(&format!("Reusing existing PR workspace: {}", dir.display()));
-            // Fetch latest refs (best-effort; ignore transient network errors).
+
+            // Fix workspaces created with --single-branch: reconfigure the
+            // fetch refspec to allow fetching ALL remote branches.  Without
+            // this, `git fetch` only updates the base branch and `gh pr
+            // checkout` fails for any other branch.
+            let _ = self
+                .exec(
+                    &[
+                        "git",
+                        "config",
+                        "remote.origin.fetch",
+                        "+refs/heads/*:refs/remotes/origin/*",
+                    ],
+                    &dir,
+                )
+                .await;
+
+            // Fetch all remote branches.
             if let Err(e) = self
                 .exec(&["git", "fetch", "--depth=50", "origin"], &dir)
                 .await
@@ -189,13 +206,14 @@ impl WorkspaceManager {
                 dir.display(),
                 base_branch
             ));
+            // Do NOT use --single-branch for PR workspaces — we need to
+            // check out arbitrary PR branches, not just the base branch.
             self.exec(
                 &[
                     "git",
                     "clone",
                     "--depth=50",
                     "--filter=blob:none",
-                    "--single-branch",
                     "--branch",
                     base_branch,
                     &repo_url,
@@ -204,32 +222,6 @@ impl WorkspaceManager {
                 &dir,
             )
             .await?;
-        }
-
-        // Fetch the PR's head branch explicitly — the clone may have been
-        // created with `--single-branch` which restricts the fetch refspec
-        // to only the base branch.  Without this, `gh pr checkout` fails
-        // with "cannot set up tracking information" because the remote ref
-        // for the PR's branch doesn't exist locally.
-        self.logger.info(&format!(
-            "Fetching PR #{} head ref: {}",
-            pr.number, pr.head_ref_name
-        ));
-        let fetch_refspec = format!(
-            "+refs/heads/{}:refs/remotes/origin/{}",
-            pr.head_ref_name, pr.head_ref_name
-        );
-        if let Err(e) = self
-            .exec(
-                &["git", "fetch", "--depth=50", "origin", &fetch_refspec],
-                &dir,
-            )
-            .await
-        {
-            self.logger.info(&format!(
-                "Failed to fetch PR head ref (will try gh pr checkout anyway): {}",
-                e
-            ));
         }
 
         // Check out the PR branch via `gh pr checkout`.
