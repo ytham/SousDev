@@ -94,48 +94,86 @@ pub struct FetchPRsOptions {
 }
 
 /// Fetch open pull requests where the authenticated user is a requested reviewer.
+///
+/// Uses `user-review-requested:@me` to match only individual review requests
+/// (not team auto-assignments).  Falls back to `review-requested:@me` when
+/// combined with an assignee search.
 pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>> {
     let repo = match &options.repo {
         Some(r) => r.clone(),
         None => super::github_issues::detect_repo().await?,
     };
 
-    let mut query_parts = vec!["review-requested:@me".to_string(), "is:open".to_string()];
-    if let Some(extra) = &options.search {
-        let trimmed = extra.trim();
-        if !trimmed.is_empty() {
-            query_parts.push(trimmed.to_string());
-        }
-    }
-    let search_query = query_parts.join(" ");
+    let extra_search = options
+        .search
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
     let limit = options.limit.unwrap_or(10);
+    let json_fields = "number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,assignees,createdAt,updatedAt";
 
-    let output = Command::new("gh")
-        .arg("pr")
-        .arg("list")
-        .arg("--repo")
-        .arg(&repo)
-        .arg("--search")
-        .arg(&search_query)
-        .arg("--limit")
-        .arg(limit.to_string())
-        .arg("--json")
-        .arg("number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,assignees,createdAt,updatedAt")
+    // Search 1: PRs where the user is individually requested as reviewer.
+    let search1 = if extra_search.is_empty() {
+        "user-review-requested:@me is:open".to_string()
+    } else {
+        format!("user-review-requested:@me is:open {}", extra_search)
+    };
+
+    let output1 = Command::new("gh")
+        .arg("pr").arg("list")
+        .arg("--repo").arg(&repo)
+        .arg("--search").arg(&search1)
+        .arg("--limit").arg(limit.to_string())
+        .arg("--json").arg(json_fields)
         .output()
         .await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output1.status.success() {
+        let stderr = String::from_utf8_lossy(&output1.stderr);
         return Err(anyhow::anyhow!("gh pr list failed: {}", stderr));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim().is_empty() {
-        return Ok(vec![]);
-    }
+    let stdout1 = String::from_utf8_lossy(&output1.stdout);
+    let mut raw: Vec<RawGhPR> = if stdout1.trim().is_empty() {
+        vec![]
+    } else {
+        serde_json::from_str(&stdout1)
+            .map_err(|e| anyhow::anyhow!("Failed to parse gh pr list: {}", e))?
+    };
 
-    let raw: Vec<RawGhPR> = serde_json::from_str(&stdout)
-        .map_err(|e| anyhow::anyhow!("Failed to parse gh pr list: {}", e))?;
+    // Search 2: PRs assigned to the user (may overlap with search 1).
+    let search2 = if extra_search.is_empty() {
+        "assignee:@me is:open".to_string()
+    } else {
+        format!("assignee:@me is:open {}", extra_search)
+    };
+
+    let output2 = Command::new("gh")
+        .arg("pr").arg("list")
+        .arg("--repo").arg(&repo)
+        .arg("--search").arg(&search2)
+        .arg("--limit").arg(limit.to_string())
+        .arg("--json").arg(json_fields)
+        .output()
+        .await;
+
+    if let Ok(output2) = output2 {
+        if output2.status.success() {
+            let stdout2 = String::from_utf8_lossy(&output2.stdout);
+            if !stdout2.trim().is_empty() {
+                let raw2: Vec<RawGhPR> = serde_json::from_str(&stdout2).unwrap_or_default();
+                // Merge, deduplicating by PR number.
+                let existing: std::collections::HashSet<u64> =
+                    raw.iter().map(|r| r.number).collect();
+                for r in raw2 {
+                    if !existing.contains(&r.number) {
+                        raw.push(r);
+                    }
+                }
+            }
+        }
+    }
 
     Ok(raw
         .into_iter()
