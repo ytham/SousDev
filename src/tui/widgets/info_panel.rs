@@ -1,8 +1,8 @@
 /// Info panel widget — floating overlay showing issue/PR status per workflow.
 ///
 /// Renders on the right side of the terminal, floating over the log pane.
-/// Shows a list of items with status indicators.  The selected item is
-/// highlighted and can be opened, cleared, etc. via keyboard shortcuts.
+/// Shows "All logs" as the first selectable item, followed by a list of
+/// items with status indicators.
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -17,6 +17,9 @@ const BG_INFO: Color = Color::Rgb(26, 26, 36);
 
 /// Highlighted row background.
 const BG_SELECTED: Color = Color::Rgb(36, 36, 48);
+
+/// Left border color for floating panels.
+const BORDER_COLOR: Color = Color::Rgb(60, 80, 160);
 
 /// Info panel width in characters.
 pub const INFO_PANEL_WIDTH: u16 = 60;
@@ -48,6 +51,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(Clear, panel_area);
 
     let bg = Style::default().bg(BG_INFO);
+    let border = Style::default().fg(BORDER_COLOR).bg(BG_INFO);
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Header ────────────────────────────────────────────────────────────
@@ -55,29 +59,64 @@ pub fn draw(f: &mut Frame, app: &App) {
         .selected_workflow()
         .map(|wf| wf.name.as_str())
         .unwrap_or("(none)");
-    lines.push(Line::from(Span::styled(
-        format!(" {}", wf_name),
-        bg.fg(Color::White).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        " ─".to_string() + &"─".repeat(INFO_PANEL_WIDTH as usize - 3),
-        bg.fg(Color::DarkGray),
-    )));
+    lines.push(Line::from(vec![
+        Span::styled("│", border),
+        Span::styled(
+            format!(" {}", wf_name),
+            bg.fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("│", border),
+        Span::styled(
+            "─".repeat(INFO_PANEL_WIDTH as usize - 2),
+            bg.fg(Color::DarkGray),
+        ),
+    ]));
+
+    // ── "All logs" row ────────────────────────────────────────────────────
+    let items = app.selected_items();
+    let selected = app.info_panel_selected;
+
+    let all_logs_selected = selected == 0;
+    let all_logs_active = app.log_filter.is_none();
+    let all_logs_bg = if all_logs_selected {
+        Style::default().bg(BG_SELECTED)
+    } else {
+        bg
+    };
+    let active_marker = if all_logs_active { "▶" } else { " " };
+    let indicator = if all_logs_selected { ">" } else { " " };
+
+    lines.push(Line::from(vec![
+        Span::styled("│", border),
+        Span::styled(indicator, all_logs_bg.fg(Color::White)),
+        Span::styled(
+            format!("{} All logs", active_marker),
+            all_logs_bg.fg(if all_logs_active {
+                Color::White
+            } else {
+                Color::Gray
+            }),
+        ),
+    ]));
 
     // ── Items ─────────────────────────────────────────────────────────────
-    let items = app.selected_items();
-    let visible_height = panel_area.height.saturating_sub(HEADER_ROWS + FOOTER_ROWS) as usize;
+    let visible_height = panel_area
+        .height
+        .saturating_sub(HEADER_ROWS + FOOTER_ROWS + 1) as usize; // +1 for "All logs"
 
     if items.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " Waiting for data...",
-            bg.fg(Color::DarkGray),
-        )));
+        lines.push(Line::from(vec![
+            Span::styled("│", border),
+            Span::styled(" Waiting for data...", bg.fg(Color::DarkGray)),
+        ]));
     } else {
         // Scroll window: keep the selected item visible.
-        let selected = app.info_panel_selected;
-        let scroll_start = if selected >= visible_height {
-            selected - visible_height + 1
+        // selected 0 = "All logs", 1+ = items. Item index = selected - 1.
+        let item_selected = selected.saturating_sub(1);
+        let scroll_start = if item_selected >= visible_height {
+            item_selected - visible_height + 1
         } else {
             0
         };
@@ -89,7 +128,13 @@ pub fn draw(f: &mut Frame, app: &App) {
             .skip(scroll_start)
             .take(scroll_end - scroll_start)
         {
-            let is_selected = idx == selected;
+            let panel_idx = idx + 1; // offset for "All logs"
+            let is_selected = panel_idx == selected;
+            let is_active = app
+                .log_filter
+                .as_ref()
+                .map(|f| f == &item.id)
+                .unwrap_or(false);
             let row_bg = if is_selected {
                 Style::default().bg(BG_SELECTED)
             } else {
@@ -97,7 +142,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             };
 
             let (badge, badge_color) = status_badge(item.status);
-            let max_title = (INFO_PANEL_WIDTH as usize).saturating_sub(item.id.len() + 10);
+            let max_title = (INFO_PANEL_WIDTH as usize).saturating_sub(item.id.len() + 12);
             let title = if item.title.len() > max_title {
                 format!("{}…", &item.title[..max_title.saturating_sub(1)])
             } else {
@@ -105,11 +150,13 @@ pub fn draw(f: &mut Frame, app: &App) {
             };
 
             let indicator = if is_selected { ">" } else { " " };
+            let active_marker = if is_active { "▶" } else { " " };
 
             lines.push(Line::from(vec![
+                Span::styled("│", border),
                 Span::styled(indicator, row_bg.fg(Color::White)),
                 Span::styled(badge, row_bg.fg(badge_color)),
-                Span::styled(" ", row_bg),
+                Span::styled(active_marker, row_bg.fg(Color::White)),
                 Span::styled(format!("{:<8} ", item.id), row_bg.fg(Color::Cyan)),
                 Span::styled(title, row_bg.fg(Color::Gray)),
             ]));
@@ -119,23 +166,30 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Pad between items and footer.
     let target_rows = panel_area.height.saturating_sub(FOOTER_ROWS) as usize;
     while lines.len() < target_rows {
-        lines.push(Line::from(Span::styled(" ", bg)));
+        lines.push(Line::from(vec![
+            Span::styled("│", border),
+            Span::styled(" ", bg),
+        ]));
     }
 
     // ── Footer (hints) ────────────────────────────────────────────────────
-    lines.push(Line::from(Span::styled(
-        " ─".to_string() + &"─".repeat(INFO_PANEL_WIDTH as usize - 3),
-        bg.fg(Color::DarkGray),
-    )));
     lines.push(Line::from(vec![
+        Span::styled("│", border),
+        Span::styled(
+            "─".repeat(INFO_PANEL_WIDTH as usize - 2),
+            bg.fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("│", border),
         Span::styled(" ↑↓ ", bg.fg(Color::White)),
-        Span::styled("select  ", bg.fg(Color::DarkGray)),
+        Span::styled("select ", bg.fg(Color::DarkGray)),
         Span::styled("⏎ ", bg.fg(Color::White)),
-        Span::styled("open  ", bg.fg(Color::DarkGray)),
+        Span::styled("filter ", bg.fg(Color::DarkGray)),
+        Span::styled("g ", bg.fg(Color::White)),
+        Span::styled("open ", bg.fg(Color::DarkGray)),
         Span::styled("c ", bg.fg(Color::White)),
-        Span::styled("clear  ", bg.fg(Color::DarkGray)),
-        Span::styled("C ", bg.fg(Color::White)),
-        Span::styled("clear errors  ", bg.fg(Color::DarkGray)),
+        Span::styled("clear ", bg.fg(Color::DarkGray)),
         Span::styled("ESC ", bg.fg(Color::White)),
         Span::styled("close", bg.fg(Color::DarkGray)),
     ]));
