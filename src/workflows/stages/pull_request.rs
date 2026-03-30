@@ -75,24 +75,41 @@ impl Stage for PullRequestStage {
             return Ok(());
         }
 
-        // ── 4. Push ──────────────────────────────────────────────────────────
+        // ── 4. Rebase on remote branch if it exists ─────────────────────────
+        // The remote branch may have commits from CI autofixes (linting, etc.)
+        // that aren't in the local workspace.  Fetch and rebase to preserve
+        // them; otherwise our push would overwrite them.
+        let remote_ref = format!("origin/{}", branch);
+        if exec_git(&["fetch", "origin", branch], dir).await.is_ok() {
+            ctx.logger.info("Remote branch exists — rebasing on top of CI changes");
+            match exec_git(&["rebase", &remote_ref], dir).await {
+                Ok(_) => {}
+                Err(_) => {
+                    // Rebase conflict — abort and continue with force-push.
+                    // The agent's changes take precedence over CI autofixes.
+                    ctx.logger.info("Rebase conflict — aborting rebase, will force-push");
+                    let _ = exec_git(&["rebase", "--abort"], dir).await;
+                }
+            }
+        }
+
+        // ── 5. Push ──────────────────────────────────────────────────────────
         ctx.logger.info(&format!("Pushing branch: {}", branch));
         match exec_git(&["push", "-u", "origin", branch], dir).await {
             Ok(_) => {}
             Err(_) => {
-                // Push rejected — the remote branch has diverged (likely from
-                // a prior run).  Force-push with lease since SousDev owns
+                // Push rejected — force-push since SousDev exclusively owns
                 // these branches.
-                ctx.logger.info("Push rejected — force-pushing with lease");
+                ctx.logger.info("Push rejected — force-pushing");
                 exec_git(
-                    &["push", "--force-with-lease", "-u", "origin", branch],
+                    &["push", "--force", "-u", "origin", branch],
                     dir,
                 )
                 .await?;
             }
         }
 
-        // ── 5. Check for existing open PR on this branch ─────────────────────
+        // ── 6. Check for existing open PR on this branch ─────────────────────
         let existing = check_existing_pr(branch, ctx).await;
         if let Some(url) = existing {
             ctx.logger
@@ -101,7 +118,7 @@ impl Stage for PullRequestStage {
             return Ok(());
         }
 
-        // ── 6. Build title / body ────────────────────────────────────────────
+        // ── 7. Build title / body ────────────────────────────────────────────
         let title = ctx
             .pr_title
             .clone()
@@ -116,10 +133,10 @@ impl Stage for PullRequestStage {
                 )
             });
 
-        // ── 7. Write body to temp file and create PR ─────────────────────────
+        // ── 8. Write body to temp file and create PR ─────────────────────────
         let pr_url = create_pr(ctx, &title, &body).await?;
 
-        // ── 8. Store PR URL ──────────────────────────────────────────────────
+        // ── 9. Store PR URL ──────────────────────────────────────────────────
         ctx.logger.info(&format!("PR created: {}", pr_url));
         ctx.pr_url = Some(pr_url);
         Ok(())

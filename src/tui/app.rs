@@ -19,7 +19,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::Mutex;
 
-use crate::workflows::cron_runner::CronRunner;
+use crate::workflows::cron_runner::{CronRunner, ScheduleUpdate, ScheduleUpdateSender};
 use crate::tui::events::{ItemStatus, ItemSummary, WorkflowMode, TuiEvent, TuiEventSender};
 use crate::tui::session::{self, SessionConfig};
 use crate::tui::ui;
@@ -212,6 +212,8 @@ pub struct App {
     pub workflow_items: HashMap<String, Vec<ItemSummary>>,
     /// Pending failure cooldown clears (workflow_name, item_key).
     pub clear_requests: Vec<(String, String)>,
+    /// Sender for schedule update commands to the cron runner.
+    pub schedule_tx: Option<ScheduleUpdateSender>,
 }
 
 impl Default for App {
@@ -241,6 +243,7 @@ impl App {
             info_panel_selected: 0,
             workflow_items: HashMap::new(),
             clear_requests: Vec::new(),
+            schedule_tx: None,
         }
     }
 
@@ -594,9 +597,6 @@ impl App {
             }
             KeyCode::Char('c') => {
                 self.cron_input.clear();
-                if let Some(wf) = self.selected_workflow() {
-                    self.cron_input = wf.schedule.clone();
-                }
                 self.input_mode = InputMode::CronEdit;
             }
             KeyCode::Esc => {
@@ -913,13 +913,7 @@ impl App {
         } else {
             match parse_human_cron(&input) {
                 Some(expr) => expr,
-                None => {
-                    self.show_toast(
-                        &format!("Invalid schedule: {}", input),
-                        Duration::from_secs(4),
-                    );
-                    return;
-                }
+                None => return, // Invalid input — silently cancel.
             }
         };
 
@@ -935,6 +929,15 @@ impl App {
             // Persist to config.toml.
             if let Some(ref root) = self.project_root {
                 update_config_toml_schedule(root, &name, &cron_expr);
+            }
+
+            // Send schedule update to the cron runner so it takes
+            // effect immediately without restarting.
+            if let Some(ref tx) = self.schedule_tx {
+                let _ = tx.send(ScheduleUpdate {
+                    workflow_name: name,
+                    new_schedule: cron_expr.clone(),
+                });
             }
         }
 
@@ -1112,7 +1115,11 @@ fn extract_toml_string_value(line: &str) -> Option<String> {
 /// fetches fresh data.  Items are built from the handled-issues, reviewed-PRs,
 /// and PR-response stores.  Failure cooldown items are overlaid with
 /// `Error`/`Cooldown` status.
-async fn load_initial_items(app: &mut App, project_root: &std::path::Path) {
+async fn load_initial_items(
+    app: &mut App,
+    project_root: &std::path::Path,
+    workflow_infos: &[(String, WorkflowMode)],
+) {
     use crate::workflows::stores::{
         FailureCooldownStore, HandledIssueStore, PrResponseStore, PrReviewStore,
     };
@@ -1122,17 +1129,16 @@ async fn load_initial_items(app: &mut App, project_root: &std::path::Path) {
     let response_store = PrResponseStore::new(project_root);
     let failure_store = FailureCooldownStore::new(project_root);
 
-    for wf in &app.workflows {
+    for (wf_name, wf_mode) in workflow_infos {
         let mut items: Vec<ItemSummary> = Vec::new();
 
-        match wf.mode {
+        match wf_mode {
             WorkflowMode::Issues => {
-                // Load handled issues.
-                if let Ok(records) = issue_store.get_all_records(&wf.name).await {
+                if let Ok(records) = issue_store.get_all_records(wf_name).await {
                     for (num_str, rec) in &records {
                         let item_key = num_str.clone();
                         let in_cooldown = failure_store
-                            .is_in_cooldown(&wf.name, &item_key)
+                            .is_in_cooldown(wf_name, &item_key)
                             .await
                             .unwrap_or(false);
                         let status = if in_cooldown {
@@ -1150,11 +1156,11 @@ async fn load_initial_items(app: &mut App, project_root: &std::path::Path) {
                 }
             }
             WorkflowMode::PrReview => {
-                if let Ok(records) = review_store.get_all_records(&wf.name).await {
+                if let Ok(records) = review_store.get_all_records(wf_name).await {
                     for rec in records.values() {
                         let pr_key = format!("pr-{}", rec.pr_number);
                         let in_cooldown = failure_store
-                            .is_in_cooldown(&wf.name, &pr_key)
+                            .is_in_cooldown(wf_name, &pr_key)
                             .await
                             .unwrap_or(false);
                         let status = if in_cooldown {
@@ -1172,7 +1178,7 @@ async fn load_initial_items(app: &mut App, project_root: &std::path::Path) {
                 }
             }
             WorkflowMode::PrResponse => {
-                if let Ok(records) = response_store.get_all_records(&wf.name).await {
+                if let Ok(records) = response_store.get_all_records(wf_name).await {
                     for rec in records.values() {
                         let status = ItemStatus::Success;
                         items.push(ItemSummary {
@@ -1187,14 +1193,12 @@ async fn load_initial_items(app: &mut App, project_root: &std::path::Path) {
             _ => {}
         }
 
-        // Load failure-cooldown items that don't have a success record yet
-        // (items that failed but were never successfully handled).
-        if let Ok(failures) = failure_store.get_failures_for_workflow(&wf.name).await {
+        // Load failure-cooldown items that don't have a success record yet.
+        if let Ok(failures) = failure_store.get_failures_for_workflow(wf_name).await {
             let existing_ids: std::collections::HashSet<String> =
                 items.iter().map(|i| extract_item_key(&i.id)).collect();
             for (item_key, _rec) in failures {
                 if !existing_ids.contains(&item_key) {
-                    // Build a display ID from the key.
                     let id = if let Some(num) = item_key.strip_prefix("pr-") {
                         format!("PR #{}", num)
                     } else {
@@ -1211,9 +1215,8 @@ async fn load_initial_items(app: &mut App, project_root: &std::path::Path) {
         }
 
         if !items.is_empty() {
-            // Sort by ID for consistent display.
             items.sort_by(|a, b| a.id.cmp(&b.id));
-            app.workflow_items.insert(wf.name.clone(), items);
+            app.workflow_items.insert(wf_name.clone(), items);
         }
     }
 }
@@ -1264,14 +1267,36 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
         .collect();
     let disabled_workflows = Arc::new(Mutex::new(disabled));
 
+    // Capture workflow info before config is moved into the cron runner.
+    let workflow_infos: Vec<(String, WorkflowMode)> = config
+        .workflows
+        .iter()
+        .map(|wf| {
+            let mode = if wf.github_pr_responses.is_some() {
+                WorkflowMode::PrResponse
+            } else if wf.github_prs.is_some() {
+                WorkflowMode::PrReview
+            } else if wf.github_issues.is_some() || wf.linear_issues.is_some() {
+                WorkflowMode::Issues
+            } else {
+                WorkflowMode::Standard
+            };
+            (wf.name.clone(), mode)
+        })
+        .collect();
+
     // Set up the TUI event channel.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TuiEvent>();
     let tui_tx = TuiEventSender::new(tx);
 
+    // Set up the schedule update channel.
+    let (schedule_tx, schedule_rx) = tokio::sync::mpsc::unbounded_channel::<ScheduleUpdate>();
+
     // Spawn the cron runner in the background.
     let runner = CronRunner::new(config, no_workspace)
         .with_tui_sender(tui_tx.clone())
-        .with_disabled_workflows(disabled_workflows.clone());
+        .with_disabled_workflows(disabled_workflows.clone())
+        .with_schedule_rx(schedule_rx);
     let cron_handle = tokio::spawn(async move {
         if let Err(e) = runner.start().await {
             tracing::error!("Cron runner error: {}", e);
@@ -1291,10 +1316,11 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::with_session(sess, project_root.clone(), disabled_workflows);
+    app.schedule_tx = Some(schedule_tx);
 
     // Load historical item data from stores so the info panel has data
     // before the first cron tick.
-    load_initial_items(&mut app, &project_root).await;
+    load_initial_items(&mut app, &project_root, &workflow_infos).await;
 
     // Main event loop.
     loop {
@@ -2353,7 +2379,8 @@ mod tests {
         app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::CronEdit);
-        assert_eq!(app.cron_input, "0 */5 * * * *");
+        // Input starts empty so the user can type a fresh value.
+        assert_eq!(app.cron_input, "");
     }
 
     #[test]
@@ -2401,16 +2428,25 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_cron_input_invalid_shows_toast() {
+    fn test_apply_cron_input_invalid_cancels_silently() {
         let mut app = app_with_workflow("p", WorkflowMode::Standard);
         let old_schedule = app.workflows[0].schedule.clone();
         app.cron_input = "invalid".into();
         app.apply_cron_input();
         // Schedule should not change.
         assert_eq!(app.workflows[0].schedule, old_schedule);
-        // Toast should show error.
-        assert!(app.toast.is_some());
-        assert!(app.toast.as_ref().unwrap().message.contains("Invalid"));
+        // No toast — invalid input is a silent cancel.
+        assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn test_apply_cron_input_empty_cancels() {
+        let mut app = app_with_workflow("p", WorkflowMode::Standard);
+        let old_schedule = app.workflows[0].schedule.clone();
+        app.cron_input = "".into();
+        app.apply_cron_input();
+        assert_eq!(app.workflows[0].schedule, old_schedule);
+        assert!(app.toast.is_none());
     }
 
     // ── click to select ───────────────────────────────────────────────────

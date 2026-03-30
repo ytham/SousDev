@@ -121,7 +121,6 @@ impl WorkspaceManager {
                     "clone",
                     "--depth=50",
                     "--filter=blob:none",
-                    "--single-branch",
                     "--branch",
                     base_branch,
                     &repo_url,
@@ -274,6 +273,20 @@ impl WorkspaceManager {
         branch: &str,
         _repo_url: &str,
     ) -> Result<()> {
+        // Fix workspaces created with --single-branch: reconfigure the
+        // fetch refspec to allow fetching ALL remote branches.
+        let _ = self
+            .exec(
+                &[
+                    "git",
+                    "config",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                dir,
+            )
+            .await;
+
         // Fetch latest base branch (best-effort).
         if let Err(e) = self
             .exec(
