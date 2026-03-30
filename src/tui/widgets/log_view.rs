@@ -10,17 +10,13 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::{total_entry_rows, App, LogEntryKind, Panel};
-use crate::tui::ui::{BG_HEADER, BG_LOGS};
-
-/// Highlight background for selected log lines.
-const BG_SELECTION: Color = Color::Rgb(50, 50, 70);
-
-/// Left border color for thinking blocks.
-const THOUGHT_BORDER: Color = Color::Rgb(80, 160, 200);
+use crate::tui::ui::{
+    ACCENT_INFO_LEVEL, ACCENT_THOUGHT, ACCENT_TOOL, BG_LOGS, BG_STATUS_BAR, BG_TEXT_SELECTION,
+};
 
 /// Draw the status bar showing the selected workflow name, repo, status, and key hints.
 pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let bg = Style::default().bg(BG_HEADER);
+    let bg = Style::default().bg(BG_STATUS_BAR);
 
     let (title, repo) = match app.selected_workflow() {
         Some(wf) => (
@@ -212,7 +208,7 @@ impl RenderCtx {
     fn row_style(&self, screen_row: usize) -> Style {
         let row = screen_row as u16;
         if self.sel_active && row >= self.sel_top && row <= self.sel_bot {
-            Style::default().bg(BG_SELECTION)
+            Style::default().bg(BG_TEXT_SELECTION)
         } else {
             self.bg
         }
@@ -247,7 +243,7 @@ fn render_thought(
         let rs = ctx.row_style(screen_row);
         let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
         lines.push(Line::from(vec![
-            Span::styled(" │", rs.fg(THOUGHT_BORDER)),
+            Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
             Span::styled(format!(" {}", msg), rs.fg(Color::White)),
         ]));
     }
@@ -258,7 +254,7 @@ fn render_thought(
         if screen_row < ctx.area.y as usize + ctx.area.height as usize {
             let rs = ctx.row_style(screen_row);
             lines.push(Line::from(vec![
-                Span::styled(" │", rs.fg(THOUGHT_BORDER)),
+                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
                 Span::styled(
                     format!(" […] {} more lines — click to expand", remaining),
                     rs.fg(Color::DarkGray),
@@ -279,7 +275,7 @@ fn render_tool_call(
         let msg = truncate_msg(&tool_line.message, ctx.max_width.saturating_sub(8));
         lines.push(Line::from(vec![
             Span::styled(" ", rs),
-            Span::styled("[tool] ", rs.fg(Color::Rgb(140, 120, 200))),
+            Span::styled("[tool] ", rs.fg(ACCENT_TOOL)),
             Span::styled(msg, rs.fg(Color::Gray)),
         ]));
     }
@@ -319,7 +315,7 @@ fn render_consolidated(
             let msg = truncate_msg(&tool_line.message, ctx.max_width.saturating_sub(8));
             lines.push(Line::from(vec![
                 Span::styled(" ", rs),
-                Span::styled("[tool] ", rs.fg(Color::Rgb(140, 120, 200))),
+                Span::styled("[tool] ", rs.fg(ACCENT_TOOL)),
                 Span::styled(msg, rs.fg(Color::Gray)),
             ]));
         }
@@ -329,7 +325,7 @@ fn render_consolidated(
             let msg = truncate_msg(&last_tool.message, ctx.max_width.saturating_sub(8));
             lines.push(Line::from(vec![
                 Span::styled(" ", rs),
-                Span::styled("[tool] ", rs.fg(Color::Rgb(140, 120, 200))),
+                Span::styled("[tool] ", rs.fg(ACCENT_TOOL)),
                 Span::styled(msg, rs.fg(Color::Gray)),
             ]));
         }
@@ -367,7 +363,7 @@ fn render_system(
             "error" => Color::Red,
             "warn" => Color::Yellow,
             "debug" => Color::DarkGray,
-            _ => Color::Blue,
+            _ => ACCENT_INFO_LEVEL,
         };
         let prefix = format!("{:<5} [{}] ", log.level.to_uppercase(), log.stage);
         let available = ctx.max_width.saturating_sub(prefix.len());
@@ -415,7 +411,7 @@ fn draw_logs_flat(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowState,
             let screen_row = area.y + i as u16;
             let is_selected = sel_active && screen_row >= sel_top && screen_row <= sel_bot;
             let row_bg = if is_selected {
-                Style::default().bg(BG_SELECTION)
+                Style::default().bg(BG_TEXT_SELECTION)
             } else {
                 bg
             };
@@ -424,7 +420,7 @@ fn draw_logs_flat(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowState,
                 "error" => Color::Red,
                 "warn" => Color::Yellow,
                 "debug" => Color::DarkGray,
-                _ => Color::Blue,
+                _ => ACCENT_INFO_LEVEL,
             };
 
             let prefix = format!("{:<5} [{}] ", log.level.to_uppercase(), log.stage);

@@ -12,17 +12,14 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::{App, LeftPane, StageStatus, WorkflowStatus};
-use crate::tui::ui::BG_SIDEBAR;
-
-/// Active border color.
-const BORDER_ACTIVE: Color = Color::Rgb(60, 80, 160);
+use crate::tui::ui::{ACCENT_BORDER, BG_SIDEBAR};
 
 /// Draw the sidebar in the given area.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let bg = Style::default().bg(BG_SIDEBAR);
     let is_active = app.active_left_pane == LeftPane::Workflows && !app.info_expanded_open;
     let border_style = if is_active {
-        Style::default().fg(BORDER_ACTIVE).bg(BG_SIDEBAR)
+        Style::default().fg(ACCENT_BORDER).bg(BG_SIDEBAR)
     } else {
         bg
     };
@@ -63,7 +60,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
         let enabled_tag = if wf.enabled { "" } else { " OFF" };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", indicator), bg.fg(status_color)),
+            Span::styled(
+                format!(" {} ", indicator),
+                if is_selected {
+                    bg.fg(Color::White)
+                } else {
+                    bg.fg(status_color)
+                },
+            ),
             Span::styled(wf.name.clone(), name_style),
             Span::styled(enabled_tag, bg.fg(Color::DarkGray)),
         ]));

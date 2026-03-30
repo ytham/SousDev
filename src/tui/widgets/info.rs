@@ -10,15 +10,7 @@ use ratatui::Frame;
 
 use crate::tui::app::{App, LeftPane};
 use crate::tui::events::ItemStatus;
-
-/// Info pane background.
-const BG_INFO: Color = Color::Rgb(22, 22, 30);
-
-/// Highlighted row background.
-const BG_SELECTED: Color = Color::Rgb(36, 36, 48);
-
-/// Active border color.
-const BORDER_ACTIVE: Color = Color::Rgb(60, 80, 160);
+use crate::tui::ui::{ACCENT_BORDER, BG_INFO, BG_ROW_FOCUS};
 
 /// Info pane width in characters.
 pub const INFO_WIDTH: u16 = 24;
@@ -28,7 +20,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let bg = Style::default().bg(BG_INFO);
     let is_active = app.active_left_pane == LeftPane::Info && !app.info_expanded_open;
     let border_style = if is_active {
-        Style::default().fg(BORDER_ACTIVE).bg(BG_INFO)
+        Style::default().fg(ACCENT_BORDER).bg(BG_INFO)
     } else {
         bg
     };
@@ -42,7 +34,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let all_active = app.log_filter.is_none();
     let all_selected = selected == 0;
     let all_bg = if all_selected {
-        Style::default().bg(BG_SELECTED)
+        Style::default().bg(BG_ROW_FOCUS)
     } else {
         bg
     };
@@ -92,7 +84,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 .map(|f| f == &item.id)
                 .unwrap_or(false);
             let row_bg = if is_sel {
-                Style::default().bg(BG_SELECTED)
+                Style::default().bg(BG_ROW_FOCUS)
             } else {
                 bg
             };
@@ -118,7 +110,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(badge, row_bg.fg(badge_color)),
                 Span::styled(marker, row_bg.fg(Color::White)),
                 Span::styled(format!("{} ", id_display), row_bg.fg(Color::Cyan)),
-                Span::styled(title, row_bg.fg(Color::DarkGray)),
+                Span::styled(title, row_bg.fg(Color::Gray)),
             ]));
         }
     }
@@ -135,10 +127,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     // Footer hints (compact).
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
-        Span::styled(
-            "─".repeat(INFO_WIDTH as usize - 2),
-            bg.fg(Color::DarkGray),
-        ),
+        Span::styled("─".repeat(INFO_WIDTH as usize - 2), bg.fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),

@@ -12,12 +12,39 @@ use ratatui::Frame;
 use crate::tui::app::App;
 use crate::tui::widgets::{command_menu, info, info_expanded, log_view, sidebar};
 
-/// Panel background colors — subtle dark shades to differentiate areas.
+// ── Theme: Backgrounds (dark to light) ────────────────────────────────────
+/// Log pane background (darkest).
+pub const BG_LOGS: Color = Color::Rgb(16, 16, 22);
+/// Info pane (compact) background.
+pub const BG_INFO: Color = Color::Rgb(20, 20, 28);
+/// Sidebar background.
 pub const BG_SIDEBAR: Color = Color::Rgb(24, 24, 32);
-pub const BG_HEADER: Color = Color::Rgb(28, 28, 38);
-pub const BG_LOGS: Color = Color::Rgb(20, 20, 28);
+/// Info expanded (floating) panel background.
+pub const BG_INFO_EXPANDED: Color = Color::Rgb(28, 28, 38);
+/// Status bar background.
+pub const BG_STATUS_BAR: Color = Color::Rgb(30, 30, 42);
+/// Command menu / cron edit overlay background.
+pub const BG_MENU: Color = Color::Rgb(34, 34, 48);
 /// The terminal default background shows through the 1-char gaps.
 pub const BG_GAP: Color = Color::Reset;
+
+// ── Theme: Highlight backgrounds ──────────────────────────────────────────
+/// Row focus highlight (keyboard cursor in info/info-expanded panels).
+pub const BG_ROW_FOCUS: Color = Color::Rgb(40, 40, 54);
+/// Mouse text selection highlight (log pane drag-to-copy).
+pub const BG_TEXT_SELECTION: Color = Color::Rgb(50, 50, 70);
+
+// ── Theme: Accent colors ──────────────────────────────────────────────────
+/// Blue border accent — active panel indicator, floating panel borders.
+pub const ACCENT_BORDER: Color = Color::Rgb(60, 80, 160);
+/// Cyan-blue — thinking block left border.
+pub const ACCENT_THOUGHT: Color = Color::Rgb(80, 160, 200);
+/// Purple — `[tool]` tag in pretty log mode.
+pub const ACCENT_TOOL: Color = Color::Rgb(140, 120, 200);
+/// Muted blue — "info" log level (replaces raw Color::Blue).
+pub const ACCENT_INFO_LEVEL: Color = Color::Rgb(70, 110, 190);
+/// Muted green — toast notifications.
+pub const ACCENT_TOAST: Color = Color::Rgb(40, 130, 70);
 
 /// Draw the full TUI layout.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -140,7 +167,7 @@ fn draw_toast(f: &mut Frame, app: &App) {
     f.render_widget(Clear, toast_area);
 
     let bg = Style::default()
-        .bg(Color::Rgb(50, 160, 80))
+        .bg(ACCENT_TOAST)
         .fg(Color::White);
     let line = Line::from(vec![Span::styled(format!("  {}  ", msg), bg)]);
     let paragraph = Paragraph::new(line).block(Block::default().style(bg));

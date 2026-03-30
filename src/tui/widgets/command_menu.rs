@@ -1,8 +1,7 @@
 /// Command menu overlay — shown at the bottom when the user presses `:`.
 /// Also renders the cron edit input when in CronEdit mode.
 ///
-/// Displays available single-key commands.  Dismisses on Esc or any action.
-/// Styled as a floating bar with a subtle background, no borders.
+/// Styled to match the overall muted dark theme with a blue left border.
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -11,11 +10,7 @@ use ratatui::Frame;
 
 use crate::tui::app::{App, InputMode};
 
-/// Command menu background — slightly lighter to float above the log pane.
-const BG_MENU: Color = Color::Rgb(36, 36, 48);
-
-/// Left border color for floating panels.
-const BORDER_COLOR: Color = Color::Rgb(60, 80, 160);
+use crate::tui::ui::{ACCENT_BORDER, BG_MENU};
 
 /// Draw the command menu or cron edit overlay.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -44,44 +39,22 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
     f.render_widget(Clear, menu_area);
 
     let bg = Style::default().bg(BG_MENU);
-    let border = Style::default().fg(BORDER_COLOR).bg(BG_MENU);
+    let border = Style::default().fg(ACCENT_BORDER).bg(BG_MENU);
+    let key = bg.fg(Color::White);
+    let label = bg.fg(Color::DarkGray);
+
     let line = Line::from(vec![
         Span::styled("│", border),
-        Span::styled(
-            " ESC ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(180, 160, 60)),
-        ),
-        Span::styled(" close  ", bg.fg(Color::Gray)),
-        Span::styled(
-            " q ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(180, 60, 60)),
-        ),
-        Span::styled(" quit  ", bg.fg(Color::Gray)),
-        Span::styled(
-            " e ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(60, 160, 80)),
-        ),
-        Span::styled(" enable/disable  ", bg.fg(Color::Gray)),
-        Span::styled(
-            " c ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(180, 130, 60)),
-        ),
-        Span::styled(" schedule  ", bg.fg(Color::Gray)),
-        Span::styled(
-            " p ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(60, 140, 180)),
-        ),
-        Span::styled(" pause/resume ", bg.fg(Color::Gray)),
+        Span::styled(" ESC ", key),
+        Span::styled("close  ", label),
+        Span::styled("q ", key),
+        Span::styled("quit  ", label),
+        Span::styled("e ", key),
+        Span::styled("enable/disable  ", label),
+        Span::styled("c ", key),
+        Span::styled("schedule  ", label),
+        Span::styled("p ", key),
+        Span::styled("pause/resume", label),
     ]);
 
     let block = Block::default().style(bg);
@@ -107,32 +80,24 @@ fn draw_cron_edit(f: &mut Frame, app: &App) {
     f.render_widget(Clear, edit_area);
 
     let bg = Style::default().bg(BG_MENU);
-    let border = Style::default().fg(BORDER_COLOR).bg(BG_MENU);
-    let cursor = "\u{2588}"; // Block cursor character
+    let border = Style::default().fg(ACCENT_BORDER).bg(BG_MENU);
+    let key = bg.fg(Color::White);
+    let label = bg.fg(Color::DarkGray);
+    let cursor = "\u{2588}";
 
     let line = Line::from(vec![
         Span::styled("│", border),
-        Span::styled(" Schedule: ", bg.fg(Color::DarkGray)),
+        Span::styled(" Schedule: ", label),
         Span::styled(
             app.cron_input.clone(),
             bg.fg(Color::White).add_modifier(Modifier::BOLD),
         ),
         Span::styled(cursor, bg.fg(Color::Gray)),
-        Span::styled("  (cron or e.g. 5m, 30min, 2hr) ", bg.fg(Color::DarkGray)),
-        Span::styled(
-            " ENTER ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(60, 160, 80)),
-        ),
-        Span::styled(" apply  ", bg.fg(Color::Gray)),
-        Span::styled(
-            " ESC ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Rgb(180, 160, 60)),
-        ),
-        Span::styled(" cancel ", bg.fg(Color::Gray)),
+        Span::styled("  (cron or e.g. 5m, 30min, 2hr) ", label),
+        Span::styled("ENTER ", key),
+        Span::styled("apply  ", label),
+        Span::styled("ESC ", key),
+        Span::styled("cancel", label),
     ]);
 
     let block = Block::default().style(bg);

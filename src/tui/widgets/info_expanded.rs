@@ -12,14 +12,7 @@ use ratatui::Frame;
 use crate::tui::app::App;
 use crate::tui::events::ItemStatus;
 
-/// Info expanded panel background.
-const BG_INFO: Color = Color::Rgb(26, 26, 36);
-
-/// Highlighted row background.
-const BG_SELECTED: Color = Color::Rgb(36, 36, 48);
-
-/// Left border color for floating panels.
-const BORDER_COLOR: Color = Color::Rgb(60, 80, 160);
+use crate::tui::ui::{ACCENT_BORDER, BG_INFO_EXPANDED, BG_ROW_FOCUS};
 
 /// Info expanded panel width in characters.
 pub const INFO_EXPANDED_WIDTH: u16 = 60;
@@ -57,8 +50,8 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, panel_area);
 
-    let bg = Style::default().bg(BG_INFO);
-    let border = Style::default().fg(BORDER_COLOR).bg(BG_INFO);
+    let bg = Style::default().bg(BG_INFO_EXPANDED);
+    let border = Style::default().fg(ACCENT_BORDER).bg(BG_INFO_EXPANDED);
     let mut lines: Vec<Line> = Vec::new();
 
     // ── Header ────────────────────────────────────────────────────────────
@@ -88,7 +81,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let all_logs_selected = selected == 0;
     let all_logs_active = app.log_filter.is_none();
     let all_logs_bg = if all_logs_selected {
-        Style::default().bg(BG_SELECTED)
+        Style::default().bg(BG_ROW_FOCUS)
     } else {
         bg
     };
@@ -143,7 +136,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .map(|f| f == &item.id)
                 .unwrap_or(false);
             let row_bg = if is_selected {
-                Style::default().bg(BG_SELECTED)
+                Style::default().bg(BG_ROW_FOCUS)
             } else {
                 bg
             };
