@@ -42,6 +42,11 @@ pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         _ => Color::DarkGray,
     };
 
+    let filter_label = match &app.log_filter {
+        None => "All logs".to_string(),
+        Some(id) => id.clone(),
+    };
+
     let info_line = Line::from(vec![
         Span::styled(
             format!(" {} ", title),
@@ -49,6 +54,15 @@ pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(format!(" {} ", repo), bg.fg(Color::Cyan)),
         Span::styled(format!(" {} ", status), bg.fg(status_color)),
+        Span::styled(" │ ", bg.fg(Color::DarkGray)),
+        Span::styled(
+            filter_label,
+            bg.fg(if app.log_filter.is_some() {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }),
+        ),
     ]);
 
     // Second line: key hints for the log pane.
@@ -90,8 +104,13 @@ pub fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     } else if !wf.logs.is_empty() {
         draw_logs_flat(f, app, wf, area);
     } else {
+        let msg = if app.log_filter.is_some() {
+            " No logs for this item yet"
+        } else {
+            " Waiting for activity..."
+        };
         let empty = Paragraph::new(Span::styled(
-            " Waiting for activity...",
+            msg,
             Style::default().bg(BG_LOGS).fg(Color::DarkGray),
         ))
         .block(Block::default().style(bg));

@@ -42,6 +42,8 @@ pub struct LogLine {
     pub level: String,
     pub stage: String,
     pub message: String,
+    /// The run ID this log line belongs to (for filtering by item).
+    pub run_id: Option<String>,
 }
 
 /// Stage status within a workflow flowchart.
@@ -276,6 +278,11 @@ pub struct App {
     pub pretty_logs: bool,
     /// Mouse down position for click vs drag detection.
     pub mouse_down_pos: Option<(u16, u16)>,
+    /// Current log filter.  `None` = show all logs.  `Some(id)` = show only
+    /// logs from runs associated with this item (e.g. `"#42"`, `"PR #120"`).
+    pub log_filter: Option<String>,
+    /// Map of run_id → item_label for associating logs with items.
+    pub run_id_to_item: HashMap<String, String>,
 }
 
 impl Default for App {
@@ -308,6 +315,8 @@ impl App {
             schedule_tx: None,
             pretty_logs: true,
             mouse_down_pos: None,
+            log_filter: None,
+            run_id_to_item: HashMap::new(),
         }
     }
 
@@ -328,6 +337,11 @@ impl App {
     /// Return the currently selected workflow, if any.
     pub fn selected_workflow(&self) -> Option<&WorkflowState> {
         self.workflows.get(self.selected)
+    }
+
+    /// Return the name of the currently selected workflow.
+    pub fn selected_workflow_name(&self) -> Option<&str> {
+        self.workflows.get(self.selected).map(|wf| wf.name.as_str())
     }
 
     /// Process a TUI event and update state accordingly.
@@ -379,16 +393,17 @@ impl App {
                 item_label,
                 ..
             } => {
-                // Update info panel: mark the matching item as InProgress.
+                // Track run_id → item_label for log filtering.
                 if let Some(ref label) = item_label {
+                    self.run_id_to_item
+                        .insert(run_id.clone(), label.clone());
                     self.update_item_status(&workflow_name, label, ItemStatus::InProgress);
                 }
 
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     wf.status = WorkflowStatus::Running;
-                    wf.run_id = Some(run_id);
+                    wf.run_id = Some(run_id.clone());
                     wf.current_item_label = item_label.clone();
-                    // Reset all stage statuses to pending.
                     for s in &mut wf.stage_statuses {
                         *s = StageStatus::Pending;
                     }
@@ -399,6 +414,7 @@ impl App {
                         level: "info".into(),
                         stage: "executor".into(),
                         message: label,
+                        run_id: Some(run_id),
                     });
                 }
 
@@ -410,8 +426,8 @@ impl App {
 
             TuiEvent::StageStarted {
                 workflow_name,
+                run_id,
                 stage_name,
-                ..
             } => {
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     if let Some(idx) = wf.stages.iter().position(|s| *s == stage_name) {
@@ -421,6 +437,7 @@ impl App {
                         level: "info".into(),
                         stage: stage_name.clone(),
                         message: format!("Stage started: {}", stage_name),
+                        run_id: Some(run_id),
                     });
                 }
                 dirty_workflow = Some(workflow_name);
@@ -440,9 +457,9 @@ impl App {
 
             TuiEvent::StageFailed {
                 workflow_name,
+                run_id,
                 stage_name,
                 error,
-                ..
             } => {
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     if let Some(idx) = wf.stages.iter().position(|s| *s == stage_name) {
@@ -452,6 +469,7 @@ impl App {
                         level: "error".into(),
                         stage: stage_name,
                         message: error,
+                        run_id: Some(run_id),
                     });
                 }
                 dirty_workflow = Some(workflow_name);
@@ -459,16 +477,18 @@ impl App {
 
             TuiEvent::LogMessage {
                 workflow_name,
+                run_id,
                 level,
                 stage,
                 message,
-                ..
             } => {
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
+                    let rid = if run_id.is_empty() { None } else { Some(run_id) };
                     wf.logs.push(LogLine {
                         level,
                         stage,
                         message,
+                        run_id: rid,
                     });
                 }
                 dirty_workflow = Some(workflow_name);
@@ -476,17 +496,19 @@ impl App {
 
             TuiEvent::RunCompleted {
                 workflow_name,
+                run_id,
                 success,
                 skipped,
                 error,
                 pr_url,
-                ..
             } => {
                 let item_label = self
                     .workflows
                     .iter()
                     .find(|w| w.name == workflow_name)
                     .and_then(|w| w.current_item_label.clone());
+
+                let completed_run_id = if run_id.is_empty() { None } else { Some(run_id) };
 
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     wf.status = if skipped {
@@ -510,6 +532,7 @@ impl App {
                         level: if success { "info" } else { "error" }.into(),
                         stage: "executor".into(),
                         message: msg,
+                        run_id: completed_run_id.clone(),
                     });
                 }
 
@@ -580,12 +603,14 @@ impl App {
                 if self.selected > 0 {
                     self.selected -= 1;
                     self.log_scroll = 0;
+                    self.log_filter = None;
                 }
             }
             KeyCode::Down => {
                 if self.selected + 1 < self.workflows.len() {
                     self.selected += 1;
                     self.log_scroll = 0;
+                    self.log_filter = None;
                 }
             }
             KeyCode::PageUp | KeyCode::Char('b') => {
@@ -622,12 +647,18 @@ impl App {
                 self.info_panel_selected = self.info_panel_selected.saturating_sub(1);
             }
             KeyCode::Down => {
-                let max = self.selected_items().len().saturating_sub(1);
+                // +1 because index 0 is "All logs", then real items start at 1.
+                let max = self.selected_items().len(); // items.len() = last valid index
                 if self.info_panel_selected < max {
                     self.info_panel_selected += 1;
                 }
             }
             KeyCode::Enter => {
+                // Set log filter to the selected item (0 = All logs).
+                self.set_log_filter_from_info_panel();
+            }
+            KeyCode::Char('g') => {
+                // Open URL in browser for the selected item.
                 self.open_selected_info_item();
             }
             KeyCode::Char('c') => {
@@ -709,6 +740,7 @@ impl App {
                     level: "info".into(),
                     stage: "session".into(),
                     message: "Workflow enabled".into(),
+                    run_id: None,
                 });
             } else {
                 wf.status = WorkflowStatus::Disabled;
@@ -716,6 +748,7 @@ impl App {
                     level: "warn".into(),
                     stage: "session".into(),
                     message: "Workflow disabled".into(),
+                    run_id: None,
                 });
             }
             self.session_dirty = true;
@@ -746,6 +779,7 @@ impl App {
                             self.selected = idx;
                             self.log_scroll = 0;
                             self.info_panel_selected = 0;
+                            self.log_filter = None;
                         }
                     }
                 }
@@ -898,12 +932,16 @@ impl App {
     /// Resets the item to `None` and queues a failure cooldown clear so
     /// the cron runner will retry it on the next tick.
     pub fn clear_selected_item(&mut self) {
+        if self.info_panel_selected == 0 {
+            return; // "All logs" — nothing to clear.
+        }
         let wf_name = match self.selected_workflow() {
             Some(wf) => wf.name.clone(),
             None => return,
         };
+        let item_idx = self.info_panel_selected - 1;
         if let Some(items) = self.workflow_items.get_mut(&wf_name) {
-            if let Some(item) = items.get_mut(self.info_panel_selected) {
+            if let Some(item) = items.get_mut(item_idx) {
                 if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
                     item.status = ItemStatus::None;
                     let item_key = extract_item_key(&item.id);
@@ -939,10 +977,45 @@ impl App {
         }
     }
 
+    /// Set the log filter based on the info panel selection.
+    ///
+    /// Index 0 = "All logs" (clears filter).  Index 1+ = specific item.
+    fn set_log_filter_from_info_panel(&mut self) {
+        if self.info_panel_selected == 0 {
+            // "All logs" — clear filter.
+            if self.log_filter.is_some() {
+                self.log_filter = None;
+                self.log_scroll = 0;
+                // Rebuild entries with all logs.
+                if let Some(name) = self.selected_workflow_name().map(|s| s.to_string()) {
+                    self.rebuild_entries_for(&name);
+                }
+                self.show_toast("Showing all logs", Duration::from_secs(3));
+            }
+        } else {
+            // Specific item.
+            let items = self.selected_items();
+            let item_idx = self.info_panel_selected - 1; // offset for "All logs"
+            if let Some(item) = items.get(item_idx) {
+                let item_id = item.id.clone();
+                self.log_filter = Some(item_id.clone());
+                self.log_scroll = 0;
+                if let Some(name) = self.selected_workflow_name().map(|s| s.to_string()) {
+                    self.rebuild_entries_for(&name);
+                }
+                self.show_toast(&format!("Filtering: {}", item_id), Duration::from_secs(3));
+            }
+        }
+    }
+
     /// Open the URL of the currently selected info panel item in the browser.
     fn open_selected_info_item(&mut self) {
+        if self.info_panel_selected == 0 {
+            return; // "All logs" has no URL.
+        }
         let items = self.selected_items();
-        if let Some(item) = items.get(self.info_panel_selected) {
+        let item_idx = self.info_panel_selected - 1;
+        if let Some(item) = items.get(item_idx) {
             let url = item.url.clone();
             // Only open URLs that look like real HTTP(S) links.
             if url.starts_with("https://") || url.starts_with("http://") {
@@ -1013,6 +1086,7 @@ impl App {
                 level: "info".into(),
                 stage: "config".into(),
                 message: format!("Schedule updated to: {}", cron_expr),
+                run_id: None,
             });
 
             // Persist to config.toml.
@@ -1133,12 +1207,88 @@ impl App {
         }
     }
 
+    /// Return the filtered logs for the selected workflow based on the
+    /// current `log_filter`.  When `None`, returns all logs.
+    pub fn filtered_logs_for(&self, wf: &WorkflowState) -> Vec<LogLine> {
+        match &self.log_filter {
+            None => wf.logs.clone(),
+            Some(item_id) => {
+                // Find all run_ids that match this item_label.
+                let matching_run_ids: HashSet<String> = self
+                    .run_id_to_item
+                    .iter()
+                    .filter(|(_, label)| label.contains(item_id))
+                    .map(|(rid, _)| rid.clone())
+                    .collect();
+
+                if matching_run_ids.is_empty() {
+                    return Vec::new();
+                }
+
+                wf.logs
+                    .iter()
+                    .filter(|log| {
+                        log.run_id
+                            .as_ref()
+                            .map(|rid| matching_run_ids.contains(rid))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            }
+        }
+    }
+
     /// Rebuild log entries for a workflow after its logs have changed.
     fn rebuild_entries_for(&mut self, workflow_name: &str) {
         if self.pretty_logs {
+            // Determine which logs to use (filtered or all).
+            let is_selected = self
+                .workflows
+                .get(self.selected)
+                .map(|wf| wf.name == workflow_name)
+                .unwrap_or(false);
+
+            // Collect matching run_ids for filtering (avoids borrow issues).
+            let matching_run_ids: Option<HashSet<String>> = if is_selected {
+                self.log_filter.as_ref().map(|item_id| {
+                    self.run_id_to_item
+                        .iter()
+                        .filter(|(_, label)| label.contains(item_id.as_str()))
+                        .map(|(rid, _)| rid.clone())
+                        .collect()
+                })
+            } else {
+                None
+            };
+
             if let Some(wf) = self.workflows.iter_mut().find(|w| w.name == workflow_name) {
+                let filtered: Vec<LogLine>;
+                let logs_to_use = match &matching_run_ids {
+                    Some(run_ids) if !run_ids.is_empty() => {
+                        filtered = wf
+                            .logs
+                            .iter()
+                            .filter(|log| {
+                                log.run_id
+                                    .as_ref()
+                                    .map(|rid| run_ids.contains(rid))
+                                    .unwrap_or(false)
+                            })
+                            .cloned()
+                            .collect();
+                        &filtered
+                    }
+                    Some(_) => {
+                        // Filter is active but no matching run_ids found.
+                        filtered = Vec::new();
+                        &filtered
+                    }
+                    None => &wf.logs,
+                };
+
                 let old_entries = &wf.log_entries;
-                let mut new_entries = rebuild_log_entries(&wf.logs);
+                let mut new_entries = rebuild_log_entries(logs_to_use);
 
                 // Preserve expanded state from old entries.  Match by index —
                 // entries only grow (new ones are appended), so old[i] and
@@ -2233,6 +2383,7 @@ mod tests {
                 level: "info".into(),
                 stage: "x".into(),
                 message: format!("line {}", i),
+                run_id: None,
             });
         }
         app.handle_key(KeyCode::Char('B'), KeyModifiers::empty());
@@ -3011,13 +3162,18 @@ mod tests {
     #[test]
     fn test_up_down_navigates_info_panel_when_open() {
         let mut app = app_with_info_panel();
+        // 0 = "All logs", 1 = #1, 2 = #2, 3 = #3
         assert_eq!(app.info_panel_selected, 0);
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(app.info_panel_selected, 1);
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert_eq!(app.info_panel_selected, 2);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 3);
         // Can't go past last item.
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.info_panel_selected, 3);
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
         assert_eq!(app.info_panel_selected, 2);
         app.handle_key(KeyCode::Up, KeyModifiers::empty());
         assert_eq!(app.info_panel_selected, 1);
@@ -3077,7 +3233,7 @@ mod tests {
     #[test]
     fn test_c_clears_selected_errored_item() {
         let mut app = app_with_info_panel();
-        app.info_panel_selected = 1; // #2 has Error status.
+        app.info_panel_selected = 2; // index 2 = item #2 (offset 1 for "All logs")
         assert_eq!(app.selected_items()[1].status, ItemStatus::Error);
         app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
         assert_eq!(app.selected_items()[1].status, ItemStatus::None);
@@ -3088,7 +3244,7 @@ mod tests {
     #[test]
     fn test_c_does_not_clear_non_error_item() {
         let mut app = app_with_info_panel();
-        app.info_panel_selected = 0; // #1 has None status.
+        app.info_panel_selected = 1; // index 1 = item #1 which has None status.
         app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
         // Should not clear — it's already None.
         assert!(app.clear_requests.is_empty());
@@ -3114,13 +3270,41 @@ mod tests {
     }
 
     #[test]
-    fn test_enter_in_info_panel_shows_toast() {
+    fn test_enter_on_all_logs_clears_filter() {
         let mut app = app_with_info_panel();
+        app.log_filter = Some("#1".into());
+        app.info_panel_selected = 0; // "All logs"
         app.handle_key(KeyCode::Enter, KeyModifiers::empty());
-        // Should show "Opened in browser" toast (browser open may fail
-        // in test env but toast is set regardless).
+        assert!(app.log_filter.is_none());
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().message.contains("all logs"));
+    }
+
+    #[test]
+    fn test_enter_on_item_sets_filter() {
+        let mut app = app_with_info_panel();
+        app.info_panel_selected = 1; // item #1
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(app.log_filter, Some("#1".into()));
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().message.contains("#1"));
+    }
+
+    #[test]
+    fn test_g_opens_url_in_info_panel() {
+        let mut app = app_with_info_panel();
+        app.info_panel_selected = 1; // item #1
+        app.handle_key(KeyCode::Char('g'), KeyModifiers::empty());
         assert!(app.toast.is_some());
         assert!(app.toast.as_ref().unwrap().message.contains("Opened"));
+    }
+
+    #[test]
+    fn test_g_on_all_logs_does_nothing() {
+        let mut app = app_with_info_panel();
+        app.info_panel_selected = 0; // "All logs"
+        app.handle_key(KeyCode::Char('g'), KeyModifiers::empty());
+        assert!(app.toast.is_none());
     }
 
     #[test]
@@ -3169,6 +3353,7 @@ mod tests {
             level: "info".into(),
             stage: stage.into(),
             message: msg.into(),
+            run_id: None,
         }
     }
 
@@ -3410,5 +3595,51 @@ mod tests {
         // The thought block should still be expanded.
         assert!(app.workflows[0].log_entries[0].expanded);
         assert_eq!(app.workflows[0].log_entries.len(), 2);
+    }
+
+    // ── Log filtering ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_run_id_stored_on_log_line() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::LogMessage {
+            workflow_name: "p".into(),
+            run_id: "run-42".into(),
+            level: "info".into(),
+            stage: "tool".into(),
+            message: "hello".into(),
+        });
+        assert_eq!(app.workflows[0].logs[0].run_id, Some("run-42".into()));
+    }
+
+    #[test]
+    fn test_run_id_to_item_mapping() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.handle_tui_event(TuiEvent::RunStarted {
+            workflow_name: "p".into(),
+            run_id: "run-42".into(),
+            mode: WorkflowMode::Issues,
+            item_label: Some("issue #42".into()),
+        });
+        assert_eq!(
+            app.run_id_to_item.get("run-42"),
+            Some(&"issue #42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_filter_clears_on_workflow_switch() {
+        let mut app = App::new();
+        for name in &["a", "b"] {
+            app.handle_tui_event(TuiEvent::WorkflowRegistered {
+                name: (*name).into(),
+                schedule: "* * * * * *".into(),
+                mode: WorkflowMode::Standard,
+                repo: None,
+            });
+        }
+        app.log_filter = Some("#42".into());
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert!(app.log_filter.is_none());
     }
 }

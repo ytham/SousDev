@@ -14,6 +14,9 @@ use crate::tui::app::{App, InputMode};
 /// Command menu background — slightly lighter to float above the log pane.
 const BG_MENU: Color = Color::Rgb(36, 36, 48);
 
+/// Left border color for floating panels.
+const BORDER_COLOR: Color = Color::Rgb(60, 80, 160);
+
 /// Draw the command menu or cron edit overlay.
 pub fn draw(f: &mut Frame, app: &App) {
     match app.input_mode {
@@ -41,8 +44,9 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
     f.render_widget(Clear, menu_area);
 
     let bg = Style::default().bg(BG_MENU);
+    let border = Style::default().fg(BORDER_COLOR).bg(BG_MENU);
     let line = Line::from(vec![
-        Span::styled(" ", bg),
+        Span::styled("│", border),
         Span::styled(
             " ESC ",
             Style::default()
@@ -103,9 +107,11 @@ fn draw_cron_edit(f: &mut Frame, app: &App) {
     f.render_widget(Clear, edit_area);
 
     let bg = Style::default().bg(BG_MENU);
+    let border = Style::default().fg(BORDER_COLOR).bg(BG_MENU);
     let cursor = "\u{2588}"; // Block cursor character
 
     let line = Line::from(vec![
+        Span::styled("│", border),
         Span::styled(" Schedule: ", bg.fg(Color::DarkGray)),
         Span::styled(
             app.cron_input.clone(),
