@@ -30,7 +30,7 @@ blocked_commands = []
 
 [logging]
 level = "info"    # "silent", "info", or "debug"
-pretty = false
+pretty = true
 
 # ---- Prompt overrides (all optional) ----
 # Paths are relative to this config file's directory.
