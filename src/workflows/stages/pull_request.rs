@@ -176,12 +176,33 @@ async fn try_automated_pr(ctx: &mut StageContext) -> Result<()> {
             ctx.parsed_task.task.lines().next().unwrap_or("automated fix")
         )
     });
-    let body = ctx.pr_generated_body.clone().unwrap_or_else(|| {
+    let mut body = ctx.pr_generated_body.clone().unwrap_or_else(|| {
+        let task_summary: String = ctx.parsed_task.task.lines().take(10).collect::<Vec<_>>().join("\n");
+        let agent_summary = ctx
+            .agent_result
+            .as_ref()
+            .map(|r| {
+                let answer: String = r.answer.chars().take(500).collect();
+                format!("\n\n## Agent Summary\n\n{}", answer)
+            })
+            .unwrap_or_default();
         format!(
-            "Automated change produced by SousDev.\n\nTask:\n{}",
-            ctx.parsed_task.task
+            "## Summary\n\n## Task\n\n{}{}\n",
+            task_summary,
+            agent_summary
         )
     });
+
+    // Append branding at the bottom (configurable, default true).
+    let show_branding = ctx
+        .config
+        .pull_request
+        .as_ref()
+        .and_then(|pr| pr.show_branding)
+        .unwrap_or(true);
+    if show_branding {
+        body.push_str("\n\n---\n\n🍳 *Automated by [SousDev](https://github.com/ytham/SousDev)*\n");
+    }
 
     // ── 8. Create PR ─────────────────────────────────────────────────────
     let pr_url = create_pr(ctx, &title, &body).await?;

@@ -352,6 +352,8 @@ pub struct PullRequestConfig {
     pub draft: Option<bool>,
     /// Labels to apply to the newly created PR.
     pub labels: Option<Vec<String>>,
+    /// Append SousDev branding to the PR body.  Defaults to `true`.
+    pub show_branding: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------

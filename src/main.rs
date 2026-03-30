@@ -178,6 +178,9 @@ const TECHNIQUES: &[(&str, &str, &str)] = &[
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present (best-effort — missing file is fine).
+    dotenvy::dotenv().ok();
+
     let cli = Cli::parse();
 
     // Technique info commands need no config.

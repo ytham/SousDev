@@ -125,6 +125,7 @@ branch_prefix = "sousdev/issue-"
 [workflows.pull_request]
 draft = false
 labels = ["harness", "bug-fix"]
+# show_branding = true  # append "Automated by SousDev" to PR body (default true)
 
 [workflows.retry]
 max_attempts = 2

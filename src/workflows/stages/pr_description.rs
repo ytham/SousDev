@@ -56,7 +56,20 @@ impl Stage for PrDescriptionStage {
 
         // Try Claude CLI first, fall back to template on failure.
         let (title, body) = match generate_via_claude_cli(&prompt, ctx).await {
-            Ok(text) => parse_title_body(&text),
+            Ok(text) => {
+                let (t, b) = parse_title_body(&text);
+                // If the LLM didn't follow the TITLE:/BODY: format,
+                // use the raw output as the body.
+                let body = b.or_else(|| {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                });
+                (t, body)
+            }
             Err(e) => {
                 ctx.logger.info(&format!(
                     "Claude CLI failed for PR description (falling back to template): {}",
