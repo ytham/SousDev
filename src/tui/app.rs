@@ -675,9 +675,9 @@ impl App {
                     }
                 }
 
-                // Click in info panel: open the item's URL.
+                // Click in info panel: select the clicked item.
                 if panel == Panel::InfoPanel {
-                    self.open_info_panel_item(event.row);
+                    self.select_info_panel_item(event.row);
                 }
 
                 self.selection = TextSelection {
@@ -863,28 +863,17 @@ impl App {
         }
     }
 
-    /// Open the URL of an info panel item clicked at a given terminal row.
-    fn open_info_panel_item(&mut self, row: u16) {
+    /// Select an info panel item by terminal row (from mouse click).
+    fn select_info_panel_item(&mut self, row: u16) {
         let panel = &self.layout.info_panel;
         if panel.height == 0 {
             return;
         }
         // Rows: 0 = title, 1 = separator, 2+ = items.
         let item_row = row.saturating_sub(panel.y + 2) as usize;
-        let items = self.selected_items();
-        if item_row < items.len() {
-            let url = items[item_row].url.clone();
-            if !url.is_empty() {
-                // Open in default browser (best-effort).
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(&url).spawn();
-                #[cfg(target_os = "linux")]
-                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-                #[cfg(target_os = "windows")]
-                let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn();
-
-                self.show_toast("Opened in browser", Duration::from_secs(3));
-            }
+        let item_count = self.selected_items().len();
+        if item_row < item_count {
+            self.info_panel_selected = item_row;
         }
     }
 
