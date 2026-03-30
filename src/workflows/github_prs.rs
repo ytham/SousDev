@@ -615,4 +615,63 @@ mod tests {
         assert_eq!(comment.login, "reviewer");
         assert_eq!(comment.body, "LGTM");
     }
+
+    // ── map_raw_pr ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_map_raw_pr_extracts_reviewers_and_teams() {
+        let raw = RawGhPR {
+            number: 99,
+            title: "Test PR".into(),
+            body: Some("Body".into()),
+            url: "https://github.com/o/r/pull/99".into(),
+            head_ref_name: "feat".into(),
+            head_ref_oid: "abc123".into(),
+            base_ref_name: "main".into(),
+            author: Some(PRAuthor { login: "alice".into() }),
+            labels: Some(vec![PRLabel { name: "bug".into() }]),
+            review_decision: Some("REVIEW_REQUIRED".into()),
+            review_requests: vec![
+                RawReviewRequest { login: Some("bob".into()), slug: None },
+                RawReviewRequest { login: None, slug: Some("org/eng".into()) },
+            ],
+            assignees: vec![PRAuthor { login: "carol".into() }],
+            created_at: "2025-01-01".into(),
+            updated_at: "2025-01-02".into(),
+        };
+        let pr = map_raw_pr(raw, "o/r");
+        assert_eq!(pr.number, 99);
+        assert_eq!(pr.requested_reviewers, vec!["bob"]);
+        assert_eq!(pr.requested_teams, vec!["org/eng"]);
+        assert_eq!(pr.assignees, vec!["carol"]);
+        assert_eq!(pr.repo, "o/r");
+        assert_eq!(pr.author.login, "alice");
+        assert_eq!(pr.labels.len(), 1);
+    }
+
+    #[test]
+    fn test_map_raw_pr_handles_missing_fields() {
+        let raw = RawGhPR {
+            number: 1,
+            title: "t".into(),
+            body: None,
+            url: "u".into(),
+            head_ref_name: "h".into(),
+            head_ref_oid: "o".into(),
+            base_ref_name: "b".into(),
+            author: None,
+            labels: None,
+            review_decision: None,
+            review_requests: vec![],
+            assignees: vec![],
+            created_at: "c".into(),
+            updated_at: "u".into(),
+        };
+        let pr = map_raw_pr(raw, "r");
+        assert_eq!(pr.author.login, "");
+        assert!(pr.labels.is_empty());
+        assert!(pr.requested_reviewers.is_empty());
+        assert!(pr.requested_teams.is_empty());
+        assert!(pr.assignees.is_empty());
+    }
 }

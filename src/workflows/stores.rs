@@ -1496,4 +1496,37 @@ mod failure_cooldown_tests {
         let data = store.read_all().await.unwrap();
         assert_eq!(data.get("wf:1").unwrap().failure_count, 3);
     }
+
+    #[tokio::test]
+    async fn test_get_failures_for_workflow_returns_matching() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        store.record_failure("wf", "42").await.unwrap();
+        store.record_failure("wf", "43").await.unwrap();
+        store.record_failure("other", "99").await.unwrap();
+        let failures = store.get_failures_for_workflow("wf").await.unwrap();
+        assert_eq!(failures.len(), 2);
+        let keys: Vec<String> = failures.iter().map(|(k, _)| k.clone()).collect();
+        assert!(keys.contains(&"42".to_string()));
+        assert!(keys.contains(&"43".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_failures_for_workflow_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        let failures = store.get_failures_for_workflow("wf").await.unwrap();
+        assert!(failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_failures_for_workflow_excludes_other() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        store.record_failure("wf1", "42").await.unwrap();
+        store.record_failure("wf2", "99").await.unwrap();
+        let failures = store.get_failures_for_workflow("wf1").await.unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "42");
+    }
 }

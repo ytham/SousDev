@@ -1762,4 +1762,67 @@ mod tests {
         assert!(result.contains("main.rs"));
         assert!(result.contains("line 0"));
     }
+
+    // ── truncate_title ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_title_short() {
+        assert_eq!(truncate_title("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_title_long() {
+        assert_eq!(truncate_title("a very long title indeed", 10), "a very lo…");
+    }
+
+    #[test]
+    fn test_truncate_title_exact() {
+        assert_eq!(truncate_title("exactly10!", 10), "exactly10!");
+    }
+
+    // ── IssueItem conversions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_issue_item_from_github() {
+        let gh_issue = crate::workflows::github_issues::GitHubIssue {
+            number: 42,
+            title: "Fix the bug".into(),
+            body: Some("It's broken".into()),
+            url: "https://github.com/o/r/issues/42".into(),
+            repo: "o/r".into(),
+            labels: vec![],
+            assignees: vec![],
+            created_at: "".into(),
+            updated_at: "".into(),
+            state: "OPEN".into(),
+        };
+        let item = IssueItem::from_github(&gh_issue);
+        assert_eq!(item.number, 42);
+        assert_eq!(item.display_id, "#42");
+        assert_eq!(item.title, "Fix the bug");
+        assert_eq!(item.body, "It's broken");
+        assert_eq!(item.url, "https://github.com/o/r/issues/42");
+        assert_eq!(item.repo, "o/r");
+    }
+
+    #[test]
+    fn test_issue_item_from_linear() {
+        let linear_issue = crate::workflows::linear_issues::LinearIssue {
+            identifier: "ENG-42".into(),
+            number: 42,
+            title: "Fix the bug".into(),
+            description: Some("It's broken".into()),
+            url: "https://linear.app/t/ENG-42".into(),
+            team_key: "ENG".into(),
+            state: "Todo".into(),
+            labels: vec![],
+            assignee: None,
+        };
+        let item = IssueItem::from_linear(&linear_issue, "owner/repo");
+        assert_eq!(item.number, 42);
+        assert_eq!(item.display_id, "ENG-42");
+        assert_eq!(item.title, "Fix the bug");
+        assert_eq!(item.body, "It's broken");
+        assert_eq!(item.repo, "owner/repo");
+    }
 }

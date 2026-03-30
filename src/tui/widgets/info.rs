@@ -167,3 +167,29 @@ fn status_badge(status: ItemStatus) -> (String, Color) {
         ItemStatus::NewComments => ("[**]".into(), Color::Cyan),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status_badge_labels() {
+        assert_eq!(status_badge(ItemStatus::None).0, "[  ]");
+        assert_eq!(status_badge(ItemStatus::InProgress).0, "[>>]");
+        assert_eq!(status_badge(ItemStatus::Success).0, "[PR]");
+        assert_eq!(status_badge(ItemStatus::Error).0, "[!!]");
+        assert_eq!(status_badge(ItemStatus::Cooldown).0, "[!!]");
+        assert_eq!(status_badge(ItemStatus::Reviewed).0, "[OK]");
+        assert_eq!(status_badge(ItemStatus::NewComments).0, "[**]");
+    }
+
+    #[test]
+    fn test_status_badge_colors() {
+        assert_eq!(status_badge(ItemStatus::None).1, Color::DarkGray);
+        assert_eq!(status_badge(ItemStatus::InProgress).1, Color::Yellow);
+        assert_eq!(status_badge(ItemStatus::Success).1, Color::Green);
+        assert_eq!(status_badge(ItemStatus::Error).1, Color::Red);
+        assert_eq!(status_badge(ItemStatus::Reviewed).1, Color::Green);
+        assert_eq!(status_badge(ItemStatus::NewComments).1, Color::Cyan);
+    }
+}

@@ -3896,4 +3896,135 @@ mod tests {
         app.handle_key(KeyCode::Char('f'), KeyModifiers::empty());
         assert_eq!(app.log_scroll, 0); // page down works
     }
+
+    // ── Info pane key handlers ────────────────────────────────────────────
+
+    #[test]
+    fn test_g_opens_url_in_info_pane() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_open = false;
+        app.active_left_pane = LeftPane::Info;
+        app.info_selected = 1; // item #1
+        app.handle_key(KeyCode::Char('g'), KeyModifiers::empty());
+        assert!(app.toast.is_some());
+        assert!(app.toast.as_ref().unwrap().message.contains("Opened"));
+    }
+
+    #[test]
+    fn test_c_clears_errored_in_info_pane() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_open = false;
+        app.active_left_pane = LeftPane::Info;
+        app.info_selected = 2; // item #2 has Error status
+        app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
+        assert_eq!(app.selected_items()[1].status, ItemStatus::None);
+        assert!(!app.clear_requests.is_empty());
+    }
+
+    #[test]
+    fn test_shift_c_clears_all_from_info_pane() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_open = false;
+        app.active_left_pane = LeftPane::Info;
+        app.handle_key(KeyCode::Char('C'), KeyModifiers::empty());
+        // #2 (Error) and #3 (Cooldown) should both be cleared.
+        assert_eq!(app.selected_items()[1].status, ItemStatus::None);
+        assert_eq!(app.selected_items()[2].status, ItemStatus::None);
+        assert_eq!(app.clear_requests.len(), 2);
+    }
+
+    #[test]
+    fn test_colon_from_info_pane_enters_command() {
+        let mut app = App::new();
+        app.active_left_pane = LeftPane::Info;
+        app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
+        assert_eq!(app.input_mode, InputMode::Command);
+    }
+
+    #[test]
+    fn test_i_from_info_pane_opens_expanded() {
+        let mut app = App::new();
+        app.active_left_pane = LeftPane::Info;
+        app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
+        assert!(app.info_expanded_open);
+    }
+
+    // ── flatten_newlines / embedded newlines ──────────────────────────────
+
+    #[test]
+    fn test_thought_row_count_with_embedded_newlines() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: vec![
+                make_log("thought", "line1\nline2\nline3"),
+                make_log("thought", "line4"),
+            ],
+            expanded: true,
+        };
+        // "line1\nline2\nline3" splits into 3, "line4" is 1 = total 4
+        assert_eq!(entry.row_count(), 4);
+    }
+
+    #[test]
+    fn test_thought_row_count_collapsed_ignores_embedded_newlines() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: vec![
+                make_log("thought", "line1\nline2\nline3"),
+                make_log("thought", "line4"),
+            ],
+            expanded: false,
+        };
+        // Collapsed: first line + "[…]" = 2
+        assert_eq!(entry.row_count(), 2);
+    }
+
+    // ── Click-outside-to-close ────────────────────────────────────────────
+
+    #[test]
+    fn test_click_outside_info_expanded_closes_it() {
+        let mut app = App::new();
+        app.info_expanded_open = true;
+        app.layout.info_expanded = ratatui::layout::Rect::new(10, 1, 60, 30);
+        app.layout.logs = ratatui::layout::Rect::new(52, 0, 60, 30);
+        // Click in the logs area (outside info expanded).
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            80,
+            15,
+        ));
+        assert!(!app.info_expanded_open);
+    }
+
+    #[test]
+    fn test_click_outside_command_menu_dismisses() {
+        let mut app = App::new();
+        app.input_mode = InputMode::Command;
+        app.layout.sidebar = ratatui::layout::Rect::new(0, 0, 26, 30);
+        // Click in the sidebar (not Panel::None).
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            5,
+            10,
+        ));
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    // ── Mouse click in Info pane ──────────────────────────────────────────
+
+    #[test]
+    fn test_mouse_click_in_info_pane_selects_item() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_open = false;
+        app.active_left_pane = LeftPane::Workflows;
+        app.layout.info = ratatui::layout::Rect::new(27, 0, 24, 30);
+        // Click row 2 (item index 2 = second real item after "All logs")
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            30,
+            2,
+        ));
+        assert_eq!(app.active_left_pane, LeftPane::Info);
+        assert_eq!(app.info_selected, 2);
+    }
 }
