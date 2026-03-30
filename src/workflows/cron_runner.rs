@@ -173,67 +173,97 @@ impl CronRunner {
 
         // Listen for schedule updates and Ctrl+C concurrently.
         let mut schedule_rx = self.schedule_rx.take();
+        let tui_tx = self.tui_tx.clone();
 
-        loop {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    break;
-                }
-                cmd = async {
-                    match schedule_rx.as_mut() {
-                        Some(rx) => rx.recv().await,
-                        None => std::future::pending::<Option<ScheduleUpdate>>().await,
-                    }
-                } => {
-                    if let Some(update) = cmd {
-                        logger.info(&format!(
-                            "Rescheduling workflow \"{}\" → {}",
-                            update.workflow_name, update.new_schedule
-                        ));
-                        // Remove the old job.
-                        if let Some(old_uuid) = job_ids.lock().await.remove(&update.workflow_name) {
-                            let _ = sched.remove(&old_uuid).await;
+        // Spawn a background task to handle schedule updates so it
+        // doesn't block the main select loop.
+        if let Some(mut rx) = schedule_rx.take() {
+            let sched_clone = sched.clone();
+            let job_ids = job_ids.clone();
+            let job_state = job_state.clone();
+            let tui_tx = tui_tx.clone();
+
+            tokio::spawn(async move {
+                while let Some(update) = rx.recv().await {
+                    tui_tx.send(TuiEvent::LogMessage {
+                        workflow_name: update.workflow_name.clone(),
+                        run_id: String::new(),
+                        level: "info".into(),
+                        stage: "scheduler".into(),
+                        message: format!(
+                            "Rescheduling to: {}",
+                            update.new_schedule
+                        ),
+                    });
+
+                    // Remove the old job.
+                    if let Some(old_uuid) =
+                        job_ids.lock().await.remove(&update.workflow_name)
+                    {
+                        if let Err(e) = sched_clone.remove(&old_uuid).await {
+                            tui_tx.send(TuiEvent::LogMessage {
+                                workflow_name: update.workflow_name.clone(),
+                                run_id: String::new(),
+                                level: "error".into(),
+                                stage: "scheduler".into(),
+                                message: format!("Failed to remove old job: {}", e),
+                            });
                         }
-                        // Create and add a new job with the updated schedule.
-                        if let Some(shared) = job_state.lock().await.get(&update.workflow_name) {
-                            match create_job(&update.new_schedule, &update.workflow_name, shared) {
-                                Ok(new_job) => {
-                                    match sched.add(new_job).await {
-                                        Ok(new_uuid) => {
-                                            job_ids.lock().await.insert(
-                                                update.workflow_name.clone(),
-                                                new_uuid,
-                                            );
-                                            logger.info(&format!(
-                                                "Workflow \"{}\" rescheduled successfully",
-                                                update.workflow_name
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            logger.error(&format!(
+                    }
+
+                    // Create and add a new job with the updated schedule.
+                    let shared = job_state.lock().await.get(&update.workflow_name).cloned();
+                    if let Some(shared) = shared {
+                        match create_job(&update.new_schedule, &update.workflow_name, &shared) {
+                            Ok(new_job) => {
+                                match sched_clone.add(new_job).await {
+                                    Ok(new_uuid) => {
+                                        job_ids.lock().await.insert(
+                                            update.workflow_name.clone(),
+                                            new_uuid,
+                                        );
+                                        tui_tx.send(TuiEvent::LogMessage {
+                                            workflow_name: update.workflow_name.clone(),
+                                            run_id: String::new(),
+                                            level: "info".into(),
+                                            stage: "scheduler".into(),
+                                            message: "Rescheduled successfully".into(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tui_tx.send(TuiEvent::LogMessage {
+                                            workflow_name: update.workflow_name.clone(),
+                                            run_id: String::new(),
+                                            level: "error".into(),
+                                            stage: "scheduler".into(),
+                                            message: format!(
                                                 "Failed to add rescheduled job: {}",
                                                 e
-                                            ));
-                                        }
+                                            ),
+                                        });
                                     }
                                 }
-                                Err(e) => {
-                                    logger.error(&format!(
+                            }
+                            Err(e) => {
+                                tui_tx.send(TuiEvent::LogMessage {
+                                    workflow_name: update.workflow_name.clone(),
+                                    run_id: String::new(),
+                                    level: "error".into(),
+                                    stage: "scheduler".into(),
+                                    message: format!(
                                         "Failed to create job with schedule \"{}\": {}",
                                         update.new_schedule, e
-                                    ));
-                                }
+                                    ),
+                                });
                             }
                         }
-                    } else {
-                        // Channel closed — no more updates possible.
-                        // Fall through and wait for Ctrl+C.
-                        tokio::signal::ctrl_c().await?;
-                        break;
                     }
                 }
-            }
+            });
         }
+
+        // Block until Ctrl+C.
+        tokio::signal::ctrl_c().await?;
 
         logger.info("Shutting down cron scheduler…");
         self.tui_tx.send(TuiEvent::Shutdown);
