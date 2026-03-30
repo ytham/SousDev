@@ -11,12 +11,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::app::{App, StageStatus, WorkflowStatus};
+use crate::tui::app::{App, LeftPane, StageStatus, WorkflowStatus};
 use crate::tui::ui::BG_SIDEBAR;
+
+/// Active border color.
+const BORDER_ACTIVE: Color = Color::Rgb(60, 80, 160);
 
 /// Draw the sidebar in the given area.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let bg = Style::default().bg(BG_SIDEBAR);
+    let is_active = app.active_left_pane == LeftPane::Workflows && !app.info_panel_open;
+    let border_style = if is_active {
+        Style::default().fg(BORDER_ACTIVE).bg(BG_SIDEBAR)
+    } else {
+        bg
+    };
+    let border_char = if is_active { "│" } else { " " };
     let mut lines: Vec<Line> = Vec::new();
 
     // Title line.
@@ -119,6 +129,16 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("i ", bg.fg(Color::White)),
         Span::styled("info", bg.fg(Color::DarkGray)),
     ]));
+
+    // Prepend the active border character to every line.
+    let lines: Vec<Line> = lines
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::styled(border_char, border_style)];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect();
 
     let block = Block::default().style(bg);
     let paragraph = Paragraph::new(lines).block(block);

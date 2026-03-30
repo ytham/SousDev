@@ -36,6 +36,15 @@ pub enum InputMode {
     CronEdit,
 }
 
+/// Which left-side pane is currently active for keyboard input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftPane {
+    /// The Workflows pane (workflow selection, stage flowcharts).
+    Workflows,
+    /// The Glance pane (compact item status list).
+    Glance,
+}
+
 /// A single log line stored per-workflow.
 #[derive(Debug, Clone)]
 pub struct LogLine {
@@ -172,6 +181,7 @@ impl std::fmt::Display for WorkflowStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Sidebar,
+    Glance,
     Logs,
     InfoBar,
     InfoPanel,
@@ -199,6 +209,7 @@ pub struct TextSelection {
 #[derive(Debug, Clone, Default)]
 pub struct PanelLayout {
     pub sidebar: ratatui::layout::Rect,
+    pub glance: ratatui::layout::Rect,
     pub logs: ratatui::layout::Rect,
     pub info_bar: ratatui::layout::Rect,
     pub info_panel: ratatui::layout::Rect,
@@ -207,9 +218,11 @@ pub struct PanelLayout {
 impl PanelLayout {
     /// Determine which panel a terminal coordinate falls in.
     pub fn hit_test(&self, col: u16, row: u16) -> Panel {
-        // Info panel takes priority (it floats over logs).
+        // Info panel takes priority (it floats over everything).
         if self.info_panel.width > 0 && contains(&self.info_panel, col, row) {
             Panel::InfoPanel
+        } else if self.glance.width > 0 && contains(&self.glance, col, row) {
+            Panel::Glance
         } else if contains(&self.logs, col, row) {
             Panel::Logs
         } else if contains(&self.sidebar, col, row) {
@@ -264,6 +277,10 @@ pub struct App {
     pub toast: Option<Toast>,
     /// Text buffer for the cron edit input.
     pub cron_input: String,
+    /// Which left-side pane is active (Workflows or Glance).
+    pub active_left_pane: LeftPane,
+    /// Selected item index in the Glance pane (0 = "All logs", 1+ = items).
+    pub glance_selected: usize,
     /// Whether the info panel is open.
     pub info_panel_open: bool,
     /// Index of the highlighted item in the info panel.
@@ -308,6 +325,8 @@ impl App {
             selection: TextSelection::default(),
             toast: None,
             cron_input: String::new(),
+            active_left_pane: LeftPane::Workflows,
+            glance_selected: 0,
             info_panel_open: false,
             info_panel_selected: 0,
             workflow_items: HashMap::new(),
@@ -592,6 +611,9 @@ impl App {
             InputMode::CronEdit => self.handle_key_cron_edit(key),
             InputMode::Command => self.handle_key_command(key),
             InputMode::Normal if self.info_panel_open => self.handle_key_info_panel(key),
+            InputMode::Normal if self.active_left_pane == LeftPane::Glance => {
+                self.handle_key_glance(key)
+            }
             InputMode::Normal => self.handle_key_normal(key),
         }
     }
@@ -604,6 +626,7 @@ impl App {
                     self.selected -= 1;
                     self.log_scroll = 0;
                     self.log_filter = None;
+                    self.glance_selected = 0;
                 }
             }
             KeyCode::Down => {
@@ -611,6 +634,7 @@ impl App {
                     self.selected += 1;
                     self.log_scroll = 0;
                     self.log_filter = None;
+                    self.glance_selected = 0;
                 }
             }
             KeyCode::PageUp | KeyCode::Char('b') => {
@@ -629,12 +653,70 @@ impl App {
             KeyCode::End | KeyCode::Char('F') => {
                 self.log_scroll = 0;
             }
+            KeyCode::Right => {
+                self.active_left_pane = LeftPane::Glance;
+            }
             KeyCode::Char('i') => {
                 self.info_panel_open = true;
                 self.info_panel_selected = 0;
             }
             KeyCode::Char(':') => {
                 self.input_mode = InputMode::Command;
+            }
+            _ => {}
+        }
+    }
+
+    /// Glance pane context: item navigation, filter, open URL, clear.
+    fn handle_key_glance(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Up => {
+                self.glance_selected = self.glance_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let max = self.selected_items().len(); // items.len() = last valid index (0=All logs)
+                if self.glance_selected < max {
+                    self.glance_selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                self.set_log_filter_from_glance();
+            }
+            KeyCode::Char('g') => {
+                self.open_glance_item();
+            }
+            KeyCode::Char('c') => {
+                self.clear_glance_item();
+            }
+            KeyCode::Char('C') => {
+                self.clear_all_errored_items();
+            }
+            KeyCode::Left | KeyCode::Esc => {
+                self.active_left_pane = LeftPane::Workflows;
+            }
+            KeyCode::Char('i') => {
+                self.info_panel_open = true;
+                self.info_panel_selected = 0;
+            }
+            KeyCode::Char(':') => {
+                self.input_mode = InputMode::Command;
+            }
+            // Log scrolling still available in Glance context.
+            KeyCode::PageUp | KeyCode::Char('b') => {
+                let page = self.layout.logs.height.max(1) as usize;
+                self.log_scroll = self.log_scroll.saturating_add(page);
+            }
+            KeyCode::PageDown | KeyCode::Char('f') => {
+                let page = self.layout.logs.height.max(1) as usize;
+                self.log_scroll = self.log_scroll.saturating_sub(page);
+            }
+            KeyCode::Home | KeyCode::Char('B') => {
+                if let Some(wf) = self.selected_workflow() {
+                    self.log_scroll = wf.logs.len().saturating_sub(1);
+                }
+            }
+            KeyCode::End | KeyCode::Char('F') => {
+                self.log_scroll = 0;
             }
             _ => {}
         }
@@ -784,6 +866,17 @@ impl App {
                     }
                 }
 
+                // Click in Glance pane: select item and activate Glance.
+                if panel == Panel::Glance {
+                    self.active_left_pane = LeftPane::Glance;
+                    let glance = &self.layout.glance;
+                    let item_row = event.row.saturating_sub(glance.y) as usize;
+                    let item_count = self.selected_items().len() + 1; // +1 for "All logs"
+                    if item_row < item_count {
+                        self.glance_selected = item_row;
+                    }
+                }
+
                 // Click in info panel: select the clicked item.
                 if panel == Panel::InfoPanel {
                     self.select_info_panel_item(event.row);
@@ -804,6 +897,7 @@ impl App {
                     let panel_rect = match self.selection.panel {
                         Some(Panel::Logs) => &self.layout.logs,
                         Some(Panel::Sidebar) => &self.layout.sidebar,
+                        Some(Panel::Glance) => &self.layout.glance,
                         Some(Panel::InfoBar) => &self.layout.info_bar,
                         _ => return,
                     };
@@ -977,25 +1071,64 @@ impl App {
         }
     }
 
-    /// Set the log filter based on the info panel selection.
-    ///
-    /// Index 0 = "All logs" (clears filter).  Index 1+ = specific item.
-    fn set_log_filter_from_info_panel(&mut self) {
-        if self.info_panel_selected == 0 {
-            // "All logs" — clear filter.
+    /// Set the log filter based on the Glance pane selection.
+    fn set_log_filter_from_glance(&mut self) {
+        let selected = self.glance_selected;
+        self.set_log_filter_by_index(selected);
+    }
+
+    /// Open the URL of the selected Glance pane item.
+    fn open_glance_item(&mut self) {
+        if self.glance_selected == 0 {
+            return;
+        }
+        let items = self.selected_items();
+        let item_idx = self.glance_selected - 1;
+        if let Some(item) = items.get(item_idx) {
+            let url = item.url.clone();
+            if url.starts_with("https://") || url.starts_with("http://") {
+                open_url_in_browser(&url);
+                self.show_toast("Opened in browser", Duration::from_secs(3));
+            }
+        }
+    }
+
+    /// Clear the error status of the selected Glance pane item.
+    fn clear_glance_item(&mut self) {
+        if self.glance_selected == 0 {
+            return;
+        }
+        let wf_name = match self.selected_workflow() {
+            Some(wf) => wf.name.clone(),
+            None => return,
+        };
+        let item_idx = self.glance_selected - 1;
+        if let Some(items) = self.workflow_items.get_mut(&wf_name) {
+            if let Some(item) = items.get_mut(item_idx) {
+                if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
+                    item.status = ItemStatus::None;
+                    let item_key = extract_item_key(&item.id);
+                    self.clear_requests.push((wf_name, item_key));
+                    self.show_toast("Cleared — will retry next tick", Duration::from_secs(3));
+                }
+            }
+        }
+    }
+
+    /// Shared log filter logic used by both Glance and Info panel.
+    fn set_log_filter_by_index(&mut self, selected: usize) {
+        if selected == 0 {
             if self.log_filter.is_some() {
                 self.log_filter = None;
                 self.log_scroll = 0;
-                // Rebuild entries with all logs.
                 if let Some(name) = self.selected_workflow_name().map(|s| s.to_string()) {
                     self.rebuild_entries_for(&name);
                 }
                 self.show_toast("Showing all logs", Duration::from_secs(3));
             }
         } else {
-            // Specific item.
             let items = self.selected_items();
-            let item_idx = self.info_panel_selected - 1; // offset for "All logs"
+            let item_idx = selected - 1;
             if let Some(item) = items.get(item_idx) {
                 let item_id = item.id.clone();
                 self.log_filter = Some(item_id.clone());
@@ -1006,6 +1139,12 @@ impl App {
                 self.show_toast(&format!("Filtering: {}", item_id), Duration::from_secs(3));
             }
         }
+    }
+
+    /// Set the log filter based on the info panel selection.
+    fn set_log_filter_from_info_panel(&mut self) {
+        let selected = self.info_panel_selected;
+        self.set_log_filter_by_index(selected);
     }
 
     /// Open the URL of the currently selected info panel item in the browser.
@@ -2754,17 +2893,23 @@ mod tests {
     fn test_panel_hit_test() {
         let layout = PanelLayout {
             sidebar: ratatui::layout::Rect::new(0, 0, 26, 30),
-            logs: ratatui::layout::Rect::new(27, 0, 80, 27),
-            info_bar: ratatui::layout::Rect::new(27, 28, 80, 2),
+            glance: ratatui::layout::Rect::new(27, 0, 24, 30),
+            logs: ratatui::layout::Rect::new(52, 0, 60, 27),
+            info_bar: ratatui::layout::Rect::new(52, 28, 60, 2),
             info_panel: ratatui::layout::Rect::default(),
         };
 
         assert_eq!(layout.hit_test(0, 0), Panel::Sidebar);
+        assert_eq!(layout.hit_test(27, 0), Panel::Glance);
+        assert_eq!(layout.hit_test(50, 15), Panel::Glance);
         assert_eq!(layout.hit_test(25, 15), Panel::Sidebar);
-        assert_eq!(layout.hit_test(27, 0), Panel::Logs);
-        assert_eq!(layout.hit_test(50, 15), Panel::Logs);
-        assert_eq!(layout.hit_test(30, 28), Panel::InfoBar);
+        assert_eq!(layout.hit_test(27, 0), Panel::Glance);
+        assert_eq!(layout.hit_test(50, 15), Panel::Glance);
+        assert_eq!(layout.hit_test(52, 0), Panel::Logs);
+        assert_eq!(layout.hit_test(80, 15), Panel::Logs);
+        assert_eq!(layout.hit_test(55, 28), Panel::InfoBar);
         assert_eq!(layout.hit_test(26, 15), Panel::None); // the gap
+        assert_eq!(layout.hit_test(51, 15), Panel::None); // gap between glance and logs
     }
 
     #[test]
@@ -3641,5 +3786,103 @@ mod tests {
         app.log_filter = Some("#42".into());
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
         assert!(app.log_filter.is_none());
+    }
+
+    // ── Glance pane ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_right_switches_to_glance() {
+        let mut app = App::new();
+        assert_eq!(app.active_left_pane, LeftPane::Workflows);
+        app.handle_key(KeyCode::Right, KeyModifiers::empty());
+        assert_eq!(app.active_left_pane, LeftPane::Glance);
+    }
+
+    #[test]
+    fn test_left_switches_to_workflows() {
+        let mut app = App::new();
+        app.active_left_pane = LeftPane::Glance;
+        app.handle_key(KeyCode::Left, KeyModifiers::empty());
+        assert_eq!(app.active_left_pane, LeftPane::Workflows);
+    }
+
+    #[test]
+    fn test_esc_in_glance_returns_to_workflows() {
+        let mut app = App::new();
+        app.active_left_pane = LeftPane::Glance;
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(app.active_left_pane, LeftPane::Workflows);
+    }
+
+    #[test]
+    fn test_up_down_in_glance_navigates_items() {
+        let mut app = app_with_info_panel(); // has 3 items
+        app.info_panel_open = false; // close floating panel so Glance gets input
+        app.active_left_pane = LeftPane::Glance;
+        app.glance_selected = 0;
+        // 0=All logs, 1=#1, 2=#2, 3=#3
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.glance_selected, 1);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.glance_selected, 2);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.glance_selected, 3);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.glance_selected, 3); // clamped
+        app.handle_key(KeyCode::Up, KeyModifiers::empty());
+        assert_eq!(app.glance_selected, 2);
+    }
+
+    #[test]
+    fn test_up_down_in_workflows_selects_workflow_not_glance() {
+        let mut app = App::new();
+        for name in &["a", "b"] {
+            app.handle_tui_event(TuiEvent::WorkflowRegistered {
+                name: (*name).into(),
+                schedule: "* * * * * *".into(),
+                mode: WorkflowMode::Standard,
+                repo: None,
+            });
+        }
+        assert_eq!(app.active_left_pane, LeftPane::Workflows);
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.selected, 1); // workflow changed
+    }
+
+    #[test]
+    fn test_enter_in_glance_sets_filter() {
+        let mut app = app_with_info_panel();
+        app.info_panel_open = false;
+        app.active_left_pane = LeftPane::Glance;
+        app.glance_selected = 1; // item #1
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(app.log_filter, Some("#1".into()));
+    }
+
+    #[test]
+    fn test_glance_resets_on_workflow_switch() {
+        let mut app = App::new();
+        for name in &["a", "b"] {
+            app.handle_tui_event(TuiEvent::WorkflowRegistered {
+                name: (*name).into(),
+                schedule: "* * * * * *".into(),
+                mode: WorkflowMode::Standard,
+                repo: None,
+            });
+        }
+        app.glance_selected = 3;
+        app.handle_key(KeyCode::Down, KeyModifiers::empty());
+        assert_eq!(app.glance_selected, 0); // reset
+    }
+
+    #[test]
+    fn test_scroll_works_in_glance_context() {
+        let mut app = App::new();
+        app.active_left_pane = LeftPane::Glance;
+        app.layout.logs = ratatui::layout::Rect::new(52, 0, 60, 20);
+        app.handle_key(KeyCode::Char('b'), KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 20); // page up works
+        app.handle_key(KeyCode::Char('f'), KeyModifiers::empty());
+        assert_eq!(app.log_scroll, 0); // page down works
     }
 }

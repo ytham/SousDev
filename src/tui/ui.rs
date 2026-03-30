@@ -1,8 +1,8 @@
-/// Top-level draw function — splits the terminal into sidebar + log pane.
+/// Top-level draw function — splits the terminal into three columns:
+/// Sidebar | Glance | Log pane, with floating overlays on top.
 ///
 /// Layout uses subtle background color differences with 1-char gaps
 /// between panels.  Panels extend to the terminal edges.
-/// The info bar sits at the bottom of the main pane.
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::App;
-use crate::tui::widgets::{command_menu, info_panel, log_view, sidebar};
+use crate::tui::widgets::{command_menu, glance, info_panel, log_view, sidebar};
 
 /// Panel background colors — subtle dark shades to differentiate areas.
 pub const BG_SIDEBAR: Color = Color::Rgb(24, 24, 32);
@@ -23,11 +23,13 @@ pub const BG_GAP: Color = Color::Reset;
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    // Horizontal split: sidebar | 1-char gap | main pane.
+    // Horizontal split: sidebar | gap | glance | gap | main pane.
     let sidebar_width: u16 = 26;
+    let glance_width: u16 = glance::GLANCE_WIDTH;
     let gap: u16 = 1;
+    let left_total = sidebar_width + gap + glance_width + gap;
 
-    if area.width < sidebar_width + gap + 10 {
+    if area.width < left_total + 20 {
         // Terminal too narrow — just show sidebar.
         sidebar::draw(f, app, area);
         return;
@@ -40,61 +42,73 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         height: area.height,
     };
 
-    let main_area = Rect {
+    let glance_area = Rect {
         x: area.x + sidebar_width + gap,
         y: area.y,
-        width: area.width - sidebar_width - gap,
+        width: glance_width,
         height: area.height,
     };
+
+    let main_x = area.x + left_total;
+    let main_width = area.width - left_total;
 
     // Vertical split of main: log pane | 1-char gap | info bar (2 rows).
     let info_height: u16 = 2;
     let vgap: u16 = 1;
 
-    let log_area = if main_area.height > info_height + vgap {
+    let log_area = if area.height > info_height + vgap {
         Rect {
-            x: main_area.x,
-            y: main_area.y,
-            width: main_area.width,
-            height: main_area.height - info_height - vgap,
+            x: main_x,
+            y: area.y,
+            width: main_width,
+            height: area.height - info_height - vgap,
         }
     } else {
         Rect::default()
     };
 
     let info_area = Rect {
-        x: main_area.x,
-        y: main_area.y + main_area.height - info_height,
-        width: main_area.width,
-        height: info_height.min(main_area.height),
+        x: main_x,
+        y: area.y + area.height - info_height,
+        width: main_width,
+        height: info_height.min(area.height),
     };
 
     // Store layout for mouse hit-testing.
     app.layout.sidebar = sidebar_area;
+    app.layout.glance = glance_area;
     app.layout.logs = log_area;
     app.layout.info_bar = info_area;
-    // Info panel rect is set by the widget itself (only when open).
+
+    // Info panel rect — left-side floating with margins.
     if !app.info_panel_open {
         app.layout.info_panel = Rect::default();
     } else {
-        let ipw = crate::tui::widgets::info_panel::INFO_PANEL_WIDTH;
-        if area.width >= ipw + 28 {
+        let ipw = info_panel::INFO_PANEL_WIDTH;
+        let margin_x: u16 = 10;
+        let margin_y: u16 = 2;
+        let ip_height = area.height.saturating_sub(margin_y * 2);
+        if area.width >= ipw + margin_x + 10 && ip_height >= 8 {
             app.layout.info_panel = Rect {
-                x: area.x + area.width - ipw,
-                y: area.y,
+                x: area.x + margin_x,
+                y: area.y + margin_y,
                 width: ipw,
-                height: area.height,
+                height: ip_height,
             };
         } else {
             app.layout.info_panel = Rect::default();
         }
     }
 
+    // Draw panels.
     sidebar::draw(f, app, sidebar_area);
+    glance::draw(f, app, glance_area);
     if log_area.height > 0 {
         log_view::draw_logs(f, app, log_area);
     }
     log_view::draw_header(f, app, info_area);
+
+    // Floating overlays (drawn on top).
     info_panel::draw(f, app);
     command_menu::draw(f, app);
     draw_toast(f, app);
@@ -109,7 +123,6 @@ fn draw_toast(f: &mut Frame, app: &App) {
 
     let area = f.area();
     let msg = &toast.message;
-    // Pad with spaces on each side.
     let width = (msg.len() as u16) + 4;
     let height = 1u16;
 

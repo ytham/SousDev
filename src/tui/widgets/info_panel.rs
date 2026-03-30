@@ -37,15 +37,22 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     let area = f.area();
-    if area.width < INFO_PANEL_WIDTH + 28 {
+    if area.width < INFO_PANEL_WIDTH + 20 {
         return;
     }
 
+    // Position: left side with margins (10 from left, 2 from top/bottom).
+    let margin_x: u16 = 10;
+    let margin_y: u16 = 2;
+    let panel_height = area.height.saturating_sub(margin_y * 2);
+    if panel_height < 8 {
+        return;
+    }
     let panel_area = Rect {
-        x: area.x + area.width - INFO_PANEL_WIDTH,
-        y: area.y,
+        x: area.x + margin_x,
+        y: area.y + margin_y,
         width: INFO_PANEL_WIDTH,
-        height: area.height,
+        height: panel_height,
     };
 
     f.render_widget(Clear, panel_area);
