@@ -626,12 +626,12 @@ impl WorkflowExecutor {
 
         let completed_at = Utc::now().to_rfc3339();
 
-        if let Some((ws, info)) = workspace_cleanup {
-            ws.teardown(&info).await.ok();
-        }
-
         match result {
             Ok(_) => {
+                // Tear down workspace only on success.
+                if let Some((ws, info)) = workspace_cleanup {
+                    ws.teardown(&info).await.ok();
+                }
                 if let Some(ref log) = wf_log {
                     let _ = log.complete("success").await;
                 }

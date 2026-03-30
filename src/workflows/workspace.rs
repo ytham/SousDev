@@ -68,7 +68,7 @@ impl WorkspaceManager {
                 .as_deref()
                 .unwrap_or("sousdev/");
             let dir = format!("{}-issue{}", repo_slug, n);
-            let br = format!("{}issue-{}", prefix, n);
+            let br = format!("{}{}", prefix, n);
             (dir, br)
         } else {
             let short = &run_id[..run_id.len().min(12)];
