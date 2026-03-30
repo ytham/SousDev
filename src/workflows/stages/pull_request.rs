@@ -201,7 +201,7 @@ async fn try_automated_pr(ctx: &mut StageContext) -> Result<()> {
         .and_then(|pr| pr.show_branding)
         .unwrap_or(true);
     if show_branding {
-        body.push_str("\n\n---\n\n🍳 *Automated by [SousDev](https://github.com/ytham/SousDev)*\n");
+        body.push_str("\n\n---\n\n🍳 Automated by [SousDev](https://github.com/ytham/SousDev)\n");
     }
 
     // ── 8. Create PR ─────────────────────────────────────────────────────
@@ -249,7 +249,7 @@ async fn agent_assisted_pr(ctx: &mut StageContext) -> Result<()> {
 The automated PR creation process failed. Your job is to:
 1. Ensure all changes are committed on branch "{}"
 2. Push the branch to the remote (use --force if needed since this is a SousDev-managed branch)
-3. Create a pull request using: gh pr create --title "{}" --body "Automated change by SousDev"{} --head "{}"
+3. Create a pull request using: gh pr create --title "{}" --body "Automated change by 🍳 SousDev"{} --head "{}"
 
 Current git state:
 ```
