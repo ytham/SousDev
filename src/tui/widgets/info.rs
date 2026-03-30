@@ -24,7 +24,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     } else {
         bg
     };
-    let border_char = if is_active { "│" } else { " " };
+    let border_char = if is_active { "▎ " } else { "  " };
 
     let mut lines: Vec<Line> = Vec::new();
     let items = app.selected_items();
@@ -116,7 +116,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Pad to footer.
-    let footer_row = area.height.saturating_sub(2) as usize;
+    let footer_lines = 4;
+    let footer_row = area.height.saturating_sub(footer_lines) as usize;
     while lines.len() < footer_row {
         lines.push(Line::from(vec![
             Span::styled(border_char, border_style),
@@ -124,17 +125,29 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Footer hints (compact).
+    // Footer hints.
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
-        Span::styled("─".repeat(INFO_WIDTH as usize - 2), bg.fg(Color::DarkGray)),
+        Span::styled("─".repeat(INFO_WIDTH as usize - 3), bg.fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
+        Span::styled(" ↑↓ ", bg.fg(Color::White)),
+        Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("⏎ ", bg.fg(Color::White)),
-        Span::styled("g ", bg.fg(Color::White)),
+        Span::styled("filter", bg.fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(border_char, border_style),
+        Span::styled("  g  ", bg.fg(Color::White)),
+        Span::styled("open    ", bg.fg(Color::DarkGray)),
         Span::styled("c ", bg.fg(Color::White)),
-        Span::styled("ESC", bg.fg(Color::DarkGray)),
+        Span::styled("clear", bg.fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(border_char, border_style),
+        Span::styled(" ESC ", bg.fg(Color::White)),
+        Span::styled("close", bg.fg(Color::DarkGray)),
     ]));
 
     let block = Block::default().style(bg);

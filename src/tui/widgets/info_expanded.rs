@@ -21,7 +21,7 @@ pub const INFO_EXPANDED_WIDTH: u16 = 60;
 const HEADER_ROWS: u16 = 2;
 
 /// Number of reserved rows at the bottom (separator + hints).
-const FOOTER_ROWS: u16 = 2;
+const FOOTER_ROWS: u16 = 4;
 
 /// Draw the info expanded panel as a floating overlay if it is open.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -36,14 +36,15 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Position: left side with margins (10 from left, 2 from top/bottom).
     let margin_x: u16 = 10;
-    let margin_y: u16 = 2;
-    let panel_height = area.height.saturating_sub(margin_y * 2);
+    let margin_top: u16 = 1;
+    let margin_bottom: u16 = 2;
+    let panel_height = area.height.saturating_sub(margin_top + margin_bottom);
     if panel_height < 8 {
         return;
     }
     let panel_area = Rect {
         x: area.x + margin_x,
-        y: area.y + margin_y,
+        y: area.y + margin_top,
         width: INFO_EXPANDED_WIDTH,
         height: panel_height,
     };
@@ -60,14 +61,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         .map(|wf| wf.name.as_str())
         .unwrap_or("(none)");
     lines.push(Line::from(vec![
-        Span::styled("│", border),
+        Span::styled("▎ ", border),
         Span::styled(
             format!(" {}", wf_name),
             bg.fg(Color::White).add_modifier(Modifier::BOLD),
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("│", border),
+        Span::styled("▎ ", border),
         Span::styled(
             "─".repeat(INFO_EXPANDED_WIDTH as usize - 2),
             bg.fg(Color::DarkGray),
@@ -89,7 +90,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let indicator = if all_logs_selected { ">" } else { " " };
 
     lines.push(Line::from(vec![
-        Span::styled("│", border),
+        Span::styled("▎ ", border),
         Span::styled(indicator, all_logs_bg.fg(Color::White)),
         Span::styled(
             format!("{} All logs", active_marker),
@@ -108,7 +109,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if items.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("│", border),
+            Span::styled("▎ ", border),
             Span::styled(" Waiting for data...", bg.fg(Color::DarkGray)),
         ]));
     } else {
@@ -153,7 +154,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             let active_marker = if is_active { "▶" } else { " " };
 
             lines.push(Line::from(vec![
-                Span::styled("│", border),
+                Span::styled("▎ ", border),
                 Span::styled(indicator, row_bg.fg(Color::White)),
                 Span::styled(badge, row_bg.fg(badge_color)),
                 Span::styled(active_marker, row_bg.fg(Color::White)),
@@ -167,29 +168,34 @@ pub fn draw(f: &mut Frame, app: &App) {
     let target_rows = panel_area.height.saturating_sub(FOOTER_ROWS) as usize;
     while lines.len() < target_rows {
         lines.push(Line::from(vec![
-            Span::styled("│", border),
+            Span::styled("▎ ", border),
             Span::styled(" ", bg),
         ]));
     }
 
     // ── Footer (hints) ────────────────────────────────────────────────────
     lines.push(Line::from(vec![
-        Span::styled("│", border),
+        Span::styled("▎ ", border),
         Span::styled(
-            "─".repeat(INFO_EXPANDED_WIDTH as usize - 2),
+            "─".repeat(INFO_EXPANDED_WIDTH as usize - 3),
             bg.fg(Color::DarkGray),
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("│", border),
+        Span::styled("▎ ", border),
         Span::styled(" ↑↓ ", bg.fg(Color::White)),
-        Span::styled("select ", bg.fg(Color::DarkGray)),
+        Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("⏎ ", bg.fg(Color::White)),
-        Span::styled("filter ", bg.fg(Color::DarkGray)),
+        Span::styled("filter  ", bg.fg(Color::DarkGray)),
         Span::styled("g ", bg.fg(Color::White)),
-        Span::styled("open ", bg.fg(Color::DarkGray)),
-        Span::styled("c ", bg.fg(Color::White)),
-        Span::styled("clear ", bg.fg(Color::DarkGray)),
+        Span::styled("open", bg.fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("▎ ", border),
+        Span::styled("  c  ", bg.fg(Color::White)),
+        Span::styled("clear   ", bg.fg(Color::DarkGray)),
+        Span::styled("C ", bg.fg(Color::White)),
+        Span::styled("clear all  ", bg.fg(Color::DarkGray)),
         Span::styled("ESC ", bg.fg(Color::White)),
         Span::styled("close", bg.fg(Color::DarkGray)),
     ]));

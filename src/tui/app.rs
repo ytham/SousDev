@@ -87,7 +87,8 @@ impl LogEntry {
                 if self.lines.len() <= 1 {
                     1 // Single-line thought — always fully shown.
                 } else if self.expanded {
-                    self.lines.len()
+                    // Count embedded newlines in expanded mode.
+                    self.lines.iter().map(|l| l.message.split('\n').count()).sum()
                 } else {
                     2 // First line + "[…] N more lines" indicator.
                 }
@@ -1172,11 +1173,13 @@ impl App {
         if panel.height == 0 {
             return;
         }
-        // Rows: 0 = title, 1 = separator, 2+ = items.
+        // Rows: 0 = title, 1 = separator, 2 = "All logs", 3+ = items.
         let item_row = row.saturating_sub(panel.y + 2) as usize;
-        let item_count = self.selected_items().len();
+        let item_count = self.selected_items().len() + 1; // +1 for "All logs"
         if item_row < item_count {
             self.info_expanded_selected = item_row;
+            // Also set the log filter immediately (same as pressing Enter).
+            self.set_log_filter_from_info_expanded();
         }
     }
 

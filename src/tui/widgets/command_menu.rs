@@ -44,7 +44,7 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
     let label = bg.fg(Color::DarkGray);
 
     let line = Line::from(vec![
-        Span::styled("│", border),
+        Span::styled("▎ ", border),
         Span::styled(" ESC ", key),
         Span::styled("close  ", label),
         Span::styled("q ", key),
@@ -86,7 +86,7 @@ fn draw_cron_edit(f: &mut Frame, app: &App) {
     let cursor = "\u{2588}";
 
     let line = Line::from(vec![
-        Span::styled("│", border),
+        Span::styled("▎ ", border),
         Span::styled(" Schedule: ", label),
         Span::styled(
             app.cron_input.clone(),

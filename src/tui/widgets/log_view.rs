@@ -215,6 +215,11 @@ impl RenderCtx {
     }
 }
 
+/// Flatten newlines to double spaces for single-line display.
+fn flatten_newlines(msg: &str) -> String {
+    msg.replace('\n', "  ").replace('\r', "")
+}
+
 fn truncate_msg(msg: &str, max: usize) -> String {
     if msg.len() > max {
         format!("{}…", &msg[..max.saturating_sub(1)])
@@ -230,34 +235,44 @@ fn render_thought(
     screen_y_base: usize,
 ) {
     if entry.lines.len() <= 1 {
-        // Single-line thought — show fully, no expand/collapse.
+        // Single-line thought — show fully, newlines flattened to spaces.
         if let Some(log) = entry.lines.first() {
             let rs = ctx.row_style(screen_y_base);
-            let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
+            let msg = truncate_msg(
+                &flatten_newlines(&log.message),
+                ctx.max_width.saturating_sub(2),
+            );
             lines.push(Line::from(vec![
                 Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
                 Span::styled(format!(" {}", msg), rs.fg(Color::White)),
             ]));
         }
     } else if entry.expanded {
-        // Expanded — show all lines.
-        for (j, log) in entry.lines.iter().enumerate() {
-            let screen_row = screen_y_base + j;
-            if screen_row >= ctx.area.y as usize + ctx.area.height as usize {
-                break;
+        // Expanded — show all lines, splitting on embedded newlines.
+        let mut row_offset = 0;
+        for log in &entry.lines {
+            for sub_line in log.message.split('\n') {
+                let screen_row = screen_y_base + row_offset;
+                if screen_row >= ctx.area.y as usize + ctx.area.height as usize {
+                    break;
+                }
+                let rs = ctx.row_style(screen_row);
+                let msg = truncate_msg(sub_line, ctx.max_width.saturating_sub(2));
+                lines.push(Line::from(vec![
+                    Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
+                    Span::styled(format!(" {}", msg), rs.fg(Color::White)),
+                ]));
+                row_offset += 1;
             }
-            let rs = ctx.row_style(screen_row);
-            let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
-            lines.push(Line::from(vec![
-                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
-                Span::styled(format!(" {}", msg), rs.fg(Color::White)),
-            ]));
         }
     } else {
-        // Collapsed — show first line + expand indicator.
+        // Collapsed — show first line (newlines flattened) + expand indicator.
         if let Some(log) = entry.lines.first() {
             let rs = ctx.row_style(screen_y_base);
-            let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
+            let msg = truncate_msg(
+                &flatten_newlines(&log.message),
+                ctx.max_width.saturating_sub(2),
+            );
             lines.push(Line::from(vec![
                 Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
                 Span::styled(format!(" {}", msg), rs.fg(Color::White)),

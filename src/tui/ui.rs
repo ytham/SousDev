@@ -36,7 +36,7 @@ pub const BG_TEXT_SELECTION: Color = Color::Rgb(50, 50, 70);
 
 // ── Theme: Accent colors ──────────────────────────────────────────────────
 /// Blue border accent — active panel indicator, floating panel borders.
-pub const ACCENT_BORDER: Color = Color::Rgb(60, 80, 160);
+pub const ACCENT_BORDER: Color = Color::Rgb(80, 110, 200);
 /// Cyan-blue — thinking block left border.
 pub const ACCENT_THOUGHT: Color = Color::Rgb(80, 160, 200);
 /// Purple — `[tool]` tag in pretty log mode.
@@ -113,12 +113,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         let ipw = info_expanded::INFO_EXPANDED_WIDTH;
         let margin_x: u16 = 10;
-        let margin_y: u16 = 2;
-        let ip_height = area.height.saturating_sub(margin_y * 2);
+        let margin_top: u16 = 1;
+        let margin_bottom: u16 = 2;
+        let ip_height = area.height.saturating_sub(margin_top + margin_bottom);
         if area.width >= ipw + margin_x + 10 && ip_height >= 8 {
             app.layout.info_expanded = Rect {
                 x: area.x + margin_x,
-                y: area.y + margin_y,
+                y: area.y + margin_top,
                 width: ipw,
                 height: ip_height,
             };
@@ -166,9 +167,7 @@ fn draw_toast(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, toast_area);
 
-    let bg = Style::default()
-        .bg(ACCENT_TOAST)
-        .fg(Color::White);
+    let bg = Style::default().bg(ACCENT_TOAST).fg(Color::White);
     let line = Line::from(vec![Span::styled(format!("  {}  ", msg), bg)]);
     let paragraph = Paragraph::new(line).block(Block::default().style(bg));
     f.render_widget(paragraph, toast_area);
