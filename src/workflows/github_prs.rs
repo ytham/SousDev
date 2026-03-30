@@ -27,6 +27,12 @@ pub struct GitHubPR {
     /// Logins of users whose review has been requested on this PR.
     #[serde(default)]
     pub requested_reviewers: Vec<String>,
+    /// Team slugs whose review has been requested on this PR.
+    #[serde(default)]
+    pub requested_teams: Vec<String>,
+    /// Logins of users assigned to this PR.
+    #[serde(default)]
+    pub assignees: Vec<String>,
     /// Populated after fetch; not part of the JSON payload.
     #[serde(skip, default)]
     pub repo: String,
@@ -114,7 +120,7 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
         .arg("--limit")
         .arg(limit.to_string())
         .arg("--json")
-        .arg("number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,createdAt,updatedAt")
+        .arg("number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,assignees,createdAt,updatedAt")
         .output()
         .await?;
 
@@ -146,8 +152,18 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
             review_decision: r.review_decision.unwrap_or_default(),
             requested_reviewers: r
                 .review_requests
-                .into_iter()
-                .filter_map(|rr| rr.login)
+                .iter()
+                .filter_map(|rr| rr.login.clone())
+                .collect(),
+            requested_teams: r
+                .review_requests
+                .iter()
+                .filter_map(|rr| rr.slug.clone())
+                .collect(),
+            assignees: r
+                .assignees
+                .iter()
+                .map(|a| a.login.clone())
                 .collect(),
             created_at: r.created_at,
             updated_at: r.updated_at,
@@ -325,6 +341,8 @@ struct RawGhPR {
     review_decision: Option<String>,
     #[serde(rename = "reviewRequests", default)]
     review_requests: Vec<RawReviewRequest>,
+    #[serde(default)]
+    assignees: Vec<PRAuthor>,
     #[serde(rename = "createdAt")]
     created_at: String,
     #[serde(rename = "updatedAt")]
@@ -338,8 +356,8 @@ struct RawGhPR {
 #[derive(Deserialize)]
 struct RawReviewRequest {
     login: Option<String>,
-    // Teams have `name` and `slug` instead of `login`.
-    // We ignore them — only user-level requests are matched.
+    /// Team slug (e.g. `"org/eng"`).  Present when `__typename == "Team"`.
+    slug: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +395,8 @@ mod tests {
             updated_at: "u".into(),
             repo: "r".into(),
             requested_reviewers: vec![],
+            requested_teams: vec![],
+            assignees: vec![],
         };
         assert_eq!(pr.body_str(), "");
     }
@@ -398,6 +418,8 @@ mod tests {
             updated_at: "u".into(),
             repo: "r".into(),
             requested_reviewers: vec![],
+            requested_teams: vec![],
+            assignees: vec![],
         };
         assert_eq!(pr.body_str(), "desc");
     }
@@ -421,6 +443,8 @@ mod tests {
             updated_at: "2025-01-02".into(),
             repo: "o/r".into(),
             requested_reviewers: vec![],
+            requested_teams: vec![],
+            assignees: vec![],
         };
         assert_eq!(pr.body_str(), "This PR adds usage metrics tracking.");
     }
@@ -442,6 +466,8 @@ mod tests {
             updated_at: "u".into(),
             repo: "r".into(),
             requested_reviewers: vec![],
+            requested_teams: vec![],
+            assignees: vec![],
         };
         assert_eq!(pr.body_str(), "");
     }

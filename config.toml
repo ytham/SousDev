@@ -146,6 +146,10 @@ schedule = "0 */5 * * * *"
 [workflows.github_prs]
 # search = "label:needs-review"  # optional extra search qualifiers
 limit = 5
+# Only review PRs where you are individually requested (not just via team).
+# require_individual_request = true
+# Only review PRs assigned to you (filters out team auto-assignments).
+assignees = ["@me"]
 
 [workflows.agent_loop]
 technique = "claude-loop"        # required for PR review

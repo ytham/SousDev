@@ -74,13 +74,16 @@ cron tick
 cd sousdev
 cargo build --release
 
-# Set up your environment
-cp .env.example .env
-# Edit .env with your API keys
+# Authenticate the Claude CLI (one-time — no API key needed)
+claude
 
 # Edit the config
 cp config.toml my-project/config.toml
 # Edit target_repo, git_method, schedules, etc.
+
+# Optional: set up .env for harness-native techniques or Linear
+cp .env.example .env
+# Edit .env if needed (most users won't need this)
 ```
 
 ### Run
@@ -97,22 +100,24 @@ sousdev start                             # start headless cron daemon
 
 ---
 
-## Environment Variables
+## Authentication
 
-SousDev loads a `.env` file automatically on startup. Copy `.env.example` to get started:
+The default `claude-loop` technique uses the **Claude CLI**, which authenticates via its own OAuth flow — **no API key needed**. Just run `claude` once to authenticate.
+
+For optional features, SousDev loads a `.env` file automatically on startup:
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Required | Used by |
+| Variable | When needed | Used by |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | For PR descriptions + harness-native techniques | `pr-description` stage, react, reflexion, etc. |
+| `ANTHROPIC_API_KEY` | Only for harness-native techniques (react, reflexion, etc.) | Direct Anthropic API calls |
 | `OPENAI_API_KEY` | Only if `provider = "openai"` | OpenAI provider |
 | `LINEAR_API_KEY` | Only for Linear issue source | `linear_issues` workflow trigger |
 | `GITHUB_TOKEN` | Usually not needed (`gh` CLI handles auth) | Override for `gh` auth |
 
-The `claude-loop` technique uses the Claude CLI's own authentication (`claude` CLI), not the `ANTHROPIC_API_KEY`.
+Most users running the default `claude-loop` workflow **don't need any API keys** — only `gh auth login` and `claude` CLI auth.
 
 ---
 

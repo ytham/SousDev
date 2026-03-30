@@ -343,10 +343,20 @@ pub async fn run_external_agent_loop(
     }
 
     if !success {
-        ctx.logger.error(&format!(
-            "{} exited with code {}",
-            adapter.name, exit_code
-        ));
+        let err_detail = format!(
+            "{} exited with code {}{}",
+            adapter.name,
+            exit_code,
+            if stderr_raw.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", &stderr_raw[..stderr_raw.len().min(300)])
+            }
+        );
+        ctx.logger.error(&err_detail);
+        if let Some(ref log) = ctx.workflow_log {
+            let _ = log.log("error", "agent", &err_detail).await;
+        }
         Ok(RunResult::failure(
             format!("external-agent:{}", adapter.name),
             format!(

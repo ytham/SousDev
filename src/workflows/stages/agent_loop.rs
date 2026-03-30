@@ -105,8 +105,11 @@ impl Stage for AgentLoopStage {
             let result = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    ctx.logger
-                        .error(&format!("Attempt {} threw: {}", attempt + 1, e));
+                    let err_msg = format!("Attempt {} threw: {}", attempt + 1, e);
+                    ctx.logger.error(&err_msg);
+                    if let Some(ref log) = ctx.workflow_log {
+                        let _ = log.log("error", "agent-loop", &err_msg).await;
+                    }
                     RunResult::failure("unknown", e.to_string(), vec![], 0)
                 }
             };
@@ -118,6 +121,22 @@ impl Stage for AgentLoopStage {
                 ));
                 ctx.agent_result = Some(result);
                 return Ok(());
+            }
+
+            // Log the failure reason to the TUI.
+            let error_msg = result
+                .error
+                .as_deref()
+                .unwrap_or("(no error message)");
+            let fail_msg = format!(
+                "Attempt {}/{} failed: {}",
+                attempt + 1,
+                max_retries + 1,
+                error_msg
+            );
+            ctx.logger.error(&fail_msg);
+            if let Some(ref log) = ctx.workflow_log {
+                let _ = log.log("error", "agent-loop", &fail_msg).await;
             }
 
             last_result = Some(result);
@@ -145,13 +164,22 @@ impl Stage for AgentLoopStage {
         }
 
         // All attempts exhausted — record the last result and propagate error.
+        let last_error = last_result
+            .as_ref()
+            .and_then(|r| r.error.as_deref())
+            .unwrap_or("unknown error");
+        let final_msg = format!(
+            "AgentLoopStage: all {} attempts failed. Last error: {}",
+            max_retries + 1,
+            last_error
+        );
+        if let Some(ref log) = ctx.workflow_log {
+            let _ = log.log("error", "agent-loop", &final_msg).await;
+        }
         if let Some(result) = last_result {
             ctx.agent_result = Some(result);
         }
-        Err(anyhow::anyhow!(
-            "AgentLoopStage: all {} attempts failed.",
-            max_retries + 1
-        ))
+        Err(anyhow::anyhow!("{}", final_msg))
     }
 }
 

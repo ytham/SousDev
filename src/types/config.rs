@@ -258,6 +258,14 @@ pub struct GitHubPRsWorkflowConfig {
     pub search: Option<String>,
     /// Maximum number of PRs to process per cron tick.
     pub limit: Option<usize>,
+    /// Only review PRs where the user is individually listed as a reviewer
+    /// (not just via team membership).  When `true`, PRs that only have
+    /// team-level review requests are skipped.  Default `false`.
+    pub require_individual_request: Option<bool>,
+    /// Only review PRs assigned to these users.  `["@me"]` means the
+    /// authenticated user.  When set, PRs not assigned to any of these
+    /// users are skipped regardless of review requests.
+    pub assignees: Option<Vec<String>>,
 }
 
 /// Trigger workflow runs from review comments on GitHub Pull Requests.

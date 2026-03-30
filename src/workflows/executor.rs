@@ -724,18 +724,67 @@ impl WorkflowExecutor {
             }
         };
 
-        // Filter to only PRs where the authenticated user is a requested reviewer.
-        // The `gh pr list --search "review-requested:@me"` query is not strict —
-        // it can return PRs where the user is only mentioned or involved.
+        logger.info(&format!("Fetched {} PR(s) from GitHub search", prs.len()));
+
+        let prs_config = self.config.github_prs.as_ref();
+        let assignee_filter: Option<Vec<String>> = prs_config
+            .and_then(|c| c.assignees.clone())
+            .map(|list| {
+                list.into_iter()
+                    .map(|a| {
+                        if a == "@me" {
+                            reviewer_login.clone()
+                        } else {
+                            a
+                        }
+                    })
+                    .collect()
+            });
+
+        // Filter PRs based on configured criteria.
+        //
+        // A PR is included if ANY of these are true:
+        //   1. The user is individually listed as a requested reviewer
+        //   2. The user is in the assignees list (when assignee filter is configured)
+        //
+        // PRs that only match via team-level review requests (e.g. "eng" team
+        // auto-added to all PRs) are excluded unless the user is also assigned
+        // or individually requested.
         let prs: Vec<GitHubPR> = prs
             .into_iter()
-            .filter(|pr| pr.requested_reviewers.iter().any(|r| r == &reviewer_login))
+            .filter(|pr| {
+                // Check 1: individually requested as reviewer.
+                let individually_requested = pr
+                    .requested_reviewers
+                    .iter()
+                    .any(|r| r == &reviewer_login);
+
+                if individually_requested {
+                    return true;
+                }
+
+                // Check 2: assigned to the user (when assignee filter is configured).
+                if let Some(ref allowed) = assignee_filter {
+                    if pr.assignees.iter().any(|a| allowed.contains(a)) {
+                        return true;
+                    }
+                }
+
+                // Neither individually requested nor assigned — skip.
+                // This filters out PRs that only match via team membership.
+                false
+            })
             .collect();
 
         logger.info(&format!(
-            "{} PR(s) with review requested from {}",
+            "{} PR(s) after filtering (reviewer: {}{})",
             prs.len(),
-            reviewer_login
+            reviewer_login,
+            if assignee_filter.is_some() {
+                ", with assignee filter"
+            } else {
+                ""
+            }
         ));
 
         let mut to_review: Vec<&GitHubPR> = Vec::new();
