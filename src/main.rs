@@ -33,7 +33,7 @@ use sousdev::{
 #[derive(Parser)]
 #[command(
     name = "sousdev",
-    about = "🍳 SousDev — Prep, review, and plate your PRs automatically.",
+    about = "🧑‍🍳 SousDev — Prep, review, and plate your PRs automatically.",
     version
 )]
 struct Cli {

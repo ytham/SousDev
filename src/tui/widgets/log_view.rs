@@ -18,8 +18,8 @@ const BG_SELECTION: Color = Color::Rgb(50, 50, 70);
 /// Left border color for thinking blocks.
 const THOUGHT_BORDER: Color = Color::Rgb(80, 160, 200);
 
-/// Draw the info bar showing the selected workflow name, repo, status, and key hints.
-pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+/// Draw the status bar showing the selected workflow name, repo, status, and key hints.
+pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let bg = Style::default().bg(BG_HEADER);
 
     let (title, repo) = match app.selected_workflow() {

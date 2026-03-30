@@ -339,6 +339,8 @@ impl WorkflowExecutor {
             agent_result: None,
             review_result: None,
             review_feedback: None,
+            issue_url: None,
+            issue_display_id: None,
             pr_url: None,
             pr_title: None,
             pr_generated_body: None,
@@ -593,6 +595,8 @@ impl WorkflowExecutor {
             self.opts.tui_tx.clone(),
         ).await.ok();
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+        ctx.issue_url = Some(issue.url.clone());
+        ctx.issue_display_id = Some(issue.display_id.clone());
         let mut workspace_cleanup: Option<(WorkspaceManager, crate::workflows::workspace::WorkspaceInfo)> = None;
 
         self.opts.tui_tx.send(TuiEvent::RunStarted {
@@ -1157,14 +1161,23 @@ impl WorkflowExecutor {
                 pr.number, inline.len(), timeline.len()
             ));
 
-            // Inline review comments: only from other reviewers (not yourself).
+            // Filter out bot comments — they're automated and shouldn't
+            // trigger the agent (CI status, deploy previews, etc.).
+            let is_bot = |login: &str| -> bool {
+                login.ends_with("[bot]") || login == "github-actions"
+            };
+
+            // Inline review comments: only from humans, excluding yourself.
             let new_inline: Vec<_> = inline
                 .into_iter()
-                .filter(|c| c.login != reviewer_login)
+                .filter(|c| c.login != reviewer_login && !is_bot(&c.login))
                 .collect();
 
-            // Timeline comments: include ALL, including your own.
-            let new_timeline = timeline;
+            // Timeline comments: include humans only (including yourself).
+            let new_timeline: Vec<_> = timeline
+                .into_iter()
+                .filter(|c| !is_bot(&c.login))
+                .collect();
 
             if new_inline.is_empty() && new_timeline.is_empty() {
                 logger.info(&format!(

@@ -242,25 +242,49 @@ impl WorkspaceManager {
             pr.number, pr.head_ref_name
         ));
 
-        // Try git checkout directly — more reliable than `gh pr checkout`
-        // in shallow clones with complex refspec configurations.
         let branch_name = &pr.head_ref_name;
-        let remote_ref = format!("origin/{}", branch_name);
 
-        let checkout_result = self
-            .exec(&["git", "checkout", "-B", branch_name, &remote_ref], &dir)
-            .await;
-
-        if checkout_result.is_err() {
-            // Fallback: try `gh pr checkout` which handles more edge cases
-            // (e.g. forks, renamed branches).
-            self.logger.info("git checkout failed — trying gh pr checkout");
-            let pr_number_str = pr.number.to_string();
-            self.exec(
-                &["gh", "pr", "checkout", &pr_number_str, "--repo", &pr.repo],
+        // Fetch the specific PR branch explicitly with enough depth.
+        let _ = self
+            .exec(
+                &["git", "fetch", "--depth=50", "origin", branch_name],
                 &dir,
             )
-            .await?;
+            .await;
+
+        // Try multiple checkout strategies in order of reliability.
+        // Strategy 1: checkout -B from FETCH_HEAD (works in shallow clones).
+        let ok = self
+            .exec(&["git", "checkout", "-B", branch_name, "FETCH_HEAD"], &dir)
+            .await
+            .is_ok();
+
+        if !ok {
+            // Strategy 2: checkout -B from origin/<branch>.
+            let remote_ref = format!("origin/{}", branch_name);
+            let ok2 = self
+                .exec(&["git", "checkout", "-B", branch_name, &remote_ref], &dir)
+                .await
+                .is_ok();
+
+            if !ok2 {
+                // Strategy 3: gh pr checkout (handles forks, renamed branches).
+                self.logger
+                    .info("git checkout failed — trying gh pr checkout");
+                let pr_number_str = pr.number.to_string();
+                self.exec(
+                    &[
+                        "gh",
+                        "pr",
+                        "checkout",
+                        &pr_number_str,
+                        "--repo",
+                        &pr.repo,
+                    ],
+                    &dir,
+                )
+                .await?;
+            }
         }
 
         self.logger.info(&format!(

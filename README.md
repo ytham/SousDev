@@ -1,4 +1,4 @@
-# 🍳 SousDev
+# 🧑‍🍳 SousDev
 
 **Prep, review, and plate your PRs automatically.**
 
@@ -193,7 +193,7 @@ Enabled by default (`pretty = true` in `[logging]`). Features:
 SousDev looks for `config.toml` by walking up from the current directory.
 
 ```toml
-# 🍳 SousDev configuration
+# 🧑‍🍳 SousDev configuration
 provider = "anthropic"
 model = "claude-opus-4-6"
 target_repo = "your-org/your-repo"
@@ -237,7 +237,7 @@ branch_prefix = "sousdev/issue-"
 [workflows.pull_request]
 draft = false
 labels = []
-# show_branding = true   # append "🍳 Automated by SousDev" to PR body
+# show_branding = true   # append "🧑‍🍳 Automated by SousDev" to PR body
 
 [workflows.retry]
 max_attempts = 2

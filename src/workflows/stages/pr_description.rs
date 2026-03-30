@@ -46,6 +46,10 @@ impl Stage for PrDescriptionStage {
         vars.insert("task".to_string(), ctx.parsed_task.task.clone());
         vars.insert("diff".to_string(), diff.clone());
         vars.insert("branch".to_string(), ctx.branch.clone());
+        vars.insert(
+            "issue_url".to_string(),
+            ctx.issue_url.clone().unwrap_or_else(|| "(no issue)".into()),
+        );
         if let Some(answer) = ctx.agent_result.as_ref().map(|r| r.answer.clone()) {
             vars.insert("agent_answer".to_string(), answer);
         }
@@ -385,6 +389,8 @@ mod tests {
             agent_result: None,
             review_result: None,
             review_feedback: None,
+            issue_url: None,
+            issue_display_id: None,
             pr_url: None,
             pr_title: None,
             pr_generated_body: None,

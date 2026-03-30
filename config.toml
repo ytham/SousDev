@@ -1,4 +1,4 @@
-# 🍳 SousDev configuration
+# 🧑‍🍳 SousDev configuration
 # Prep, review, and plate your PRs automatically.
 #
 # This is the reference config. Copy and edit it for your project.
@@ -125,7 +125,7 @@ branch_prefix = "sousdev/issue-"
 [workflows.pull_request]
 draft = false
 labels = []
-# show_branding = true  # append "🍳 Automated by SousDev" to PR body (default true)
+# show_branding = true  # append "🧑‍🍳 Automated by SousDev" to PR body (default true)
 
 [workflows.retry]
 max_attempts = 2

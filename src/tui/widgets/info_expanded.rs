@@ -1,4 +1,4 @@
-/// Info panel widget — floating overlay showing issue/PR status per workflow.
+/// Info expanded panel widget — floating overlay showing issue/PR status per workflow.
 ///
 /// Renders on the right side of the terminal, floating over the log pane.
 /// Shows "All logs" as the first selectable item, followed by a list of
@@ -12,7 +12,7 @@ use ratatui::Frame;
 use crate::tui::app::App;
 use crate::tui::events::ItemStatus;
 
-/// Info panel background.
+/// Info expanded panel background.
 const BG_INFO: Color = Color::Rgb(26, 26, 36);
 
 /// Highlighted row background.
@@ -21,8 +21,8 @@ const BG_SELECTED: Color = Color::Rgb(36, 36, 48);
 /// Left border color for floating panels.
 const BORDER_COLOR: Color = Color::Rgb(60, 80, 160);
 
-/// Info panel width in characters.
-pub const INFO_PANEL_WIDTH: u16 = 60;
+/// Info expanded panel width in characters.
+pub const INFO_EXPANDED_WIDTH: u16 = 60;
 
 /// Number of reserved rows at the top (title + separator).
 const HEADER_ROWS: u16 = 2;
@@ -30,22 +30,29 @@ const HEADER_ROWS: u16 = 2;
 /// Number of reserved rows at the bottom (separator + hints).
 const FOOTER_ROWS: u16 = 2;
 
-/// Draw the info panel as a floating overlay if it is open.
+/// Draw the info expanded panel as a floating overlay if it is open.
 pub fn draw(f: &mut Frame, app: &App) {
-    if !app.info_panel_open {
+    if !app.info_expanded_open {
         return;
     }
 
     let area = f.area();
-    if area.width < INFO_PANEL_WIDTH + 28 {
+    if area.width < INFO_EXPANDED_WIDTH + 20 {
         return;
     }
 
+    // Position: left side with margins (10 from left, 2 from top/bottom).
+    let margin_x: u16 = 10;
+    let margin_y: u16 = 2;
+    let panel_height = area.height.saturating_sub(margin_y * 2);
+    if panel_height < 8 {
+        return;
+    }
     let panel_area = Rect {
-        x: area.x + area.width - INFO_PANEL_WIDTH,
-        y: area.y,
-        width: INFO_PANEL_WIDTH,
-        height: area.height,
+        x: area.x + margin_x,
+        y: area.y + margin_y,
+        width: INFO_EXPANDED_WIDTH,
+        height: panel_height,
     };
 
     f.render_widget(Clear, panel_area);
@@ -69,14 +76,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::styled("│", border),
         Span::styled(
-            "─".repeat(INFO_PANEL_WIDTH as usize - 2),
+            "─".repeat(INFO_EXPANDED_WIDTH as usize - 2),
             bg.fg(Color::DarkGray),
         ),
     ]));
 
     // ── "All logs" row ────────────────────────────────────────────────────
     let items = app.selected_items();
-    let selected = app.info_panel_selected;
+    let selected = app.info_expanded_selected;
 
     let all_logs_selected = selected == 0;
     let all_logs_active = app.log_filter.is_none();
@@ -142,7 +149,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             };
 
             let (badge, badge_color) = status_badge(item.status);
-            let max_title = (INFO_PANEL_WIDTH as usize).saturating_sub(item.id.len() + 12);
+            let max_title = (INFO_EXPANDED_WIDTH as usize).saturating_sub(item.id.len() + 12);
             let title = if item.title.len() > max_title {
                 format!("{}…", &item.title[..max_title.saturating_sub(1)])
             } else {
@@ -176,7 +183,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     lines.push(Line::from(vec![
         Span::styled("│", border),
         Span::styled(
-            "─".repeat(INFO_PANEL_WIDTH as usize - 2),
+            "─".repeat(INFO_EXPANDED_WIDTH as usize - 2),
             bg.fg(Color::DarkGray),
         ),
     ]));

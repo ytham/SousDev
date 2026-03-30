@@ -90,6 +90,10 @@ pub struct StageContext {
     pub review_result: Option<CritiqueLoopResult>,
     /// Critique text to feed back to the agent; `None` when approved.
     pub review_feedback: Option<String>,
+    /// URL of the original issue being fixed (for linking in PRs).
+    pub issue_url: Option<String>,
+    /// Display ID of the issue (e.g. "#42", "ENG-42").
+    pub issue_display_id: Option<String>,
     /// URL of the pull request created by the pull-request stage.
     pub pr_url: Option<String>,
     /// LLM-generated or configured PR title.

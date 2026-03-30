@@ -1,6 +1,10 @@
 Write a GitHub pull request title and description for the following change.
 
-## Original task / issue
+## Original issue
+
+{{issue_url}}
+
+## Task
 
 {{task}}
 
