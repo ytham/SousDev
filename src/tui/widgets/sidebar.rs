@@ -20,7 +20,7 @@ const BORDER_ACTIVE: Color = Color::Rgb(60, 80, 160);
 /// Draw the sidebar in the given area.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let bg = Style::default().bg(BG_SIDEBAR);
-    let is_active = app.active_left_pane == LeftPane::Workflows && !app.info_panel_open;
+    let is_active = app.active_left_pane == LeftPane::Workflows && !app.info_expanded_open;
     let border_style = if is_active {
         Style::default().fg(BORDER_ACTIVE).bg(BG_SIDEBAR)
     } else {

@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::App;
-use crate::tui::widgets::{command_menu, glance, info_panel, log_view, sidebar};
+use crate::tui::widgets::{command_menu, glance, info_expanded, log_view, sidebar};
 
 /// Panel background colors — subtle dark shades to differentiate areas.
 pub const BG_SIDEBAR: Color = Color::Rgb(24, 24, 32);
@@ -80,23 +80,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.layout.logs = log_area;
     app.layout.info_bar = info_area;
 
-    // Info panel rect — left-side floating with margins.
-    if !app.info_panel_open {
-        app.layout.info_panel = Rect::default();
+    // Info expanded panel rect — left-side floating with margins.
+    if !app.info_expanded_open {
+        app.layout.info_expanded = Rect::default();
     } else {
-        let ipw = info_panel::INFO_PANEL_WIDTH;
+        let ipw = info_expanded::INFO_EXPANDED_WIDTH;
         let margin_x: u16 = 10;
         let margin_y: u16 = 2;
         let ip_height = area.height.saturating_sub(margin_y * 2);
         if area.width >= ipw + margin_x + 10 && ip_height >= 8 {
-            app.layout.info_panel = Rect {
+            app.layout.info_expanded = Rect {
                 x: area.x + margin_x,
                 y: area.y + margin_y,
                 width: ipw,
                 height: ip_height,
             };
         } else {
-            app.layout.info_panel = Rect::default();
+            app.layout.info_expanded = Rect::default();
         }
     }
 
@@ -109,7 +109,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     log_view::draw_header(f, app, info_area);
 
     // Floating overlays (drawn on top).
-    info_panel::draw(f, app);
+    info_expanded::draw(f, app);
     command_menu::draw(f, app);
     draw_toast(f, app);
 }

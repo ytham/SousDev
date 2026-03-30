@@ -149,7 +149,7 @@ pub struct WorkflowState {
     pub log_entries: Vec<LogEntry>,
     /// Whether this workflow is enabled (cron ticks are skipped when disabled).
     pub enabled: bool,
-    /// The item label of the currently running item (for info panel updates).
+    /// The item label of the currently running item (for info expanded panel updates).
     pub current_item_label: Option<String>,
 }
 
@@ -184,7 +184,7 @@ pub enum Panel {
     Glance,
     Logs,
     InfoBar,
-    InfoPanel,
+    InfoExpanded,
     None,
 }
 
@@ -212,15 +212,15 @@ pub struct PanelLayout {
     pub glance: ratatui::layout::Rect,
     pub logs: ratatui::layout::Rect,
     pub info_bar: ratatui::layout::Rect,
-    pub info_panel: ratatui::layout::Rect,
+    pub info_expanded: ratatui::layout::Rect,
 }
 
 impl PanelLayout {
     /// Determine which panel a terminal coordinate falls in.
     pub fn hit_test(&self, col: u16, row: u16) -> Panel {
-        // Info panel takes priority (it floats over everything).
-        if self.info_panel.width > 0 && contains(&self.info_panel, col, row) {
-            Panel::InfoPanel
+        // Info expanded panel takes priority (it floats over everything).
+        if self.info_expanded.width > 0 && contains(&self.info_expanded, col, row) {
+            Panel::InfoExpanded
         } else if self.glance.width > 0 && contains(&self.glance, col, row) {
             Panel::Glance
         } else if contains(&self.logs, col, row) {
@@ -281,11 +281,11 @@ pub struct App {
     pub active_left_pane: LeftPane,
     /// Selected item index in the Glance pane (0 = "All logs", 1+ = items).
     pub glance_selected: usize,
-    /// Whether the info panel is open.
-    pub info_panel_open: bool,
-    /// Index of the highlighted item in the info panel.
-    pub info_panel_selected: usize,
-    /// Per-workflow item summaries for the info panel.
+    /// Whether the info expanded panel is open.
+    pub info_expanded_open: bool,
+    /// Index of the highlighted item in the info expanded panel.
+    pub info_expanded_selected: usize,
+    /// Per-workflow item summaries for the info expanded panel.
     pub workflow_items: HashMap<String, Vec<ItemSummary>>,
     /// Pending failure cooldown clears (workflow_name, item_key).
     pub clear_requests: Vec<(String, String)>,
@@ -327,8 +327,8 @@ impl App {
             cron_input: String::new(),
             active_left_pane: LeftPane::Workflows,
             glance_selected: 0,
-            info_panel_open: false,
-            info_panel_selected: 0,
+            info_expanded_open: false,
+            info_expanded_selected: 0,
             workflow_items: HashMap::new(),
             clear_requests: Vec::new(),
             schedule_tx: None,
@@ -557,7 +557,7 @@ impl App {
 
                 dirty_workflow = Some(workflow_name.clone());
 
-                // Update info panel item status.
+                // Update info expanded panel item status.
                 if let Some(ref label) = item_label {
                     let new_status = if success {
                         ItemStatus::Success
@@ -578,7 +578,7 @@ impl App {
                     .map(|wf| wf.name == workflow_name)
                     .unwrap_or(false)
                 {
-                    self.info_panel_selected = 0;
+                    self.info_expanded_selected = 0;
                 }
                 self.workflow_items.insert(workflow_name, items);
             }
@@ -610,7 +610,7 @@ impl App {
         match self.input_mode {
             InputMode::CronEdit => self.handle_key_cron_edit(key),
             InputMode::Command => self.handle_key_command(key),
-            InputMode::Normal if self.info_panel_open => self.handle_key_info_panel(key),
+            InputMode::Normal if self.info_expanded_open => self.handle_key_info_expanded(key),
             InputMode::Normal if self.active_left_pane == LeftPane::Glance => {
                 self.handle_key_glance(key)
             }
@@ -657,8 +657,8 @@ impl App {
                 self.active_left_pane = LeftPane::Glance;
             }
             KeyCode::Char('i') => {
-                self.info_panel_open = true;
-                self.info_panel_selected = 0;
+                self.info_expanded_open = true;
+                self.info_expanded_selected = 0;
             }
             KeyCode::Char(':') => {
                 self.input_mode = InputMode::Command;
@@ -695,8 +695,8 @@ impl App {
                 self.active_left_pane = LeftPane::Workflows;
             }
             KeyCode::Char('i') => {
-                self.info_panel_open = true;
-                self.info_panel_selected = 0;
+                self.info_expanded_open = true;
+                self.info_expanded_selected = 0;
             }
             KeyCode::Char(':') => {
                 self.input_mode = InputMode::Command;
@@ -722,22 +722,22 @@ impl App {
         }
     }
 
-    /// Info panel context: item navigation, clear, open URL.
-    fn handle_key_info_panel(&mut self, key: KeyCode) {
+    /// Info expanded panel context: item navigation, clear, open URL.
+    fn handle_key_info_expanded(&mut self, key: KeyCode) {
         match key {
             KeyCode::Up => {
-                self.info_panel_selected = self.info_panel_selected.saturating_sub(1);
+                self.info_expanded_selected = self.info_expanded_selected.saturating_sub(1);
             }
             KeyCode::Down => {
                 // +1 because index 0 is "All logs", then real items start at 1.
                 let max = self.selected_items().len(); // items.len() = last valid index
-                if self.info_panel_selected < max {
-                    self.info_panel_selected += 1;
+                if self.info_expanded_selected < max {
+                    self.info_expanded_selected += 1;
                 }
             }
             KeyCode::Enter => {
                 // Set log filter to the selected item (0 = All logs).
-                self.set_log_filter_from_info_panel();
+                self.set_log_filter_from_info_expanded();
             }
             KeyCode::Char('g') => {
                 // Open URL in browser for the selected item.
@@ -750,7 +750,7 @@ impl App {
                 self.clear_all_errored_items();
             }
             KeyCode::Char('i') | KeyCode::Esc => {
-                self.info_panel_open = false;
+                self.info_expanded_open = false;
             }
             KeyCode::Char(':') => {
                 self.input_mode = InputMode::Command;
@@ -845,8 +845,8 @@ impl App {
 
                 // Click outside a floating panel closes it and consumes
                 // the click — no selection or sidebar action.
-                if self.info_panel_open && panel != Panel::InfoPanel {
-                    self.info_panel_open = false;
+                if self.info_expanded_open && panel != Panel::InfoExpanded {
+                    self.info_expanded_open = false;
                     return;
                 }
                 if self.input_mode == InputMode::Command && panel != Panel::None {
@@ -860,7 +860,7 @@ impl App {
                         if idx != self.selected {
                             self.selected = idx;
                             self.log_scroll = 0;
-                            self.info_panel_selected = 0;
+                            self.info_expanded_selected = 0;
                             self.log_filter = None;
                         }
                     }
@@ -877,9 +877,9 @@ impl App {
                     }
                 }
 
-                // Click in info panel: select the clicked item.
-                if panel == Panel::InfoPanel {
-                    self.select_info_panel_item(event.row);
+                // Click in info expanded panel: select the clicked item.
+                if panel == Panel::InfoExpanded {
+                    self.select_info_expanded_item(event.row);
                 }
 
                 self.mouse_down_pos = Some((event.column, event.row));
@@ -1021,19 +1021,19 @@ impl App {
         }
     }
 
-    /// Clear the status of the currently selected info panel item.
+    /// Clear the status of the currently selected info expanded panel item.
     ///
     /// Resets the item to `None` and queues a failure cooldown clear so
     /// the cron runner will retry it on the next tick.
     pub fn clear_selected_item(&mut self) {
-        if self.info_panel_selected == 0 {
+        if self.info_expanded_selected == 0 {
             return; // "All logs" — nothing to clear.
         }
         let wf_name = match self.selected_workflow() {
             Some(wf) => wf.name.clone(),
             None => return,
         };
-        let item_idx = self.info_panel_selected - 1;
+        let item_idx = self.info_expanded_selected - 1;
         if let Some(items) = self.workflow_items.get_mut(&wf_name) {
             if let Some(item) = items.get_mut(item_idx) {
                 if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
@@ -1115,7 +1115,7 @@ impl App {
         }
     }
 
-    /// Shared log filter logic used by both Glance and Info panel.
+    /// Shared log filter logic used by both Glance and Info expanded panel.
     fn set_log_filter_by_index(&mut self, selected: usize) {
         if selected == 0 {
             if self.log_filter.is_some() {
@@ -1141,19 +1141,19 @@ impl App {
         }
     }
 
-    /// Set the log filter based on the info panel selection.
-    fn set_log_filter_from_info_panel(&mut self) {
-        let selected = self.info_panel_selected;
+    /// Set the log filter based on the info expanded panel selection.
+    fn set_log_filter_from_info_expanded(&mut self) {
+        let selected = self.info_expanded_selected;
         self.set_log_filter_by_index(selected);
     }
 
-    /// Open the URL of the currently selected info panel item in the browser.
+    /// Open the URL of the currently selected info expanded panel item in the browser.
     fn open_selected_info_item(&mut self) {
-        if self.info_panel_selected == 0 {
+        if self.info_expanded_selected == 0 {
             return; // "All logs" has no URL.
         }
         let items = self.selected_items();
-        let item_idx = self.info_panel_selected - 1;
+        let item_idx = self.info_expanded_selected - 1;
         if let Some(item) = items.get(item_idx) {
             let url = item.url.clone();
             // Only open URLs that look like real HTTP(S) links.
@@ -1164,9 +1164,9 @@ impl App {
         }
     }
 
-    /// Select an info panel item by terminal row (from mouse click).
-    fn select_info_panel_item(&mut self, row: u16) {
-        let panel = &self.layout.info_panel;
+    /// Select an info expanded panel item by terminal row (from mouse click).
+    fn select_info_expanded_item(&mut self, row: u16) {
+        let panel = &self.layout.info_expanded;
         if panel.height == 0 {
             return;
         }
@@ -1174,7 +1174,7 @@ impl App {
         let item_row = row.saturating_sub(panel.y + 2) as usize;
         let item_count = self.selected_items().len();
         if item_row < item_count {
-            self.info_panel_selected = item_row;
+            self.info_expanded_selected = item_row;
         }
     }
 
@@ -1246,7 +1246,7 @@ impl App {
         self.show_toast("Schedule updated", Duration::from_secs(4));
     }
 
-    /// Update the status of an item in the info panel by matching the label.
+    /// Update the status of an item in the info expanded panel by matching the label.
     ///
     /// The label is matched against item IDs (e.g. "issue #42" matches "#42",
     /// "PR #12050" matches "PR #12050").
@@ -1261,7 +1261,7 @@ impl App {
         }
     }
 
-    /// Return the items for the currently selected workflow's info panel.
+    /// Return the items for the currently selected workflow's info expanded panel.
     pub fn selected_items(&self) -> &[ItemSummary] {
         let empty: &[ItemSummary] = &[];
         self.selected_workflow()
@@ -1592,7 +1592,7 @@ fn open_url_in_browser(url: &str) {
     let _ = url; // Suppress unused variable warning in test builds.
 }
 
-/// Extract a store-compatible item key from an info panel item ID.
+/// Extract a store-compatible item key from an info expanded panel item ID.
 ///
 /// - `"#42"` → `"42"` (issue number)
 /// - `"PR #12050"` → `"pr-12050"` (PR key used in FailureCooldownStore)
@@ -1730,7 +1730,7 @@ fn extract_toml_string_value(line: &str) -> Option<String> {
 
 /// Load historical item data from stores into the app's `workflow_items`.
 ///
-/// This populates the info panel on startup before the first cron tick
+/// This populates the info expanded panel on startup before the first cron tick
 /// fetches fresh data.  Items are built from the handled-issues, reviewed-PRs,
 /// and PR-response stores.  Failure cooldown items are overlaid with
 /// `Error`/`Cooldown` status.
@@ -1944,7 +1944,7 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     app.schedule_tx = Some(schedule_tx);
     app.pretty_logs = pretty_logs;
 
-    // Load historical item data from stores so the info panel has data
+    // Load historical item data from stores so the info expanded panel has data
     // before the first cron tick.
     load_initial_items(&mut app, &project_root, &workflow_infos).await;
 
@@ -2896,7 +2896,7 @@ mod tests {
             glance: ratatui::layout::Rect::new(27, 0, 24, 30),
             logs: ratatui::layout::Rect::new(52, 0, 60, 27),
             info_bar: ratatui::layout::Rect::new(52, 28, 60, 2),
-            info_panel: ratatui::layout::Rect::default(),
+            info_expanded: ratatui::layout::Rect::default(),
         };
 
         assert_eq!(layout.hit_test(0, 0), Panel::Sidebar);
@@ -3113,16 +3113,16 @@ mod tests {
         assert_eq!(extract_toml_string_value("# comment"), None);
     }
 
-    // ── Info panel ────────────────────────────────────────────────────────
+    // ── Info expanded panel ────────────────────────────────────────────────────────
 
     #[test]
-    fn test_i_key_toggles_info_panel() {
+    fn test_i_key_toggles_info_expanded() {
         let mut app = App::new();
-        assert!(!app.info_panel_open);
+        assert!(!app.info_expanded_open);
         app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
-        assert!(app.info_panel_open);
+        assert!(app.info_expanded_open);
         app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
-        assert!(!app.info_panel_open);
+        assert!(!app.info_expanded_open);
     }
 
     #[test]
@@ -3273,8 +3273,8 @@ mod tests {
 
     // ── Context-based input routing ───────────────────────────────────────
 
-    /// Helper: create an app with info panel open and items loaded.
-    fn app_with_info_panel() -> App {
+    /// Helper: create an app with info expanded panel open and items loaded.
+    fn app_with_info_expanded() -> App {
         let mut app = app_with_workflow("p", WorkflowMode::Issues);
         app.handle_tui_event(TuiEvent::ItemsSummary {
             workflow_name: "p".into(),
@@ -3299,34 +3299,34 @@ mod tests {
                 },
             ],
         });
-        app.info_panel_open = true;
-        app.info_panel_selected = 0;
+        app.info_expanded_open = true;
+        app.info_expanded_selected = 0;
         app
     }
 
     #[test]
-    fn test_up_down_navigates_info_panel_when_open() {
-        let mut app = app_with_info_panel();
+    fn test_up_down_navigates_info_expanded_when_open() {
+        let mut app = app_with_info_expanded();
         // 0 = "All logs", 1 = #1, 2 = #2, 3 = #3
-        assert_eq!(app.info_panel_selected, 0);
+        assert_eq!(app.info_expanded_selected, 0);
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 1);
+        assert_eq!(app.info_expanded_selected, 1);
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 2);
+        assert_eq!(app.info_expanded_selected, 2);
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 3);
+        assert_eq!(app.info_expanded_selected, 3);
         // Can't go past last item.
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 3);
+        assert_eq!(app.info_expanded_selected, 3);
         app.handle_key(KeyCode::Up, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 2);
+        assert_eq!(app.info_expanded_selected, 2);
         app.handle_key(KeyCode::Up, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 1);
+        assert_eq!(app.info_expanded_selected, 1);
         app.handle_key(KeyCode::Up, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 0);
+        assert_eq!(app.info_expanded_selected, 0);
         // Can't go below 0.
         app.handle_key(KeyCode::Up, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 0);
+        assert_eq!(app.info_expanded_selected, 0);
     }
 
     #[test]
@@ -3340,29 +3340,29 @@ mod tests {
                 repo: None,
             });
         }
-        assert!(!app.info_panel_open);
+        assert!(!app.info_expanded_open);
         assert_eq!(app.selected, 0);
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
-        assert_eq!(app.selected, 1); // Workflow switched, not info panel.
+        assert_eq!(app.selected, 1); // Workflow switched, not info expanded panel.
     }
 
     #[test]
-    fn test_info_panel_selected_resets_on_toggle() {
-        let mut app = app_with_info_panel();
-        app.info_panel_selected = 2;
+    fn test_info_expanded_selected_resets_on_toggle() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_selected = 2;
         // Close and reopen.
         app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
-        assert!(!app.info_panel_open);
+        assert!(!app.info_expanded_open);
         // Open again from normal mode.
         app.handle_key(KeyCode::Char('i'), KeyModifiers::empty());
-        assert!(app.info_panel_open);
-        assert_eq!(app.info_panel_selected, 0);
+        assert!(app.info_expanded_open);
+        assert_eq!(app.info_expanded_selected, 0);
     }
 
     #[test]
-    fn test_info_panel_selected_resets_on_items_summary() {
-        let mut app = app_with_info_panel();
-        app.info_panel_selected = 2;
+    fn test_info_expanded_selected_resets_on_items_summary() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_selected = 2;
         app.handle_tui_event(TuiEvent::ItemsSummary {
             workflow_name: "p".into(),
             items: vec![ItemSummary {
@@ -3372,13 +3372,13 @@ mod tests {
                 status: ItemStatus::None,
             }],
         });
-        assert_eq!(app.info_panel_selected, 0);
+        assert_eq!(app.info_expanded_selected, 0);
     }
 
     #[test]
     fn test_c_clears_selected_errored_item() {
-        let mut app = app_with_info_panel();
-        app.info_panel_selected = 2; // index 2 = item #2 (offset 1 for "All logs")
+        let mut app = app_with_info_expanded();
+        app.info_expanded_selected = 2; // index 2 = item #2 (offset 1 for "All logs")
         assert_eq!(app.selected_items()[1].status, ItemStatus::Error);
         app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
         assert_eq!(app.selected_items()[1].status, ItemStatus::None);
@@ -3388,8 +3388,8 @@ mod tests {
 
     #[test]
     fn test_c_does_not_clear_non_error_item() {
-        let mut app = app_with_info_panel();
-        app.info_panel_selected = 1; // index 1 = item #1 which has None status.
+        let mut app = app_with_info_expanded();
+        app.info_expanded_selected = 1; // index 1 = item #1 which has None status.
         app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
         // Should not clear — it's already None.
         assert!(app.clear_requests.is_empty());
@@ -3397,7 +3397,7 @@ mod tests {
 
     #[test]
     fn test_shift_c_clears_all_errored() {
-        let mut app = app_with_info_panel();
+        let mut app = app_with_info_expanded();
         app.handle_key(KeyCode::Char('C'), KeyModifiers::empty());
         // #2 (Error) and #3 (Cooldown) should both be cleared.
         assert_eq!(app.selected_items()[1].status, ItemStatus::None);
@@ -3408,7 +3408,7 @@ mod tests {
     #[test]
     fn test_c_does_nothing_when_panel_closed() {
         let mut app = app_with_workflow("p", WorkflowMode::Issues);
-        assert!(!app.info_panel_open);
+        assert!(!app.info_expanded_open);
         // 'c' in Normal mode is unbound — should do nothing.
         app.handle_key(KeyCode::Char('c'), KeyModifiers::empty());
         assert!(app.clear_requests.is_empty());
@@ -3416,9 +3416,9 @@ mod tests {
 
     #[test]
     fn test_enter_on_all_logs_clears_filter() {
-        let mut app = app_with_info_panel();
+        let mut app = app_with_info_expanded();
         app.log_filter = Some("#1".into());
-        app.info_panel_selected = 0; // "All logs"
+        app.info_expanded_selected = 0; // "All logs"
         app.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert!(app.log_filter.is_none());
         assert!(app.toast.is_some());
@@ -3427,8 +3427,8 @@ mod tests {
 
     #[test]
     fn test_enter_on_item_sets_filter() {
-        let mut app = app_with_info_panel();
-        app.info_panel_selected = 1; // item #1
+        let mut app = app_with_info_expanded();
+        app.info_expanded_selected = 1; // item #1
         app.handle_key(KeyCode::Enter, KeyModifiers::empty());
         assert_eq!(app.log_filter, Some("#1".into()));
         assert!(app.toast.is_some());
@@ -3436,9 +3436,9 @@ mod tests {
     }
 
     #[test]
-    fn test_g_opens_url_in_info_panel() {
-        let mut app = app_with_info_panel();
-        app.info_panel_selected = 1; // item #1
+    fn test_g_opens_url_in_info_expanded() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_selected = 1; // item #1
         app.handle_key(KeyCode::Char('g'), KeyModifiers::empty());
         assert!(app.toast.is_some());
         assert!(app.toast.as_ref().unwrap().message.contains("Opened"));
@@ -3446,42 +3446,42 @@ mod tests {
 
     #[test]
     fn test_g_on_all_logs_does_nothing() {
-        let mut app = app_with_info_panel();
-        app.info_panel_selected = 0; // "All logs"
+        let mut app = app_with_info_expanded();
+        app.info_expanded_selected = 0; // "All logs"
         app.handle_key(KeyCode::Char('g'), KeyModifiers::empty());
         assert!(app.toast.is_none());
     }
 
     #[test]
-    fn test_esc_closes_info_panel() {
-        let mut app = app_with_info_panel();
-        assert!(app.info_panel_open);
+    fn test_esc_closes_info_expanded() {
+        let mut app = app_with_info_expanded();
+        assert!(app.info_expanded_open);
         app.handle_key(KeyCode::Esc, KeyModifiers::empty());
-        assert!(!app.info_panel_open);
+        assert!(!app.info_expanded_open);
     }
 
     #[test]
-    fn test_colon_opens_menu_from_info_panel() {
-        let mut app = app_with_info_panel();
+    fn test_colon_opens_menu_from_info_expanded() {
+        let mut app = app_with_info_expanded();
         app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Command);
-        // Info panel should stay open.
-        assert!(app.info_panel_open);
+        // Info expanded panel should stay open.
+        assert!(app.info_expanded_open);
     }
 
     #[test]
-    fn test_esc_from_command_returns_to_info_panel_context() {
-        let mut app = app_with_info_panel();
+    fn test_esc_from_command_returns_to_info_expanded_context() {
+        let mut app = app_with_info_expanded();
         app.handle_key(KeyCode::Char(':'), KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Command);
-        assert!(app.info_panel_open);
-        // Esc from command menu returns to Normal, but info panel is still open.
+        assert!(app.info_expanded_open);
+        // Esc from command menu returns to Normal, but info expanded panel is still open.
         app.handle_key(KeyCode::Esc, KeyModifiers::empty());
         assert_eq!(app.input_mode, InputMode::Normal);
-        assert!(app.info_panel_open);
-        // Next key should be handled by info panel context.
+        assert!(app.info_expanded_open);
+        // Next key should be handled by info expanded panel context.
         app.handle_key(KeyCode::Down, KeyModifiers::empty());
-        assert_eq!(app.info_panel_selected, 1); // Info panel navigation, not workflow.
+        assert_eq!(app.info_expanded_selected, 1); // Info expanded panel navigation, not workflow.
     }
 
     #[test]
@@ -3816,8 +3816,8 @@ mod tests {
 
     #[test]
     fn test_up_down_in_glance_navigates_items() {
-        let mut app = app_with_info_panel(); // has 3 items
-        app.info_panel_open = false; // close floating panel so Glance gets input
+        let mut app = app_with_info_expanded(); // has 3 items
+        app.info_expanded_open = false; // close floating panel so Glance gets input
         app.active_left_pane = LeftPane::Glance;
         app.glance_selected = 0;
         // 0=All logs, 1=#1, 2=#2, 3=#3
@@ -3851,8 +3851,8 @@ mod tests {
 
     #[test]
     fn test_enter_in_glance_sets_filter() {
-        let mut app = app_with_info_panel();
-        app.info_panel_open = false;
+        let mut app = app_with_info_expanded();
+        app.info_expanded_open = false;
         app.active_left_pane = LeftPane::Glance;
         app.glance_selected = 1; // item #1
         app.handle_key(KeyCode::Enter, KeyModifiers::empty());

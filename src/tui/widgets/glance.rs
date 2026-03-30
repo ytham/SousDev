@@ -1,7 +1,7 @@
 /// Glance pane — compact item status list between Workflows and Log panes.
 ///
 /// Shows a list of issues/PRs with status badges.  Supports the same
-/// item actions as the Info panel (filter, open URL, clear errors).
+/// item actions as the Info expanded panel (filter, open URL, clear errors).
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -26,7 +26,7 @@ pub const GLANCE_WIDTH: u16 = 24;
 /// Draw the Glance pane.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let bg = Style::default().bg(BG_GLANCE);
-    let is_active = app.active_left_pane == LeftPane::Glance && !app.info_panel_open;
+    let is_active = app.active_left_pane == LeftPane::Glance && !app.info_expanded_open;
     let border_style = if is_active {
         Style::default().fg(BORDER_ACTIVE).bg(BG_GLANCE)
     } else {

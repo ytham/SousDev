@@ -74,7 +74,7 @@ pub enum TuiEvent {
         pr_url: Option<String>,
     },
 
-    /// A batch of item summaries for the info panel.
+    /// A batch of item summaries for the info expanded panel.
     ///
     /// Emitted by the executor after fetching and classifying issues/PRs.
     /// Replaces the previous item list for this workflow.
@@ -87,7 +87,7 @@ pub enum TuiEvent {
     Shutdown,
 }
 
-/// Summary of a single issue or PR for the info panel.
+/// Summary of a single issue or PR for the info expanded panel.
 #[derive(Debug, Clone)]
 pub struct ItemSummary {
     /// Human-readable identifier (e.g. `"#42"` or `"PR #12050"`).
