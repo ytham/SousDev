@@ -91,6 +91,10 @@ pub struct FetchPRsOptions {
     pub search: Option<String>,
     /// Maximum number of PRs to return (default 10).
     pub limit: Option<usize>,
+    /// Use a raw search query instead of the reviewer-specific dual search.
+    /// When `true`, only `search` + `is:open` is used (no `user-review-requested`
+    /// or `assignee` searches).  Used by the pr-responder which searches by author.
+    pub raw_search: bool,
 }
 
 /// Fetch open pull requests where the authenticated user is a requested reviewer.
@@ -113,6 +117,43 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
     let limit = options.limit.unwrap_or(10);
     let json_fields = "number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,assignees,createdAt,updatedAt";
 
+    // Raw search mode: use the provided search query directly (for pr-responder).
+    if options.raw_search {
+        let search = if extra_search.is_empty() {
+            "is:open".to_string()
+        } else {
+            format!("{} is:open", extra_search)
+        };
+
+        let output = Command::new("gh")
+            .arg("pr").arg("list")
+            .arg("--repo").arg(&repo)
+            .arg("--search").arg(&search)
+            .arg("--limit").arg(limit.to_string())
+            .arg("--json").arg(json_fields)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("gh pr list failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.trim().is_empty() {
+            return Ok(vec![]);
+        }
+
+        let raw: Vec<RawGhPR> = serde_json::from_str(&stdout)
+            .map_err(|e| anyhow::anyhow!("Failed to parse gh pr list: {}", e))?;
+
+        return Ok(raw
+            .into_iter()
+            .map(|r| map_raw_pr(r, &repo))
+            .collect());
+    }
+
+    // Reviewer search mode (default): dual search.
     // Search 1: PRs where the user is individually requested as reviewer.
     let search1 = if extra_search.is_empty() {
         "user-review-requested:@me is:open".to_string()
@@ -177,37 +218,42 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
 
     Ok(raw
         .into_iter()
-        .map(|r| GitHubPR {
-            number: r.number,
-            title: r.title,
-            body: r.body,
-            url: r.url,
-            head_ref_name: r.head_ref_name,
-            head_ref_oid: r.head_ref_oid,
-            base_ref_name: r.base_ref_name,
-            author: r.author.unwrap_or_default(),
-            labels: r.labels.unwrap_or_default(),
-            review_decision: r.review_decision.unwrap_or_default(),
-            requested_reviewers: r
-                .review_requests
-                .iter()
-                .filter_map(|rr| rr.login.clone())
-                .collect(),
-            requested_teams: r
-                .review_requests
-                .iter()
-                .filter_map(|rr| rr.slug.clone())
-                .collect(),
-            assignees: r
-                .assignees
-                .iter()
-                .map(|a| a.login.clone())
-                .collect(),
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            repo: repo.clone(),
-        })
+        .map(|r| map_raw_pr(r, &repo))
         .collect())
+}
+
+/// Map a raw GitHub PR response to the internal representation.
+fn map_raw_pr(r: RawGhPR, repo: &str) -> GitHubPR {
+    GitHubPR {
+        number: r.number,
+        title: r.title,
+        body: r.body,
+        url: r.url,
+        head_ref_name: r.head_ref_name,
+        head_ref_oid: r.head_ref_oid,
+        base_ref_name: r.base_ref_name,
+        author: r.author.unwrap_or_default(),
+        labels: r.labels.unwrap_or_default(),
+        review_decision: r.review_decision.unwrap_or_default(),
+        requested_reviewers: r
+            .review_requests
+            .iter()
+            .filter_map(|rr| rr.login.clone())
+            .collect(),
+        requested_teams: r
+            .review_requests
+            .iter()
+            .filter_map(|rr| rr.slug.clone())
+            .collect(),
+        assignees: r
+            .assignees
+            .iter()
+            .map(|a| a.login.clone())
+            .collect(),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        repo: repo.to_string(),
+    }
 }
 
 /// Fetch timeline (issue-level) comments for a pull request.

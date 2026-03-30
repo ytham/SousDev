@@ -698,6 +698,7 @@ impl WorkflowExecutor {
             repo: gh_repo,
             search: prs_cfg.search.clone(),
             limit: prs_cfg.limit,
+            raw_search: false, // Use reviewer dual-search.
         })
         .await
         {
@@ -1095,6 +1096,7 @@ impl WorkflowExecutor {
             repo: gh_repo,
             search: Some(search),
             limit: resp_cfg.limit,
+            raw_search: true, // Simple author search, not reviewer dual-search.
         })
         .await
         {
@@ -1136,6 +1138,11 @@ impl WorkflowExecutor {
             let after_inline = record.as_ref().map(|r| r.last_inline_comment_id);
             let after_timeline = record.as_ref().map(|r| r.last_timeline_comment_id);
 
+            logger.info(&format!(
+                "PR #{}: checking comments (cursor: inline={:?}, timeline={:?})",
+                pr.number, after_inline, after_timeline
+            ));
+
             let inline =
                 fetch_inline_review_comments(&pr.repo, pr.number, after_inline)
                     .await
@@ -1145,26 +1152,23 @@ impl WorkflowExecutor {
                     .await
                     .unwrap_or_default();
 
+            logger.info(&format!(
+                "PR #{}: found {} inline, {} timeline comments after cursor",
+                pr.number, inline.len(), timeline.len()
+            ));
+
             // Inline review comments: only from other reviewers (not yourself).
-            // These are code-level feedback that the agent should address.
             let new_inline: Vec<_> = inline
                 .into_iter()
                 .filter(|c| c.login != reviewer_login)
                 .collect();
 
             // Timeline comments: include ALL, including your own.
-            // You may be directing the agent (e.g. "fix the build").
-            // Your conversational replies to reviewers are also included —
-            // the agent will read the context and determine if action is needed.
-            //
-            // Infinite loop prevention: after a successful run, the cursor
-            // is updated to the latest comment ID (including the agent's
-            // own replies), so the next tick won't re-process them.
             let new_timeline = timeline;
 
             if new_inline.is_empty() && new_timeline.is_empty() {
                 logger.info(&format!(
-                    "PR #{} has no new reviewer comments — skipping",
+                    "PR #{} has no new comments after filtering — skipping",
                     pr.number
                 ));
             } else {
