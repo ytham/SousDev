@@ -51,14 +51,10 @@ pub fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" {} ", status), bg.fg(status_color)),
     ]);
 
-    // Second line: key hints.
+    // Second line: key hints for the log pane.
     let hints_line = Line::from(vec![
         Span::styled(" : ", bg.fg(Color::White)),
         Span::styled("menu  ", bg.fg(Color::DarkGray)),
-        Span::styled("i ", bg.fg(Color::White)),
-        Span::styled("info  ", bg.fg(Color::DarkGray)),
-        Span::styled("↑↓ ", bg.fg(Color::White)),
-        Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("f/b ", bg.fg(Color::White)),
         Span::styled("page  ", bg.fg(Color::DarkGray)),
         Span::styled("F/B ", bg.fg(Color::White)),

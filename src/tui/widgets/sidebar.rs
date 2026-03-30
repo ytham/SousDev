@@ -108,6 +108,18 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
+    // Pad to fill the sidebar, then add key hints at the bottom.
+    let hints_row = area.height.saturating_sub(1) as usize;
+    while lines.len() < hints_row {
+        lines.push(Line::from(Span::styled(" ", bg)));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(" ↑↓ ", bg.fg(Color::White)),
+        Span::styled("select ", bg.fg(Color::DarkGray)),
+        Span::styled("i ", bg.fg(Color::White)),
+        Span::styled("info", bg.fg(Color::DarkGray)),
+    ]));
+
     let block = Block::default().style(bg);
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);

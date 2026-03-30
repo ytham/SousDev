@@ -298,27 +298,12 @@ impl App {
                 });
             }
 
-            TuiEvent::TickFired { workflow_name } => {
-                if let Some(wf) = self.find_workflow_mut(&workflow_name) {
-                    wf.logs.push(LogLine {
-                        level: "info".into(),
-                        stage: "cron".into(),
-                        message: "Tick fired".into(),
-                    });
-                }
+            TuiEvent::TickFired { .. } => {
+                // Silently ignored — cron ticks are too noisy for the log pane.
             }
 
-            TuiEvent::TickSkipped {
-                workflow_name,
-                reason,
-            } => {
-                if let Some(wf) = self.find_workflow_mut(&workflow_name) {
-                    wf.logs.push(LogLine {
-                        level: "warn".into(),
-                        stage: "cron".into(),
-                        message: format!("Tick skipped: {}", reason),
-                    });
-                }
+            TuiEvent::TickSkipped { .. } => {
+                // Silently ignored — cron tick skips are too noisy for the log pane.
             }
 
             TuiEvent::RunStarted {
@@ -664,12 +649,15 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let panel = self.layout.hit_test(event.column, event.row);
 
-                // Click outside a floating panel closes it.
+                // Click outside a floating panel closes it and consumes
+                // the click — no selection or sidebar action.
                 if self.info_panel_open && panel != Panel::InfoPanel {
                     self.info_panel_open = false;
+                    return;
                 }
                 if self.input_mode == InputMode::Command && panel != Panel::None {
                     self.input_mode = InputMode::Normal;
+                    return;
                 }
 
                 // Click in sidebar: select the clicked workflow.
@@ -1532,37 +1520,20 @@ mod tests {
     // ── TickFired / TickSkipped ───────────────────────────────────────────
 
     #[test]
-    fn test_tick_fired_adds_log() {
+    #[test]
+    fn test_tick_events_do_not_add_logs() {
         let mut app = app_with_workflow("p", WorkflowMode::Standard);
         app.handle_tui_event(TuiEvent::TickFired {
             workflow_name: "p".into(),
         });
-        assert_eq!(app.workflows[0].logs.len(), 1);
-        assert_eq!(app.workflows[0].logs[0].stage, "cron");
-        assert_eq!(app.workflows[0].logs[0].message, "Tick fired");
-    }
-
-    #[test]
-    fn test_tick_skipped_adds_log_with_reason() {
-        let mut app = app_with_workflow("p", WorkflowMode::Standard);
         app.handle_tui_event(TuiEvent::TickSkipped {
             workflow_name: "p".into(),
             reason: "previous run still active".into(),
         });
-        assert_eq!(app.workflows[0].logs.len(), 1);
-        assert_eq!(app.workflows[0].logs[0].level, "warn");
-        assert!(app.workflows[0].logs[0]
-            .message
-            .contains("previous run still active"));
-    }
-
-    #[test]
-    fn test_tick_for_unknown_workflow_is_ignored() {
-        let mut app = app_with_workflow("p", WorkflowMode::Standard);
         app.handle_tui_event(TuiEvent::TickFired {
             workflow_name: "nonexistent".into(),
         });
-        // Should not crash, and "p" should have no logs
+        // Tick events are silently ignored — no log lines.
         assert!(app.workflows[0].logs.is_empty());
     }
 
@@ -1857,9 +1828,8 @@ mod tests {
             pr_url: Some("https://github.com/o/r/pull/99".into()),
         });
         assert_eq!(app.workflows[0].status, WorkflowStatus::Success);
-        // tick + run_started + (stage_started + log + stage_completed doesn't log
-        //   on complete) * 4 stages + run_completed = a bunch of logs
-        assert!(app.workflows[0].logs.len() >= 6);
+        // run_started + (stage_started + log) * 4 stages + run_completed
+        assert!(app.workflows[0].logs.len() >= 5);
     }
 
     // ── Keyboard input ────────────────────────────────────────────────────
