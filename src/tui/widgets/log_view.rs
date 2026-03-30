@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::app::{App, LogEntryKind, Panel};
+use crate::tui::app::{total_entry_rows, App, LogEntryKind, Panel};
 use crate::tui::ui::{BG_HEADER, BG_LOGS};
 
 /// Highlight background for selected log lines.
@@ -108,15 +108,8 @@ fn draw_logs_pretty(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowStat
     let visible_height = area.height as usize;
     let max_width = area.width.saturating_sub(2) as usize;
 
-    // Calculate total rows including blank separators between different kinds.
     let entries = &wf.log_entries;
-    let mut total_rows = 0usize;
-    for (i, entry) in entries.iter().enumerate() {
-        total_rows += entry.row_count();
-        if i + 1 < entries.len() && entries[i].kind != entries[i + 1].kind {
-            total_rows += 1; // blank separator
-        }
-    }
+    let total_rows = total_entry_rows(entries);
 
     // Determine the row offset for scrolling.
     let start_offset = if app.log_scroll == 0 {

@@ -1073,9 +1073,11 @@ impl App {
             return;
         }
 
-        // Calculate total rows and determine which entries are visible.
-        let total_rows: usize = wf.log_entries.iter().map(|e| e.row_count()).sum::<usize>()
-            + wf.log_entries.len().saturating_sub(1); // blank separators
+        let entries = &wf.log_entries;
+
+        // Calculate total rows including blank separators between different kinds
+        // (must match the rendering logic exactly).
+        let total_rows = total_entry_rows(entries);
         let visible_height = log_area.height as usize;
 
         let start_row_offset = if self.log_scroll == 0 {
@@ -1091,10 +1093,10 @@ impl App {
         let mut accum = 0usize;
         let mut target_idx = None;
 
-        for (i, entry) in wf.log_entries.iter().enumerate() {
+        for (i, entry) in entries.iter().enumerate() {
             let entry_rows = entry.row_count();
             if click_offset >= accum && click_offset < accum + entry_rows {
-                // Only expandable entries respond to clicks.
+                // All expandable entries respond to clicks.
                 match entry.kind {
                     LogEntryKind::Thought if entry.lines.len() > 4 => {
                         target_idx = Some(i);
@@ -1105,15 +1107,25 @@ impl App {
                     LogEntryKind::ConsolidatedTools => {
                         target_idx = Some(i);
                     }
+                    // Already-expanded entries can be collapsed by clicking too.
+                    LogEntryKind::Thought if entry.expanded => {
+                        target_idx = Some(i);
+                    }
+                    LogEntryKind::ToolCall if entry.expanded => {
+                        target_idx = Some(i);
+                    }
                     _ => {}
                 }
                 break;
             }
-            accum += entry_rows + 1; // +1 for separator
+            accum += entry_rows;
+            // Blank separator between entries of different kinds.
+            if i + 1 < entries.len() && entries[i].kind != entries[i + 1].kind {
+                accum += 1;
+            }
         }
 
         if let Some(idx) = target_idx {
-            // Need to get the mutable reference separately.
             let wf_name = self.workflows[self.selected].name.clone();
             if let Some(wf) = self.workflows.iter_mut().find(|w| w.name == wf_name) {
                 wf.log_entries[idx].expanded = !wf.log_entries[idx].expanded;
@@ -1150,6 +1162,20 @@ impl App {
     fn find_workflow_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
         self.workflows.iter_mut().find(|w| w.name == name)
     }
+}
+
+/// Calculate the total screen rows for a list of log entries,
+/// including blank separators between entries of different kinds.
+/// Must match the rendering logic in `draw_logs_pretty` exactly.
+pub fn total_entry_rows(entries: &[LogEntry]) -> usize {
+    let mut total = 0usize;
+    for (i, entry) in entries.iter().enumerate() {
+        total += entry.row_count();
+        if i + 1 < entries.len() && entries[i].kind != entries[i + 1].kind {
+            total += 1; // blank separator
+        }
+    }
+    total
 }
 
 /// Rebuild the structured `log_entries` from the flat `logs` list.
