@@ -57,6 +57,62 @@ pub enum StageStatus {
     Failed,
 }
 
+/// A structured log entry for pretty mode rendering.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    /// What kind of entry this is.
+    pub kind: LogEntryKind,
+    /// The raw log lines that make up this entry.
+    pub lines: Vec<LogLine>,
+    /// Whether the user has expanded this entry.
+    pub expanded: bool,
+}
+
+impl LogEntry {
+    /// Number of visible screen rows this entry occupies.
+    pub fn row_count(&self) -> usize {
+        match self.kind {
+            LogEntryKind::Thought => {
+                if self.expanded || self.lines.len() <= 4 {
+                    self.lines.len()
+                } else {
+                    5 // 4 lines + "[…] click to expand"
+                }
+            }
+            LogEntryKind::ToolCall => {
+                if self.expanded {
+                    self.lines.len() // tool + result lines
+                } else {
+                    1 // just the tool line
+                }
+            }
+            LogEntryKind::ConsolidatedTools => {
+                if self.expanded {
+                    // Each tool call shows 1 line (result still hidden).
+                    let tool_count = self.lines.iter().filter(|l| l.stage == "tool").count();
+                    tool_count
+                } else {
+                    2 // last tool line + "[+N] N consolidated"
+                }
+            }
+            LogEntryKind::System => 1,
+        }
+    }
+}
+
+/// The kind of a log entry — determines rendering behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogEntryKind {
+    /// Agent thinking text (multi-line, shows first 4 lines collapsed).
+    Thought,
+    /// A single tool call, optionally with its result.
+    ToolCall,
+    /// A group of 3+ consecutive tool calls, consolidated.
+    ConsolidatedTools,
+    /// Stage transition, executor message, scheduler, etc.
+    System,
+}
+
 /// Per-workflow state tracked by the TUI.
 #[derive(Debug, Clone)]
 pub struct WorkflowState {
@@ -78,6 +134,8 @@ pub struct WorkflowState {
     pub run_id: Option<String>,
     /// Log lines for this workflow.
     pub logs: Vec<LogLine>,
+    /// Structured log entries for pretty mode rendering.
+    pub log_entries: Vec<LogEntry>,
     /// Whether this workflow is enabled (cron ticks are skipped when disabled).
     pub enabled: bool,
     /// The item label of the currently running item (for info panel updates).
@@ -214,6 +272,10 @@ pub struct App {
     pub clear_requests: Vec<(String, String)>,
     /// Sender for schedule update commands to the cron runner.
     pub schedule_tx: Option<ScheduleUpdateSender>,
+    /// Whether pretty log mode is enabled.
+    pub pretty_logs: bool,
+    /// Mouse down position for click vs drag detection.
+    pub mouse_down_pos: Option<(u16, u16)>,
 }
 
 impl Default for App {
@@ -244,6 +306,8 @@ impl App {
             workflow_items: HashMap::new(),
             clear_requests: Vec::new(),
             schedule_tx: None,
+            pretty_logs: true,
+            mouse_down_pos: None,
         }
     }
 
@@ -268,6 +332,8 @@ impl App {
 
     /// Process a TUI event and update state accordingly.
     pub fn handle_tui_event(&mut self, event: TuiEvent) {
+        let mut dirty_workflow: Option<String> = None;
+
         match event {
             TuiEvent::WorkflowRegistered {
                 name,
@@ -293,6 +359,7 @@ impl App {
                     status,
                     run_id: None,
                     logs: Vec::new(),
+                    log_entries: Vec::new(),
                     enabled,
                     current_item_label: None,
                 });
@@ -335,6 +402,8 @@ impl App {
                     });
                 }
 
+                dirty_workflow = Some(workflow_name);
+
                 // Auto-scroll to bottom when a run starts for the selected workflow.
                 self.log_scroll = 0;
             }
@@ -354,6 +423,7 @@ impl App {
                         message: format!("Stage started: {}", stage_name),
                     });
                 }
+                dirty_workflow = Some(workflow_name);
             }
 
             TuiEvent::StageCompleted {
@@ -384,6 +454,7 @@ impl App {
                         message: error,
                     });
                 }
+                dirty_workflow = Some(workflow_name);
             }
 
             TuiEvent::LogMessage {
@@ -400,6 +471,7 @@ impl App {
                         message,
                     });
                 }
+                dirty_workflow = Some(workflow_name);
             }
 
             TuiEvent::RunCompleted {
@@ -441,6 +513,8 @@ impl App {
                     });
                 }
 
+                dirty_workflow = Some(workflow_name.clone());
+
                 // Update info panel item status.
                 if let Some(ref label) = item_label {
                     let new_status = if success {
@@ -470,6 +544,11 @@ impl App {
             TuiEvent::Shutdown => {
                 self.should_quit = true;
             }
+        }
+
+        // Rebuild structured log entries if any workflow's logs changed.
+        if let Some(name) = dirty_workflow {
+            self.rebuild_entries_for(&name);
         }
     }
 
@@ -676,6 +755,7 @@ impl App {
                     self.select_info_panel_item(event.row);
                 }
 
+                self.mouse_down_pos = Some((event.column, event.row));
                 self.selection = TextSelection {
                     active: true,
                     panel: Some(panel),
@@ -687,7 +767,6 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.selection.active {
-                    // Clamp drag to the panel where the selection started.
                     let panel_rect = match self.selection.panel {
                         Some(Panel::Logs) => &self.layout.logs,
                         Some(Panel::Sidebar) => &self.layout.sidebar,
@@ -701,10 +780,28 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.selection.active {
+                let is_click = self
+                    .mouse_down_pos
+                    .map(|(dx, dy)| {
+                        let dist = (event.column as i32 - dx as i32).unsigned_abs()
+                            + (event.row as i32 - dy as i32).unsigned_abs();
+                        dist < 3
+                    })
+                    .unwrap_or(false);
+
+                if is_click && self.pretty_logs {
+                    // Click: toggle expand on the entry at this row.
+                    let panel = self.layout.hit_test(event.column, event.row);
+                    if panel == Panel::Logs {
+                        self.toggle_entry_at_row(event.row);
+                    }
+                } else if self.selection.active {
+                    // Drag: copy selection.
                     self.copy_selection_to_clipboard();
-                    self.selection.active = false;
                 }
+
+                self.selection.active = false;
+                self.mouse_down_pos = None;
             }
             MouseEventKind::ScrollUp => {
                 self.log_scroll = self.log_scroll.saturating_add(3);
@@ -960,9 +1057,190 @@ impl App {
             .unwrap_or(empty)
     }
 
+    /// Toggle expand/collapse on the log entry at a given screen row.
+    fn toggle_entry_at_row(&mut self, row: u16) {
+        let wf = match self.selected_workflow() {
+            Some(wf) => wf,
+            None => return,
+        };
+
+        if wf.log_entries.is_empty() {
+            return;
+        }
+
+        let log_area = &self.layout.logs;
+        if row < log_area.y || row >= log_area.y + log_area.height {
+            return;
+        }
+
+        // Calculate total rows and determine which entries are visible.
+        let total_rows: usize = wf.log_entries.iter().map(|e| e.row_count()).sum::<usize>()
+            + wf.log_entries.len().saturating_sub(1); // blank separators
+        let visible_height = log_area.height as usize;
+
+        let start_row_offset = if self.log_scroll == 0 {
+            total_rows.saturating_sub(visible_height)
+        } else {
+            total_rows
+                .saturating_sub(visible_height)
+                .saturating_sub(self.log_scroll)
+        };
+
+        // Walk entries to find which one the clicked row belongs to.
+        let click_offset = start_row_offset + (row - log_area.y) as usize;
+        let mut accum = 0usize;
+        let mut target_idx = None;
+
+        for (i, entry) in wf.log_entries.iter().enumerate() {
+            let entry_rows = entry.row_count();
+            if click_offset >= accum && click_offset < accum + entry_rows {
+                // Only expandable entries respond to clicks.
+                match entry.kind {
+                    LogEntryKind::Thought if entry.lines.len() > 4 => {
+                        target_idx = Some(i);
+                    }
+                    LogEntryKind::ToolCall if entry.lines.len() > 1 => {
+                        target_idx = Some(i);
+                    }
+                    LogEntryKind::ConsolidatedTools => {
+                        target_idx = Some(i);
+                    }
+                    _ => {}
+                }
+                break;
+            }
+            accum += entry_rows + 1; // +1 for separator
+        }
+
+        if let Some(idx) = target_idx {
+            // Need to get the mutable reference separately.
+            let wf_name = self.workflows[self.selected].name.clone();
+            if let Some(wf) = self.workflows.iter_mut().find(|w| w.name == wf_name) {
+                wf.log_entries[idx].expanded = !wf.log_entries[idx].expanded;
+            }
+        }
+    }
+
+    /// Rebuild log entries for a workflow after its logs have changed.
+    fn rebuild_entries_for(&mut self, workflow_name: &str) {
+        if self.pretty_logs {
+            if let Some(wf) = self.workflows.iter_mut().find(|w| w.name == workflow_name) {
+                wf.log_entries = rebuild_log_entries(&wf.logs);
+            }
+        }
+    }
+
     fn find_workflow_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
         self.workflows.iter_mut().find(|w| w.name == name)
     }
+}
+
+/// Rebuild the structured `log_entries` from the flat `logs` list.
+///
+/// Groups consecutive same-type log lines into structured entries:
+/// - Consecutive "thought"/"reflect" lines → single `Thought` entry
+/// - "tool" + "result" pairs → `ToolCall` entries
+/// - 3+ consecutive `ToolCall`s → `ConsolidatedTools` entry
+/// - Everything else → `System` entries
+pub fn rebuild_log_entries(logs: &[LogLine]) -> Vec<LogEntry> {
+    if logs.is_empty() {
+        return Vec::new();
+    }
+
+    // Phase 1: Build raw entries (tool+result pairs, thought groups, system).
+    let mut raw_entries: Vec<LogEntry> = Vec::new();
+    let mut i = 0;
+
+    while i < logs.len() {
+        let log = &logs[i];
+        match log.stage.as_str() {
+            "thought" | "reflect" => {
+                // Collect consecutive thought/reflect lines into one Thought entry.
+                let mut lines = vec![log.clone()];
+                i += 1;
+                while i < logs.len()
+                    && (logs[i].stage == "thought" || logs[i].stage == "reflect")
+                {
+                    lines.push(logs[i].clone());
+                    i += 1;
+                }
+                raw_entries.push(LogEntry {
+                    kind: LogEntryKind::Thought,
+                    lines,
+                    expanded: false,
+                });
+            }
+            "tool" => {
+                // A tool line, possibly followed by a result line.
+                let mut lines = vec![log.clone()];
+                i += 1;
+                if i < logs.len() && logs[i].stage == "result" {
+                    lines.push(logs[i].clone());
+                    i += 1;
+                }
+                raw_entries.push(LogEntry {
+                    kind: LogEntryKind::ToolCall,
+                    lines,
+                    expanded: false,
+                });
+            }
+            "result" => {
+                // Orphaned result line (no preceding tool) — treat as system.
+                raw_entries.push(LogEntry {
+                    kind: LogEntryKind::System,
+                    lines: vec![log.clone()],
+                    expanded: false,
+                });
+                i += 1;
+            }
+            _ => {
+                raw_entries.push(LogEntry {
+                    kind: LogEntryKind::System,
+                    lines: vec![log.clone()],
+                    expanded: false,
+                });
+                i += 1;
+            }
+        }
+    }
+
+    // Phase 2: Consolidate 3+ consecutive ToolCall entries.
+    let mut entries: Vec<LogEntry> = Vec::new();
+    let mut j = 0;
+
+    while j < raw_entries.len() {
+        if raw_entries[j].kind == LogEntryKind::ToolCall {
+            // Count consecutive ToolCall entries.
+            let start = j;
+            while j < raw_entries.len() && raw_entries[j].kind == LogEntryKind::ToolCall {
+                j += 1;
+            }
+            let count = j - start;
+
+            if count >= 3 {
+                // Consolidate into a single ConsolidatedTools entry.
+                let mut all_lines: Vec<LogLine> = Vec::new();
+                for entry in &raw_entries[start..j] {
+                    all_lines.extend(entry.lines.iter().cloned());
+                }
+                entries.push(LogEntry {
+                    kind: LogEntryKind::ConsolidatedTools,
+                    lines: all_lines,
+                    expanded: false,
+                });
+            } else {
+                // Keep individual ToolCall entries.
+                for entry in raw_entries[start..j].iter() {
+                    entries.push(entry.clone());
+                }
+            }
+        } else {
+            entries.push(raw_entries[j].clone());
+            j += 1;
+        }
+    }
+
+    entries
 }
 
 /// Open a URL in the system's default browser.
@@ -1277,6 +1555,12 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     let disabled_workflows = Arc::new(Mutex::new(disabled));
 
     // Capture workflow info before config is moved into the cron runner.
+    let pretty_logs = config
+        .logging
+        .as_ref()
+        .and_then(|l| l.pretty)
+        .unwrap_or(true);
+
     let workflow_infos: Vec<(String, WorkflowMode)> = config
         .workflows
         .iter()
@@ -1326,6 +1610,7 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
 
     let mut app = App::with_session(sess, project_root.clone(), disabled_workflows);
     app.schedule_tx = Some(schedule_tx);
+    app.pretty_logs = pretty_logs;
 
     // Load historical item data from stores so the info panel has data
     // before the first cron tick.
@@ -2832,5 +3117,195 @@ mod tests {
         assert_eq!(extract_item_key("#42"), "42");
         assert_eq!(extract_item_key("PR #12050"), "pr-12050");
         assert_eq!(extract_item_key("ENG-42"), "ENG-42");
+    }
+
+    // ── Pretty log mode ───────────────────────────────────────────────────
+
+    fn make_log(stage: &str, msg: &str) -> LogLine {
+        LogLine {
+            level: "info".into(),
+            stage: stage.into(),
+            message: msg.into(),
+        }
+    }
+
+    #[test]
+    fn test_rebuild_groups_consecutive_thoughts() {
+        let logs = vec![
+            make_log("thought", "line 1"),
+            make_log("thought", "line 2"),
+            make_log("thought", "line 3"),
+        ];
+        let entries = rebuild_log_entries(&logs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, LogEntryKind::Thought);
+        assert_eq!(entries[0].lines.len(), 3);
+    }
+
+    #[test]
+    fn test_rebuild_pairs_tool_and_result() {
+        let logs = vec![
+            make_log("tool", "Read(\"src/main.rs\")"),
+            make_log("result", "fn main() {}"),
+        ];
+        let entries = rebuild_log_entries(&logs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, LogEntryKind::ToolCall);
+        assert_eq!(entries[0].lines.len(), 2);
+    }
+
+    #[test]
+    fn test_rebuild_consolidates_3_plus_tools() {
+        let logs = vec![
+            make_log("tool", "Read a"),
+            make_log("result", "..."),
+            make_log("tool", "Read b"),
+            make_log("result", "..."),
+            make_log("tool", "Read c"),
+            make_log("result", "..."),
+        ];
+        let entries = rebuild_log_entries(&logs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, LogEntryKind::ConsolidatedTools);
+        assert_eq!(entries[0].lines.len(), 6); // 3 tool + 3 result
+    }
+
+    #[test]
+    fn test_rebuild_no_consolidation_under_3() {
+        let logs = vec![
+            make_log("tool", "Read a"),
+            make_log("result", "..."),
+            make_log("tool", "Read b"),
+            make_log("result", "..."),
+        ];
+        let entries = rebuild_log_entries(&logs);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, LogEntryKind::ToolCall);
+        assert_eq!(entries[1].kind, LogEntryKind::ToolCall);
+    }
+
+    #[test]
+    fn test_rebuild_system_lines_stay_separate() {
+        let logs = vec![
+            make_log("executor", "Run started"),
+            make_log("agent-loop", "Stage started"),
+        ];
+        let entries = rebuild_log_entries(&logs);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, LogEntryKind::System);
+        assert_eq!(entries[1].kind, LogEntryKind::System);
+    }
+
+    #[test]
+    fn test_rebuild_mixed_sequence() {
+        let logs = vec![
+            make_log("executor", "Run started"),
+            make_log("thought", "thinking..."),
+            make_log("tool", "Read a"),
+            make_log("result", "..."),
+            make_log("tool", "Read b"),
+            make_log("result", "..."),
+            make_log("tool", "Read c"),
+            make_log("result", "..."),
+            make_log("thought", "done thinking"),
+        ];
+        let entries = rebuild_log_entries(&logs);
+        assert_eq!(entries.len(), 4); // system, thought, consolidated, thought
+        assert_eq!(entries[0].kind, LogEntryKind::System);
+        assert_eq!(entries[1].kind, LogEntryKind::Thought);
+        assert_eq!(entries[2].kind, LogEntryKind::ConsolidatedTools);
+        assert_eq!(entries[3].kind, LogEntryKind::Thought);
+    }
+
+    #[test]
+    fn test_entry_row_count_thought_collapsed() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: (0..10).map(|i| make_log("thought", &format!("line {}", i))).collect(),
+            expanded: false,
+        };
+        assert_eq!(entry.row_count(), 5); // 4 lines + expand indicator
+    }
+
+    #[test]
+    fn test_entry_row_count_thought_short() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: vec![make_log("thought", "short")],
+            expanded: false,
+        };
+        assert_eq!(entry.row_count(), 1);
+    }
+
+    #[test]
+    fn test_entry_row_count_thought_expanded() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: (0..10).map(|i| make_log("thought", &format!("line {}", i))).collect(),
+            expanded: true,
+        };
+        assert_eq!(entry.row_count(), 10);
+    }
+
+    #[test]
+    fn test_entry_row_count_tool_call_collapsed() {
+        let entry = LogEntry {
+            kind: LogEntryKind::ToolCall,
+            lines: vec![make_log("tool", "Read"), make_log("result", "...")],
+            expanded: false,
+        };
+        assert_eq!(entry.row_count(), 1);
+    }
+
+    #[test]
+    fn test_entry_row_count_tool_call_expanded() {
+        let entry = LogEntry {
+            kind: LogEntryKind::ToolCall,
+            lines: vec![make_log("tool", "Read"), make_log("result", "...")],
+            expanded: true,
+        };
+        assert_eq!(entry.row_count(), 2);
+    }
+
+    #[test]
+    fn test_entry_row_count_consolidated_collapsed() {
+        let entry = LogEntry {
+            kind: LogEntryKind::ConsolidatedTools,
+            lines: vec![
+                make_log("tool", "a"), make_log("result", "..."),
+                make_log("tool", "b"), make_log("result", "..."),
+                make_log("tool", "c"), make_log("result", "..."),
+            ],
+            expanded: false,
+        };
+        assert_eq!(entry.row_count(), 2); // last tool + count line
+    }
+
+    #[test]
+    fn test_entry_row_count_consolidated_expanded() {
+        let entry = LogEntry {
+            kind: LogEntryKind::ConsolidatedTools,
+            lines: vec![
+                make_log("tool", "a"), make_log("result", "..."),
+                make_log("tool", "b"), make_log("result", "..."),
+                make_log("tool", "c"), make_log("result", "..."),
+            ],
+            expanded: true,
+        };
+        assert_eq!(entry.row_count(), 3); // 3 tool lines (results hidden)
+    }
+
+    #[test]
+    fn test_rebuild_empty_logs() {
+        let entries = rebuild_log_entries(&[]);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_rebuild_orphaned_result() {
+        let logs = vec![make_log("result", "orphaned")];
+        let entries = rebuild_log_entries(&logs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, LogEntryKind::System);
     }
 }
