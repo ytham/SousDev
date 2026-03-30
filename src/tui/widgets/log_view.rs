@@ -331,8 +331,7 @@ fn render_consolidated(
                     Span::styled(" ", rs),
                     Span::styled(
                         format!(
-                            "[+{}] {} more tool call{} — click to expand",
-                            count,
+                            "[+] {} more tool call{} — click to expand",
                             count,
                             if count == 1 { "" } else { "s" }
                         ),

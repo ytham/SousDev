@@ -1125,7 +1125,24 @@ impl App {
     fn rebuild_entries_for(&mut self, workflow_name: &str) {
         if self.pretty_logs {
             if let Some(wf) = self.workflows.iter_mut().find(|w| w.name == workflow_name) {
-                wf.log_entries = rebuild_log_entries(&wf.logs);
+                let old_entries = &wf.log_entries;
+                let mut new_entries = rebuild_log_entries(&wf.logs);
+
+                // Preserve expanded state from old entries.  Match by index —
+                // entries only grow (new ones are appended), so old[i] and
+                // new[i] correspond to the same logical entry for all i < old.len().
+                for (i, new_entry) in new_entries.iter_mut().enumerate() {
+                    if let Some(old_entry) = old_entries.get(i) {
+                        // If the entry kind matches and it was expanded, keep it expanded.
+                        // Kind can change (e.g. 2 ToolCalls become ConsolidatedTools
+                        // when a 3rd arrives) — only preserve if kind is the same.
+                        if old_entry.kind == new_entry.kind && old_entry.expanded {
+                            new_entry.expanded = true;
+                        }
+                    }
+                }
+
+                wf.log_entries = new_entries;
             }
         }
     }
@@ -3307,5 +3324,65 @@ mod tests {
         let entries = rebuild_log_entries(&logs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, LogEntryKind::System);
+    }
+
+    #[test]
+    fn test_rebuild_preserves_expanded_state() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.pretty_logs = true;
+
+        // Add 3 tool calls to trigger consolidation.
+        for name in &["Read a", "Read b", "Read c"] {
+            app.workflows[0].logs.push(make_log("tool", name));
+            app.workflows[0].logs.push(make_log("result", "..."));
+        }
+        app.rebuild_entries_for("p");
+        assert_eq!(app.workflows[0].log_entries.len(), 1);
+        assert_eq!(app.workflows[0].log_entries[0].kind, LogEntryKind::ConsolidatedTools);
+        assert!(!app.workflows[0].log_entries[0].expanded);
+
+        // User expands the consolidated block.
+        app.workflows[0].log_entries[0].expanded = true;
+
+        // A 4th tool call arrives.
+        app.workflows[0].logs.push(make_log("tool", "Read d"));
+        app.workflows[0].logs.push(make_log("result", "..."));
+        app.rebuild_entries_for("p");
+
+        // The consolidated block should still be expanded.
+        assert_eq!(app.workflows[0].log_entries.len(), 1);
+        assert_eq!(app.workflows[0].log_entries[0].kind, LogEntryKind::ConsolidatedTools);
+        assert!(app.workflows[0].log_entries[0].expanded);
+        // And it should now have 4 tool calls.
+        let tool_count = app.workflows[0].log_entries[0]
+            .lines
+            .iter()
+            .filter(|l| l.stage == "tool")
+            .count();
+        assert_eq!(tool_count, 4);
+    }
+
+    #[test]
+    fn test_rebuild_preserves_expanded_thought() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        app.pretty_logs = true;
+
+        // Add a long thought block.
+        for i in 0..8 {
+            app.workflows[0].logs.push(make_log("thought", &format!("line {}", i)));
+        }
+        app.rebuild_entries_for("p");
+        assert_eq!(app.workflows[0].log_entries[0].kind, LogEntryKind::Thought);
+
+        // User expands it.
+        app.workflows[0].log_entries[0].expanded = true;
+
+        // A new system log arrives (different kind, so a new entry is added).
+        app.workflows[0].logs.push(make_log("executor", "Run completed"));
+        app.rebuild_entries_for("p");
+
+        // The thought block should still be expanded.
+        assert!(app.workflows[0].log_entries[0].expanded);
+        assert_eq!(app.workflows[0].log_entries.len(), 2);
     }
 }
