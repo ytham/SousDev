@@ -184,7 +184,7 @@ pub async fn run_external_agent_loop(
         .cwd
         .as_deref()
         .unwrap_or_else(|| ctx.workspace_dir.to_str().unwrap_or("."));
-    let timeout_secs = options.timeout_secs.unwrap_or(600);
+    let timeout_secs = options.timeout_secs.unwrap_or(900); // 15 minutes default
 
     let mut args = (adapter.build_args)(options);
 
@@ -238,39 +238,95 @@ pub async fn run_external_agent_loop(
 
     let mut stdout_lines: Vec<String> = Vec::new();
     let mut trajectory: Vec<TrajectoryStep> = Vec::new();
+    let mut saw_commit = false;
 
-    let stream_and_wait = async {
-        if let Some(stdout) = stdout_handle {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                // Parse and log each line as it arrives (real-time TUI updates).
-                if adapter.name == "claude" {
-                    stream_parse_claude_line(
-                        &line,
-                        &mut trajectory,
-                        ctx,
-                    )
-                    .await;
+    // Stream stdout line-by-line. Track whether the agent has committed
+    // changes so we can use a shorter grace period if it hangs.
+    if let Some(stdout) = stdout_handle {
+        let mut reader = BufReader::new(stdout).lines();
+        let stream_start = std::time::Instant::now();
+
+        loop {
+            let remaining = timeout.checked_sub(stream_start.elapsed()).unwrap_or_default();
+            // If we've seen a commit, give the agent only 60s more to finish.
+            let effective_timeout = if saw_commit {
+                remaining.min(Duration::from_secs(60))
+            } else {
+                remaining
+            };
+
+            match tokio::time::timeout(effective_timeout, reader.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if adapter.name == "claude" {
+                        stream_parse_claude_line(&line, &mut trajectory, ctx).await;
+                    }
+                    // Detect git commit in tool calls.
+                    if line.contains("git commit") || line.contains("git add") {
+                        saw_commit = true;
+                    }
+                    stdout_lines.push(line);
                 }
-                stdout_lines.push(line);
+                Ok(Ok(None)) => break,    // EOF — process closed stdout.
+                Ok(Err(_)) => break,      // Read error.
+                Err(_) => break,          // Timeout — stop reading.
             }
         }
-        child.wait().await
+    }
+
+    // Wait for the process to exit (short timeout since stdout is already closed).
+    let (exit_code, success) = match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+        Ok(Ok(status)) => (status.code().unwrap_or(1), status.success()),
+        _ => {
+            // Process didn't exit cleanly — kill it and check for changes.
+            let _ = child.kill().await;
+
+            ctx.logger.info(&format!(
+                "{} did not exit cleanly — checking workspace for changes",
+                adapter.name
+            ));
+            if let Some(ref log) = ctx.workflow_log {
+                let _ = log
+                    .log("warn", "agent", "Agent did not exit cleanly — checking for changes")
+                    .await;
+            }
+
+            let has_uncommitted = tokio::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(cwd)
+                .output()
+                .await
+                .ok()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+
+            let has_commits = tokio::process::Command::new("git")
+                .args(["log", "--oneline", "origin/HEAD..HEAD"])
+                .current_dir(cwd)
+                .output()
+                .await
+                .ok()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+
+            if has_uncommitted || has_commits {
+                ctx.logger.info("Agent timed out but workspace has changes — treating as success");
+                if let Some(ref log) = ctx.workflow_log {
+                    let _ = log
+                        .log("info", "agent", "Changes detected — continuing pipeline")
+                        .await;
+                }
+                (0, true)
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{} timed out after {}s with no workspace changes",
+                    adapter.name,
+                    timeout_secs
+                ));
+            }
+        }
     };
 
-    let status = tokio::time::timeout(timeout, stream_and_wait)
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "{} timed out after {}s — killing process",
-                adapter.name,
-                timeout_secs
-            )
-        })??;
-
     let duration_ms = start.elapsed().as_millis() as u64;
-    let exit_code = status.code().unwrap_or(1);
-    let success = status.success();
 
     // Read any remaining stderr.
     let stderr_raw = if let Some(mut stderr) = child.stderr.take() {
