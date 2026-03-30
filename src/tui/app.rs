@@ -84,10 +84,12 @@ impl LogEntry {
     pub fn row_count(&self) -> usize {
         match self.kind {
             LogEntryKind::Thought => {
-                if self.expanded || self.lines.len() <= 4 {
+                if self.lines.len() <= 1 {
+                    1 // Single-line thought — always fully shown.
+                } else if self.expanded {
                     self.lines.len()
                 } else {
-                    5 // 4 lines + "[…] click to expand"
+                    2 // First line + "[…] N more lines" indicator.
                 }
             }
             LogEntryKind::ToolCall => {
@@ -1311,17 +1313,13 @@ impl App {
             if click_offset >= accum && click_offset < accum + entry_rows {
                 // All expandable entries respond to clicks.
                 match entry.kind {
-                    LogEntryKind::Thought if entry.lines.len() > 4 => {
+                    LogEntryKind::Thought if entry.lines.len() > 1 => {
                         target_idx = Some(i);
                     }
                     LogEntryKind::ToolCall if entry.lines.len() > 1 => {
                         target_idx = Some(i);
                     }
                     LogEntryKind::ConsolidatedTools => {
-                        target_idx = Some(i);
-                    }
-                    // Already-expanded entries can be collapsed by clicking too.
-                    LogEntryKind::Thought if entry.expanded => {
                         target_idx = Some(i);
                     }
                     LogEntryKind::ToolCall if entry.expanded => {
@@ -3597,17 +3595,27 @@ mod tests {
             lines: (0..10).map(|i| make_log("thought", &format!("line {}", i))).collect(),
             expanded: false,
         };
-        assert_eq!(entry.row_count(), 5); // 4 lines + expand indicator
+        assert_eq!(entry.row_count(), 2); // first line + "[…] N more" indicator
     }
 
     #[test]
-    fn test_entry_row_count_thought_short() {
+    fn test_entry_row_count_thought_single_line() {
         let entry = LogEntry {
             kind: LogEntryKind::Thought,
             lines: vec![make_log("thought", "short")],
             expanded: false,
         };
-        assert_eq!(entry.row_count(), 1);
+        assert_eq!(entry.row_count(), 1); // single line, always fully shown
+    }
+
+    #[test]
+    fn test_entry_row_count_thought_two_lines_collapsed() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: vec![make_log("thought", "a"), make_log("thought", "b")],
+            expanded: false,
+        };
+        assert_eq!(entry.row_count(), 2); // first line + "[…] 1 more line"
     }
 
     #[test]

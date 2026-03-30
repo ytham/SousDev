@@ -229,34 +229,52 @@ fn render_thought(
     ctx: &RenderCtx,
     screen_y_base: usize,
 ) {
-    let show_lines = if entry.expanded || entry.lines.len() <= 4 {
-        entry.lines.len()
-    } else {
-        4
-    };
-
-    for (j, log) in entry.lines.iter().take(show_lines).enumerate() {
-        let screen_row = screen_y_base + j;
-        if screen_row >= ctx.area.y as usize + ctx.area.height as usize {
-            break;
+    if entry.lines.len() <= 1 {
+        // Single-line thought — show fully, no expand/collapse.
+        if let Some(log) = entry.lines.first() {
+            let rs = ctx.row_style(screen_y_base);
+            let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
+            lines.push(Line::from(vec![
+                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
+                Span::styled(format!(" {}", msg), rs.fg(Color::White)),
+            ]));
         }
-        let rs = ctx.row_style(screen_row);
-        let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
-        lines.push(Line::from(vec![
-            Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
-            Span::styled(format!(" {}", msg), rs.fg(Color::White)),
-        ]));
-    }
-
-    if !entry.expanded && entry.lines.len() > 4 {
-        let remaining = entry.lines.len() - 4;
-        let screen_row = screen_y_base + 4;
+    } else if entry.expanded {
+        // Expanded — show all lines.
+        for (j, log) in entry.lines.iter().enumerate() {
+            let screen_row = screen_y_base + j;
+            if screen_row >= ctx.area.y as usize + ctx.area.height as usize {
+                break;
+            }
+            let rs = ctx.row_style(screen_row);
+            let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
+            lines.push(Line::from(vec![
+                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
+                Span::styled(format!(" {}", msg), rs.fg(Color::White)),
+            ]));
+        }
+    } else {
+        // Collapsed — show first line + expand indicator.
+        if let Some(log) = entry.lines.first() {
+            let rs = ctx.row_style(screen_y_base);
+            let msg = truncate_msg(&log.message, ctx.max_width.saturating_sub(2));
+            lines.push(Line::from(vec![
+                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
+                Span::styled(format!(" {}", msg), rs.fg(Color::White)),
+            ]));
+        }
+        let remaining = entry.lines.len() - 1;
+        let screen_row = screen_y_base + 1;
         if screen_row < ctx.area.y as usize + ctx.area.height as usize {
             let rs = ctx.row_style(screen_row);
             lines.push(Line::from(vec![
                 Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
                 Span::styled(
-                    format!(" […] {} more lines — click to expand", remaining),
+                    format!(
+                        " […] {} more line{} — click to expand",
+                        remaining,
+                        if remaining == 1 { "" } else { "s" }
+                    ),
                     rs.fg(Color::DarkGray),
                 ),
             ]));
