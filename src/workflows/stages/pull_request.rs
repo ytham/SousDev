@@ -61,6 +61,8 @@ impl Stage for PullRequestStage {
         }
 
         // ── 3. Check whether there are new commits beyond base ───────────────
+        // In shallow clones, rev-list may fail or return 0 even when there
+        // are real commits.  Fall back to checking if there's a diff.
         let range = format!("{}..HEAD", base_branch);
         let commit_count_str = exec_git(
             &["rev-list", "--count", &range],
@@ -70,9 +72,19 @@ impl Stage for PullRequestStage {
         .unwrap_or_else(|_| "0".to_string());
         let commit_count: u64 = commit_count_str.trim().parse().unwrap_or(0);
         if commit_count == 0 {
-            ctx.logger
-                .info("No new commits beyond base branch — skipping PR creation.");
-            return Ok(());
+            // Double-check with diff — shallow clones may lack history for rev-list.
+            let diff = exec_git(
+                &["diff", "--stat", &format!("origin/{}", base_branch), "HEAD"],
+                dir,
+            )
+            .await
+            .unwrap_or_default();
+            if diff.trim().is_empty() {
+                ctx.logger
+                    .info("No new commits or changes beyond base branch — skipping PR creation.");
+                return Ok(());
+            }
+            ctx.logger.info("rev-list shows 0 commits but diff exists — proceeding with PR");
         }
 
         // ── 4. Rebase on remote branch if it exists ─────────────────────────
@@ -95,18 +107,33 @@ impl Stage for PullRequestStage {
 
         // ── 5. Push ──────────────────────────────────────────────────────────
         ctx.logger.info(&format!("Pushing branch: {}", branch));
-        match exec_git(&["push", "-u", "origin", branch], dir).await {
-            Ok(_) => {}
-            Err(_) => {
-                // Push rejected — force-push since SousDev exclusively owns
-                // these branches.
-                ctx.logger.info("Push rejected — force-pushing");
+        let push_result = exec_git(&["push", "-u", "origin", branch], dir).await;
+        match push_result {
+            Ok(output) => {
+                ctx.logger.info(&format!("Push succeeded: {}", output.trim()));
+            }
+            Err(e) => {
+                ctx.logger.info(&format!("Push failed ({}), force-pushing", e));
                 exec_git(
                     &["push", "--force", "-u", "origin", branch],
                     dir,
                 )
                 .await?;
             }
+        }
+
+        // Verify the branch was actually pushed.
+        let ls_remote = exec_git(
+            &["ls-remote", "--heads", "origin", branch],
+            dir,
+        )
+        .await
+        .unwrap_or_default();
+        if ls_remote.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Branch {} was not pushed to the remote — ls-remote returned empty",
+                branch
+            ));
         }
 
         // ── 6. Check for existing open PR on this branch ─────────────────────

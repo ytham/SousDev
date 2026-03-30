@@ -664,6 +664,14 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let panel = self.layout.hit_test(event.column, event.row);
 
+                // Click outside a floating panel closes it.
+                if self.info_panel_open && panel != Panel::InfoPanel {
+                    self.info_panel_open = false;
+                }
+                if self.input_mode == InputMode::Command && panel != Panel::None {
+                    self.input_mode = InputMode::Normal;
+                }
+
                 // Click in sidebar: select the clicked workflow.
                 if panel == Panel::Sidebar {
                     if let Some(idx) = self.sidebar_row_to_workflow(event.row) {
@@ -851,13 +859,9 @@ impl App {
         let items = self.selected_items();
         if let Some(item) = items.get(self.info_panel_selected) {
             let url = item.url.clone();
-            if !url.is_empty() {
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(&url).spawn();
-                #[cfg(target_os = "linux")]
-                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-                #[cfg(target_os = "windows")]
-                let _ = std::process::Command::new("cmd").args(["/c", "start", &url]).spawn();
+            // Only open URLs that look like real HTTP(S) links.
+            if url.starts_with("https://") || url.starts_with("http://") {
+                open_url_in_browser(&url);
                 self.show_toast("Opened in browser", Duration::from_secs(3));
             }
         }
@@ -971,6 +975,23 @@ impl App {
     fn find_workflow_mut(&mut self, name: &str) -> Option<&mut WorkflowState> {
         self.workflows.iter_mut().find(|w| w.name == name)
     }
+}
+
+/// Open a URL in the system's default browser.
+///
+/// No-op during tests to prevent `cargo test` from opening real browser tabs.
+fn open_url_in_browser(url: &str) {
+    #[cfg(not(test))]
+    {
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(url).spawn();
+        #[cfg(target_os = "linux")]
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("cmd").args(["/c", "start", url]).spawn();
+    }
+    #[cfg(test)]
+    let _ = url; // Suppress unused variable warning in test builds.
 }
 
 /// Extract a store-compatible item key from an info panel item ID.
