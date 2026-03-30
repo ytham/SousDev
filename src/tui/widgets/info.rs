@@ -1,4 +1,4 @@
-/// Glance pane — compact item status list between Workflows and Log panes.
+/// Info pane — compact item status list between Workflows and Log panes.
 ///
 /// Shows a list of issues/PRs with status badges.  Supports the same
 /// item actions as the Info expanded panel (filter, open URL, clear errors).
@@ -11,8 +11,8 @@ use ratatui::Frame;
 use crate::tui::app::{App, LeftPane};
 use crate::tui::events::ItemStatus;
 
-/// Glance pane background.
-const BG_GLANCE: Color = Color::Rgb(22, 22, 30);
+/// Info pane background.
+const BG_INFO: Color = Color::Rgb(22, 22, 30);
 
 /// Highlighted row background.
 const BG_SELECTED: Color = Color::Rgb(36, 36, 48);
@@ -20,15 +20,15 @@ const BG_SELECTED: Color = Color::Rgb(36, 36, 48);
 /// Active border color.
 const BORDER_ACTIVE: Color = Color::Rgb(60, 80, 160);
 
-/// Glance pane width in characters.
-pub const GLANCE_WIDTH: u16 = 24;
+/// Info pane width in characters.
+pub const INFO_WIDTH: u16 = 24;
 
 /// Draw the Glance pane.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let bg = Style::default().bg(BG_GLANCE);
-    let is_active = app.active_left_pane == LeftPane::Glance && !app.info_expanded_open;
+    let bg = Style::default().bg(BG_INFO);
+    let is_active = app.active_left_pane == LeftPane::Info && !app.info_expanded_open;
     let border_style = if is_active {
-        Style::default().fg(BORDER_ACTIVE).bg(BG_GLANCE)
+        Style::default().fg(BORDER_ACTIVE).bg(BG_INFO)
     } else {
         bg
     };
@@ -36,7 +36,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     let items = app.selected_items();
-    let selected = app.glance_selected;
+    let selected = app.info_selected;
 
     // "All logs" row.
     let all_active = app.log_filter.is_none();
@@ -103,7 +103,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
             // Truncate title to fit: width - border(1) - ind(1) - badge(4) - marker(1) - id(~8) - spaces(2)
             let id_display = &item.id;
-            let max_title = (GLANCE_WIDTH as usize).saturating_sub(id_display.len() + 10);
+            let max_title = (INFO_WIDTH as usize).saturating_sub(id_display.len() + 10);
             let title = if item.title.len() > max_title && max_title > 1 {
                 format!("{}…", &item.title[..max_title.saturating_sub(1)])
             } else if max_title == 0 {
@@ -136,7 +136,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
         Span::styled(
-            "─".repeat(GLANCE_WIDTH as usize - 2),
+            "─".repeat(INFO_WIDTH as usize - 2),
             bg.fg(Color::DarkGray),
         ),
     ]));

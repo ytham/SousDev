@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::App;
-use crate::tui::widgets::{command_menu, glance, info_expanded, log_view, sidebar};
+use crate::tui::widgets::{command_menu, info, info_expanded, log_view, sidebar};
 
 /// Panel background colors — subtle dark shades to differentiate areas.
 pub const BG_SIDEBAR: Color = Color::Rgb(24, 24, 32);
@@ -23,11 +23,11 @@ pub const BG_GAP: Color = Color::Reset;
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    // Horizontal split: sidebar | gap | glance | gap | main pane.
+    // Horizontal split: sidebar | gap | info | gap | main pane.
     let sidebar_width: u16 = 26;
-    let glance_width: u16 = glance::GLANCE_WIDTH;
+    let info_width: u16 = info::INFO_WIDTH;
     let gap: u16 = 1;
-    let left_total = sidebar_width + gap + glance_width + gap;
+    let left_total = sidebar_width + gap + info_width + gap;
 
     if area.width < left_total + 20 {
         // Terminal too narrow — just show sidebar.
@@ -42,17 +42,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         height: area.height,
     };
 
-    let glance_area = Rect {
+    let info_pane_area = Rect {
         x: area.x + sidebar_width + gap,
         y: area.y,
-        width: glance_width,
+        width: info_width,
         height: area.height,
     };
 
     let main_x = area.x + left_total;
     let main_width = area.width - left_total;
 
-    // Vertical split of main: log pane | 1-char gap | info bar (2 rows).
+    // Vertical split of main: log pane | 1-char gap | status bar (2 rows).
     let info_height: u16 = 2;
     let vgap: u16 = 1;
 
@@ -67,7 +67,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Rect::default()
     };
 
-    let info_area = Rect {
+    let status_bar_area = Rect {
         x: main_x,
         y: area.y + area.height - info_height,
         width: main_width,
@@ -76,9 +76,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Store layout for mouse hit-testing.
     app.layout.sidebar = sidebar_area;
-    app.layout.glance = glance_area;
+    app.layout.info = info_pane_area;
     app.layout.logs = log_area;
-    app.layout.info_bar = info_area;
+    app.layout.status_bar = status_bar_area;
 
     // Info expanded panel rect — left-side floating with margins.
     if !app.info_expanded_open {
@@ -102,11 +102,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     // Draw panels.
     sidebar::draw(f, app, sidebar_area);
-    glance::draw(f, app, glance_area);
+    info::draw(f, app, info_pane_area);
     if log_area.height > 0 {
         log_view::draw_logs(f, app, log_area);
     }
-    log_view::draw_header(f, app, info_area);
+    log_view::draw_status_bar(f, app, status_bar_area);
 
     // Floating overlays (drawn on top).
     info_expanded::draw(f, app);
