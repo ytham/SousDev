@@ -164,9 +164,7 @@ impl WorkspaceManager {
                 .info(&format!("Reusing existing PR workspace: {}", dir.display()));
 
             // Fix workspaces created with --single-branch: reconfigure the
-            // fetch refspec to allow fetching ALL remote branches.  Without
-            // this, `git fetch` only updates the base branch and `gh pr
-            // checkout` fails for any other branch.
+            // fetch refspec to allow fetching ALL remote branches.
             let _ = self
                 .exec(
                     &[
@@ -179,6 +177,13 @@ impl WorkspaceManager {
                 )
                 .await;
 
+            // Hard-reset to a clean state — discard any leftover changes
+            // from a previous PR review run.  PR review workspaces are
+            // ephemeral; there's nothing worth preserving.
+            let _ = self.exec(&["git", "checkout", base_branch], &dir).await;
+            let _ = self.exec(&["git", "reset", "--hard"], &dir).await;
+            let _ = self.exec(&["git", "clean", "-fd"], &dir).await;
+
             // Fetch all remote branches.
             if let Err(e) = self
                 .exec(&["git", "fetch", "--depth=50", "origin"], &dir)
@@ -189,6 +194,14 @@ impl WorkspaceManager {
                     e
                 ));
             }
+
+            // Reset to the latest remote base branch.
+            let _ = self
+                .exec(
+                    &["git", "reset", "--hard", &format!("origin/{}", base_branch)],
+                    &dir,
+                )
+                .await;
         } else {
             let mut read_dir = fs::read_dir(&dir).await?;
             let is_empty = read_dir.next_entry().await?.is_none();
@@ -223,24 +236,32 @@ impl WorkspaceManager {
             .await?;
         }
 
-        // Check out the PR branch via `gh pr checkout`.
+        // Check out the PR branch.
         self.logger.info(&format!(
             "Checking out PR #{} ({})",
             pr.number, pr.head_ref_name
         ));
-        let pr_number_str = pr.number.to_string();
-        self.exec(
-            &[
-                "gh",
-                "pr",
-                "checkout",
-                &pr_number_str,
-                "--repo",
-                &pr.repo,
-            ],
-            &dir,
-        )
-        .await?;
+
+        // Try git checkout directly — more reliable than `gh pr checkout`
+        // in shallow clones with complex refspec configurations.
+        let branch_name = &pr.head_ref_name;
+        let remote_ref = format!("origin/{}", branch_name);
+
+        let checkout_result = self
+            .exec(&["git", "checkout", "-B", branch_name, &remote_ref], &dir)
+            .await;
+
+        if checkout_result.is_err() {
+            // Fallback: try `gh pr checkout` which handles more edge cases
+            // (e.g. forks, renamed branches).
+            self.logger.info("git checkout failed — trying gh pr checkout");
+            let pr_number_str = pr.number.to_string();
+            self.exec(
+                &["gh", "pr", "checkout", &pr_number_str, "--repo", &pr.repo],
+                &dir,
+            )
+            .await?;
+        }
 
         self.logger.info(&format!(
             "PR workspace ready: {}  branch: {}",
