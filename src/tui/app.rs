@@ -1106,6 +1106,118 @@ fn extract_toml_string_value(line: &str) -> Option<String> {
     }
 }
 
+/// Load historical item data from stores into the app's `workflow_items`.
+///
+/// This populates the info panel on startup before the first cron tick
+/// fetches fresh data.  Items are built from the handled-issues, reviewed-PRs,
+/// and PR-response stores.  Failure cooldown items are overlaid with
+/// `Error`/`Cooldown` status.
+async fn load_initial_items(app: &mut App, project_root: &std::path::Path) {
+    use crate::workflows::stores::{
+        FailureCooldownStore, HandledIssueStore, PrResponseStore, PrReviewStore,
+    };
+
+    let issue_store = HandledIssueStore::new(project_root);
+    let review_store = PrReviewStore::new(project_root);
+    let response_store = PrResponseStore::new(project_root);
+    let failure_store = FailureCooldownStore::new(project_root);
+
+    for wf in &app.workflows {
+        let mut items: Vec<ItemSummary> = Vec::new();
+
+        match wf.mode {
+            WorkflowMode::Issues => {
+                // Load handled issues.
+                if let Ok(records) = issue_store.get_all_records(&wf.name).await {
+                    for (num_str, rec) in &records {
+                        let item_key = num_str.clone();
+                        let in_cooldown = failure_store
+                            .is_in_cooldown(&wf.name, &item_key)
+                            .await
+                            .unwrap_or(false);
+                        let status = if in_cooldown {
+                            ItemStatus::Cooldown
+                        } else {
+                            ItemStatus::Success
+                        };
+                        items.push(ItemSummary {
+                            id: format!("#{}", num_str),
+                            title: rec.issue_title.clone(),
+                            url: rec.issue_url.clone(),
+                            status,
+                        });
+                    }
+                }
+            }
+            WorkflowMode::PrReview => {
+                if let Ok(records) = review_store.get_all_records(&wf.name).await {
+                    for rec in records.values() {
+                        let pr_key = format!("pr-{}", rec.pr_number);
+                        let in_cooldown = failure_store
+                            .is_in_cooldown(&wf.name, &pr_key)
+                            .await
+                            .unwrap_or(false);
+                        let status = if in_cooldown {
+                            ItemStatus::Cooldown
+                        } else {
+                            ItemStatus::Reviewed
+                        };
+                        items.push(ItemSummary {
+                            id: format!("PR #{}", rec.pr_number),
+                            title: rec.pr_title.clone(),
+                            url: rec.pr_url.clone(),
+                            status,
+                        });
+                    }
+                }
+            }
+            WorkflowMode::PrResponse => {
+                if let Ok(records) = response_store.get_all_records(&wf.name).await {
+                    for rec in records.values() {
+                        let status = ItemStatus::Success;
+                        items.push(ItemSummary {
+                            id: format!("PR #{}", rec.pr_number),
+                            title: String::new(),
+                            url: rec.pr_url.clone(),
+                            status,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Load failure-cooldown items that don't have a success record yet
+        // (items that failed but were never successfully handled).
+        if let Ok(failures) = failure_store.get_failures_for_workflow(&wf.name).await {
+            let existing_ids: std::collections::HashSet<String> =
+                items.iter().map(|i| extract_item_key(&i.id)).collect();
+            for (item_key, _rec) in failures {
+                if !existing_ids.contains(&item_key) {
+                    // Build a display ID from the key.
+                    let id = if let Some(num) = item_key.strip_prefix("pr-") {
+                        format!("PR #{}", num)
+                    } else {
+                        format!("#{}", item_key)
+                    };
+                    items.push(ItemSummary {
+                        id,
+                        title: "(failed — details on next tick)".into(),
+                        url: String::new(),
+                        status: ItemStatus::Error,
+                    });
+                }
+            }
+        }
+
+        if !items.is_empty() {
+            // Sort by ID for consistent display.
+            items.sort_by(|a, b| a.id.cmp(&b.id));
+            app.workflow_items.insert(wf.name.clone(), items);
+        }
+    }
+}
+
 /// Return the ordered stage names for a given workflow mode.
 fn stages_for_mode(mode: WorkflowMode) -> Vec<String> {
     match mode {
@@ -1178,7 +1290,11 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::with_session(sess, project_root, disabled_workflows);
+    let mut app = App::with_session(sess, project_root.clone(), disabled_workflows);
+
+    // Load historical item data from stores so the info panel has data
+    // before the first cron tick.
+    load_initial_items(&mut app, &project_root).await;
 
     // Main event loop.
     loop {

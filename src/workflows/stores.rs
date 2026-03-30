@@ -1379,6 +1379,27 @@ impl FailureCooldownStore {
         self.write_all(&data).await
     }
 
+    /// Return all failure records for a given workflow.
+    ///
+    /// Returns `(item_key, FailureRecord)` pairs for items whose key starts
+    /// with `workflow_name:`.
+    pub async fn get_failures_for_workflow(
+        &self,
+        workflow_name: &str,
+    ) -> Result<Vec<(String, FailureRecord)>> {
+        let data = self.read_all().await.unwrap_or_default();
+        let prefix = format!("{}:", workflow_name);
+        let results: Vec<(String, FailureRecord)> = data
+            .into_iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(key, rec)| {
+                let item_key = key.strip_prefix(&prefix).unwrap_or(&key).to_string();
+                (item_key, rec)
+            })
+            .collect();
+        Ok(results)
+    }
+
     /// Clear the failure record for an item (e.g. on success).
     pub async fn clear_failure(
         &self,
