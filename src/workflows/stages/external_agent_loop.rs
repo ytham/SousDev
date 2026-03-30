@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use crate::workflows::stage::StageContext;
 use crate::types::technique::{RunResult, StepType, TrajectoryStep};
@@ -231,8 +231,34 @@ pub async fn run_external_agent_loop(
         }
     }
 
+    // Stream stdout line-by-line so agent output appears in the TUI in
+    // real-time instead of being buffered until the process exits.
+    let stdout_handle = child.stdout.take();
     let timeout = Duration::from_secs(timeout_secs);
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
+
+    let mut stdout_lines: Vec<String> = Vec::new();
+    let mut trajectory: Vec<TrajectoryStep> = Vec::new();
+
+    let stream_and_wait = async {
+        if let Some(stdout) = stdout_handle {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                // Parse and log each line as it arrives (real-time TUI updates).
+                if adapter.name == "claude" {
+                    stream_parse_claude_line(
+                        &line,
+                        &mut trajectory,
+                        ctx,
+                    )
+                    .await;
+                }
+                stdout_lines.push(line);
+            }
+        }
+        child.wait().await
+    };
+
+    let status = tokio::time::timeout(timeout, stream_and_wait)
         .await
         .map_err(|_| {
             anyhow::anyhow!(
@@ -243,10 +269,19 @@ pub async fn run_external_agent_loop(
         })??;
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    let stdout_raw = String::from_utf8_lossy(&output.stdout);
-    let stderr_raw = String::from_utf8_lossy(&output.stderr);
-    let exit_code = output.status.code().unwrap_or(1);
-    let success = output.status.success();
+    let exit_code = status.code().unwrap_or(1);
+    let success = status.success();
+
+    // Read any remaining stderr.
+    let stderr_raw = if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut buf).await;
+        buf
+    } else {
+        String::new()
+    };
+
+    let stdout_raw = stdout_lines.join("\n");
 
     // For Claude stream-json, extract the final answer from the result event.
     let answer = if adapter.name == "claude" {
@@ -256,13 +291,11 @@ pub async fn run_external_agent_loop(
         stdout_raw.trim().to_string()
     };
 
-    // Build a rich trajectory from the agent output.
-    let trajectory = if adapter.name == "claude" {
-        parse_claude_stream_trajectory(&stdout_raw, &adapter.name)
-    } else {
-        // For non-Claude agents, create a minimal 2-step trajectory.
+    // For non-Claude agents, build a minimal trajectory (Claude's was
+    // built incrementally during streaming above).
+    if adapter.name != "claude" {
         let now = chrono::Utc::now().to_rfc3339();
-        vec![
+        trajectory = vec![
             TrajectoryStep {
                 index: 0,
                 step_type: StepType::Thought,
@@ -288,25 +321,24 @@ pub async fn run_external_agent_loop(
                     serde_json::Value::Number(exit_code.into()),
                 )]),
             },
-        ]
-    };
-
-    // Also emit trajectory steps to the workflow log for TUI display.
-    if let Some(ref log) = ctx.workflow_log {
-        for step in &trajectory {
-            let level = match step.step_type {
-                StepType::Thought => "info",
-                StepType::Action => "info",
-                StepType::Observation => "debug",
-                StepType::Reflection => "info",
-            };
-            let prefix = match step.step_type {
-                StepType::Thought => "thought",
-                StepType::Action => "tool",
-                StepType::Observation => "result",
-                StepType::Reflection => "reflect",
-            };
-            let _ = log.log(level, prefix, &step.content).await;
+        ];
+        // Emit non-Claude trajectory to log (Claude's was emitted in real-time).
+        if let Some(ref log) = ctx.workflow_log {
+            for step in &trajectory {
+                let level = match step.step_type {
+                    StepType::Thought => "info",
+                    StepType::Action => "info",
+                    StepType::Observation => "debug",
+                    StepType::Reflection => "info",
+                };
+                let prefix = match step.step_type {
+                    StepType::Thought => "thought",
+                    StepType::Action => "tool",
+                    StepType::Observation => "result",
+                    StepType::Reflection => "reflect",
+                };
+                let _ = log.log(level, prefix, &step.content).await;
+            }
         }
     }
 
@@ -346,9 +378,123 @@ pub async fn run_external_agent_loop(
 // Claude stream-json parser
 // ---------------------------------------------------------------------------
 
+/// Parse a single Claude stream-json line in real-time, append to the
+/// trajectory, and emit to the workflow log for TUI display.
+async fn stream_parse_claude_line(
+    line: &str,
+    trajectory: &mut Vec<TrajectoryStep>,
+    ctx: &StageContext,
+) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let event: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let now = chrono::Utc::now().to_rfc3339();
+
+    match event_type {
+        "assistant" => {
+            let content_blocks = event
+                .pointer("/message/content")
+                .and_then(|c| c.as_array());
+            if let Some(blocks) = content_blocks {
+                for block in blocks {
+                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match block_type {
+                        "text" => {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                let text = text.trim();
+                                if !text.is_empty() {
+                                    let step = TrajectoryStep {
+                                        index: trajectory.len(),
+                                        step_type: StepType::Thought,
+                                        content: text.to_string(),
+                                        timestamp: now.clone(),
+                                        metadata: HashMap::new(),
+                                    };
+                                    if let Some(ref log) = ctx.workflow_log {
+                                        let _ = log.log("info", "thought", text).await;
+                                    }
+                                    trajectory.push(step);
+                                }
+                            }
+                        }
+                        "tool_use" => {
+                            let tool_name = block
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown");
+                            let input_display = block
+                                .get("input")
+                                .map(|i| format_tool_input(tool_name, i))
+                                .unwrap_or_default();
+                            let step = TrajectoryStep {
+                                index: trajectory.len(),
+                                step_type: StepType::Action,
+                                content: input_display.clone(),
+                                timestamp: now.clone(),
+                                metadata: HashMap::from([(
+                                    "tool".to_string(),
+                                    serde_json::Value::String(tool_name.to_string()),
+                                )]),
+                            };
+                            if let Some(ref log) = ctx.workflow_log {
+                                let _ = log.log("info", "tool", &input_display).await;
+                            }
+                            trajectory.push(step);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        "tool" => {
+            let content_blocks = event.get("content").and_then(|c| c.as_array());
+            if let Some(blocks) = content_blocks {
+                for block in blocks {
+                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if block_type == "tool_result" {
+                        let output = block
+                            .get("output")
+                            .and_then(|o| o.as_str())
+                            .unwrap_or("");
+                        let output_display = if output.len() > 500 {
+                            format!("{}…", &output[..500])
+                        } else {
+                            output.to_string()
+                        };
+                        let step = TrajectoryStep {
+                            index: trajectory.len(),
+                            step_type: StepType::Observation,
+                            content: output_display.clone(),
+                            timestamp: now.clone(),
+                            metadata: HashMap::new(),
+                        };
+                        if let Some(ref log) = ctx.workflow_log {
+                            let _ = log.log("debug", "result", &output_display).await;
+                        }
+                        trajectory.push(step);
+                    }
+                }
+            }
+        }
+        // Skip "result" events — the final answer is extracted separately.
+        _ => {}
+    }
+}
+
 /// Parse Claude's `stream-json` output into a rich trajectory of steps.
 ///
+/// Used by tests to verify parsing logic.  Production code uses
+/// [`stream_parse_claude_line`] for real-time line-by-line parsing.
+///
 /// The stream contains JSON lines with these event types:
+#[cfg(test)]
 /// - `{"type":"assistant","message":{"content":[...]}}` — assistant messages
 ///   containing `"type":"text"` (thoughts) and `"type":"tool_use"` (tool calls)
 /// - `{"type":"tool","content":[{"type":"tool_result",...}]}` — tool results

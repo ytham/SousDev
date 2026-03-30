@@ -599,13 +599,6 @@ impl App {
                 }
                 self.input_mode = InputMode::CronEdit;
             }
-            KeyCode::Char('i') => {
-                self.info_panel_open = !self.info_panel_open;
-                if self.info_panel_open {
-                    self.info_panel_selected = 0;
-                }
-                self.input_mode = InputMode::Normal;
-            }
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
             }
