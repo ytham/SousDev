@@ -1145,14 +1145,22 @@ impl WorkflowExecutor {
                     .await
                     .unwrap_or_default();
 
+            // Inline review comments: only from other reviewers (not yourself).
+            // These are code-level feedback that the agent should address.
             let new_inline: Vec<_> = inline
                 .into_iter()
                 .filter(|c| c.login != reviewer_login)
                 .collect();
-            let new_timeline: Vec<_> = timeline
-                .into_iter()
-                .filter(|c| c.login != reviewer_login)
-                .collect();
+
+            // Timeline comments: include ALL, including your own.
+            // You may be directing the agent (e.g. "fix the build").
+            // Your conversational replies to reviewers are also included —
+            // the agent will read the context and determine if action is needed.
+            //
+            // Infinite loop prevention: after a successful run, the cursor
+            // is updated to the latest comment ID (including the agent's
+            // own replies), so the next tick won't re-process them.
+            let new_timeline = timeline;
 
             if new_inline.is_empty() && new_timeline.is_empty() {
                 logger.info(&format!(
