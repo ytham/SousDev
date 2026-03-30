@@ -93,6 +93,8 @@ mod tests {
             agent_result: None,
             review_result: None,
             review_feedback: None,
+            issue_url: None,
+            issue_display_id: None,
             pr_url: None,
             pr_title: None,
             pr_generated_body: None,

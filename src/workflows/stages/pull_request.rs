@@ -193,6 +193,12 @@ async fn try_automated_pr(ctx: &mut StageContext) -> Result<()> {
         )
     });
 
+    // Prepend issue link at the top if this is an issue-autofix run.
+    if let Some(ref issue_url) = ctx.issue_url {
+        let issue_line = format!("Closes {}\n\n", issue_url);
+        body.insert_str(0, &issue_line);
+    }
+
     // Append branding at the bottom (configurable, default true).
     let show_branding = ctx
         .config
