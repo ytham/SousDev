@@ -47,3 +47,7 @@ Guidelines:
 - Flag bugs, missing error handling, performance concerns, and test gaps
 - Do not nitpick style unless it violates consistency with the surrounding code
 - If there are no issues, output only the SUMMARY block with a positive assessment
+- Do NOT install dependencies, build the project, or run tests — this is a code review, not a CI run
+- Focus on reading the diff and understanding the code changes
+- Use `gh pr diff` and `gh pr view` to understand the PR, then read specific files for context
+- Keep the review focused and efficient — do not explore the entire codebase

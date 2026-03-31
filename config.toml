@@ -153,7 +153,7 @@ assignees = ["@me"]
 technique = "claude-loop"        # required for PR review
 
 [workflows.agent_loop.external_agent]
-timeout_secs = 300
+timeout_secs = 600              # 10 minutes for PR review
 
 [workflows.workspace]
 base_branch = "main"
