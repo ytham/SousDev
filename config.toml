@@ -88,7 +88,7 @@ aggregation = "judge"
 
 [[workflows]]
 name = "issue-autofix"
-schedule = "0 0 * * * *"      # every hour (sec min hour day month weekday)
+schedule = "0 */10 * * * *"   # every 10 minutes (sec min hour day month weekday)
 
 # ── Option A: GitHub Issues (default) ─────────────────────────────────
 [workflows.github_issues]

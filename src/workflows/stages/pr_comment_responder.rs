@@ -142,68 +142,118 @@ async fn resolve_head_sha(workspace_dir: &std::path::Path) -> String {
 ///
 /// Looks for a matching mention of the file path in the agent output;
 /// otherwise returns a generic acknowledgement.
-fn build_reply_body(agent_output: &str, path: &str, line: Option<u64>) -> String {
-    // Try to find a relevant excerpt from the agent output that mentions the
-    // file being commented on.
-    let relevant: Vec<&str> = agent_output
+fn build_reply_body(agent_output: &str, path: &str, _line: Option<u64>) -> String {
+    let clean = extract_clean_summary(agent_output);
+
+    // Try to find a relevant excerpt that mentions the file.
+    let relevant: Vec<&str> = clean
         .lines()
-        .filter(|l| l.contains(path))
+        .filter(|l| l.contains(path) || l.contains(&path.replace('/', "")))
         .take(3)
         .collect();
 
     if !relevant.is_empty() {
         return format!(
-            "Addressed in this update ({}:{}):\n\n{}",
-            path,
-            line.unwrap_or(0),
+            "Addressed in the latest commit:\n\n{}",
             relevant.join("\n")
         );
     }
 
     format!(
-        "I've addressed the comment on `{}`{}. Please review the latest commit.",
+        "Addressed the comment on `{}`. Please review the latest commit.",
         path,
-        line.map(|l| format!(":{}", l)).unwrap_or_default()
     )
 }
 
 /// Build the summary comment body posted after all inline replies.
+///
+/// Produces a clean markdown response. The agent output is parsed for
+/// bullet-point summaries; raw JSON or stream data is filtered out.
 fn build_summary_body(
     agent_output: &str,
     head_sha: &str,
     inline_count: usize,
     timeline_count: usize,
 ) -> String {
-    // If the agent output is short, include it verbatim.
-    let agent_summary = if !agent_output.is_empty() {
-        let truncated = if agent_output.len() > 2000 {
-            format!("{}\n… (truncated)", &agent_output[..2000])
-        } else {
-            agent_output.to_string()
-        };
-        format!("\n\n**Agent summary:**\n{}", truncated)
-    } else {
-        String::new()
-    };
-
     let sha_ref = if head_sha.is_empty() {
         String::new()
     } else {
         let short = &head_sha[..head_sha.len().min(7)];
-        format!(" (commit `{}`)", short)
+        format!(" (`{}`)", short)
     };
 
-    format!(
-        "## Review comment response{}\n\n\
-         I've addressed {} inline comment{} and {} timeline comment{}.{}\n\n\
-         Please re-review at your convenience.",
+    let total = inline_count + timeline_count;
+    let header = format!(
+        "## 🧑‍🍳 Review comments addressed{}\n\nAddressed {} comment{}.\n",
         sha_ref,
-        inline_count,
-        if inline_count == 1 { "" } else { "s" },
-        timeline_count,
-        if timeline_count == 1 { "" } else { "s" },
-        agent_summary
-    )
+        total,
+        if total == 1 { "" } else { "s" },
+    );
+
+    // Extract clean summary lines from the agent output.
+    // The agent is prompted to output "one bullet per comment addressed".
+    // Filter out JSON blobs, empty lines, and non-summary content.
+    let summary = extract_clean_summary(agent_output);
+
+    if summary.is_empty() {
+        format!(
+            "{}Please re-review at your convenience.",
+            header
+        )
+    } else {
+        format!(
+            "{}\n### Changes\n\n{}\n\n\
+             Please re-review at your convenience.",
+            header, summary
+        )
+    }
+}
+
+/// Extract clean summary lines from the agent's raw output.
+///
+/// Filters out JSON blobs, stream-json events, empty lines, and other
+/// non-human-readable content.  Keeps markdown-formatted text, bullet
+/// points, and plain English sentences.
+fn extract_clean_summary(agent_output: &str) -> String {
+    if agent_output.is_empty() {
+        return String::new();
+    }
+
+    let mut clean_lines: Vec<String> = Vec::new();
+
+    for line in agent_output.lines() {
+        let trimmed = line.trim();
+        // Skip empty lines.
+        if trimmed.is_empty() {
+            if !clean_lines.is_empty() {
+                clean_lines.push(String::new());
+            }
+            continue;
+        }
+        // Skip JSON blobs and stream-json events.
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            continue;
+        }
+        // Skip lines that look like raw data.
+        if trimmed.starts_with("\"type\"") || trimmed.contains("\"message\":{") {
+            continue;
+        }
+        // Keep everything else (markdown, bullets, plain text).
+        clean_lines.push(trimmed.to_string());
+    }
+
+    // Remove trailing empty lines.
+    while clean_lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        clean_lines.pop();
+    }
+
+    // Truncate to a reasonable length.
+    let result = clean_lines.join("\n");
+    if result.len() > 3000 {
+        format!("{}…", &result[..3000])
+    } else {
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +268,8 @@ mod tests {
     fn test_build_reply_body_with_relevant_line() {
         let output = "Fixed src/auth.rs by removing the null check.\nOther stuff.";
         let body = build_reply_body(output, "src/auth.rs", Some(10));
-        assert!(body.contains("src/auth.rs"));
         assert!(body.contains("null check"));
+        assert!(body.contains("latest commit"));
     }
 
     #[test]
@@ -227,7 +277,6 @@ mod tests {
         let output = "Nothing relevant here.";
         let body = build_reply_body(output, "src/utils.rs", Some(5));
         assert!(body.contains("src/utils.rs"));
-        assert!(body.contains("5"));
     }
 
     #[test]
@@ -237,31 +286,26 @@ mod tests {
     }
 
     #[test]
-    fn test_build_summary_body_counts() {
-        let body = build_summary_body("done", "abc1234", 3, 1);
-        assert!(body.contains("3 inline comments"));
-        assert!(body.contains("1 timeline comment"));
+    fn test_build_summary_body_with_content() {
+        let body = build_summary_body("- Fixed the null check\n- Updated tests", "abc1234", 1, 1);
+        assert!(body.contains("2 comments"));
         assert!(body.contains("abc1234"));
+        assert!(body.contains("Fixed the null check"));
+        assert!(body.contains("### Changes"));
     }
 
     #[test]
-    fn test_build_summary_body_singular() {
-        let body = build_summary_body("", "sha", 1, 1);
-        assert!(body.contains("1 inline comment"));
-        assert!(body.contains("1 timeline comment"));
+    fn test_build_summary_body_empty_agent_output() {
+        let body = build_summary_body("", "sha123", 1, 1);
+        assert!(body.contains("2 comments"));
+        assert!(!body.contains("### Changes"));
+        assert!(body.contains("re-review"));
     }
 
     #[test]
     fn test_build_summary_body_no_sha() {
-        let body = build_summary_body("", "", 0, 0);
-        assert!(!body.contains("commit"));
-    }
-
-    #[test]
-    fn test_build_summary_truncates_long_output() {
-        let long_output = "x".repeat(3000);
-        let body = build_summary_body(&long_output, "sha", 0, 0);
-        assert!(body.contains("truncated"));
+        let body = build_summary_body("done", "", 0, 0);
+        assert!(!body.contains('`'));
     }
 
     #[test]
@@ -269,32 +313,38 @@ mod tests {
         assert_eq!(PrCommentResponderStage.name(), "pr-comment-responder");
     }
 
-    // ── Additional tests ─────────────────────────────────────────────────────
-
     #[test]
-    fn test_build_summary_comment_no_inline() {
-        // 0 inline, 3 timeline
-        let body = build_summary_body("agent did stuff", "abc1234", 0, 3);
-        assert!(body.contains("0 inline comments"));
-        assert!(body.contains("3 timeline comments"));
-        assert!(body.contains("agent did stuff"));
+    fn test_extract_clean_summary_filters_json() {
+        let output = r#"{"type":"result","data":"blah"}
+- Fixed the bug
+[1,2,3]
+- Updated the tests
+"type":"assistant"
+Done."#;
+        let summary = extract_clean_summary(output);
+        assert!(summary.contains("Fixed the bug"));
+        assert!(summary.contains("Updated the tests"));
+        assert!(summary.contains("Done."));
+        assert!(!summary.contains("result"));
+        assert!(!summary.contains("[1,2,3]"));
     }
 
     #[test]
-    fn test_build_summary_comment_no_timeline() {
-        // 2 inline, 0 timeline
-        let body = build_summary_body("fixed it", "def5678", 2, 0);
-        assert!(body.contains("2 inline comments"));
-        assert!(body.contains("0 timeline comments"));
-        assert!(body.contains("fixed it"));
+    fn test_extract_clean_summary_empty() {
+        assert_eq!(extract_clean_summary(""), "");
     }
 
     #[test]
-    fn test_build_summary_comment_empty_answer() {
-        let body = build_summary_body("", "sha123", 1, 1);
-        // With an empty agent answer, there should be no "Agent summary" section.
-        assert!(!body.contains("Agent summary"));
-        assert!(body.contains("1 inline comment"));
-        assert!(body.contains("1 timeline comment"));
+    fn test_extract_clean_summary_all_json() {
+        let output = r#"{"type":"result"}
+{"data":"value"}"#;
+        assert_eq!(extract_clean_summary(output), "");
+    }
+
+    #[test]
+    fn test_extract_clean_summary_truncates() {
+        let long = "x".repeat(4000);
+        let summary = extract_clean_summary(&long);
+        assert!(summary.len() <= 3010); // 3000 + "…" (multi-byte)
     }
 }

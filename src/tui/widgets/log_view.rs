@@ -12,6 +12,7 @@ use ratatui::Frame;
 use crate::tui::app::{App, LogEntryKind, Panel};
 use crate::tui::ui::{
     ACCENT_INFO_LEVEL, ACCENT_THOUGHT, ACCENT_TOOL, BG_LOGS, BG_STATUS_BAR, BG_TEXT_SELECTION,
+    BG_THOUGHT,
 };
 
 /// Draw the status bar showing the selected workflow name, repo, status, and key hints.
@@ -239,17 +240,28 @@ fn render_thought(
     ctx: &RenderCtx,
     screen_y_base: usize,
 ) {
+    // Thought-specific style: subtle background + cyan left border.
+    let thought_style = |screen_row: usize| -> Style {
+        let base = ctx.row_style(screen_row);
+        // Use thought background unless the row is text-selected.
+        if base.bg == Some(BG_TEXT_SELECTION) {
+            base
+        } else {
+            Style::default().bg(BG_THOUGHT)
+        }
+    };
+
     if entry.lines.len() <= 1 {
         // Single-line thought — show fully, newlines flattened to spaces.
         if let Some(log) = entry.lines.first() {
-            let rs = ctx.row_style(screen_y_base);
+            let ts = thought_style(screen_y_base);
             let msg = truncate_msg(
                 &flatten_newlines(&log.message),
-                ctx.max_width.saturating_sub(2),
+                ctx.max_width.saturating_sub(4),
             );
             lines.push(Line::from(vec![
-                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
-                Span::styled(format!(" {}", msg), rs.fg(Color::White)),
+                Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
+                Span::styled(format!(" {}", msg), ts.fg(Color::White)),
             ]));
         }
     } else if entry.expanded {
@@ -261,11 +273,11 @@ fn render_thought(
                 if screen_row >= ctx.area.y as usize + ctx.area.height as usize {
                     break;
                 }
-                let rs = ctx.row_style(screen_row);
-                let msg = truncate_msg(sub_line, ctx.max_width.saturating_sub(2));
+                let ts = thought_style(screen_row);
+                let msg = truncate_msg(sub_line, ctx.max_width.saturating_sub(4));
                 lines.push(Line::from(vec![
-                    Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
-                    Span::styled(format!(" {}", msg), rs.fg(Color::White)),
+                    Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
+                    Span::styled(format!(" {}", msg), ts.fg(Color::White)),
                 ]));
                 row_offset += 1;
             }
@@ -273,29 +285,29 @@ fn render_thought(
     } else {
         // Collapsed — show first line (newlines flattened) + expand indicator.
         if let Some(log) = entry.lines.first() {
-            let rs = ctx.row_style(screen_y_base);
+            let ts = thought_style(screen_y_base);
             let msg = truncate_msg(
                 &flatten_newlines(&log.message),
-                ctx.max_width.saturating_sub(2),
+                ctx.max_width.saturating_sub(4),
             );
             lines.push(Line::from(vec![
-                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
-                Span::styled(format!(" {}", msg), rs.fg(Color::White)),
+                Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
+                Span::styled(format!(" {}", msg), ts.fg(Color::White)),
             ]));
         }
         let remaining = entry.lines.len() - 1;
         let screen_row = screen_y_base + 1;
         if screen_row < ctx.area.y as usize + ctx.area.height as usize {
-            let rs = ctx.row_style(screen_row);
+            let ts = thought_style(screen_row);
             lines.push(Line::from(vec![
-                Span::styled(" │", rs.fg(ACCENT_THOUGHT)),
+                Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
                 Span::styled(
                     format!(
-                        " […] {} more line{} — click to expand",
+                        " […] {} more line{}",
                         remaining,
                         if remaining == 1 { "" } else { "s" }
                     ),
-                    rs.fg(Color::DarkGray),
+                    ts.fg(Color::DarkGray),
                 ),
             ]));
         }

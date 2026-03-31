@@ -39,6 +39,8 @@ pub const BG_TEXT_SELECTION: Color = Color::Rgb(50, 50, 70);
 pub const ACCENT_BORDER: Color = Color::Rgb(80, 110, 200);
 /// Cyan-blue — thinking block left border.
 pub const ACCENT_THOUGHT: Color = Color::Rgb(80, 160, 200);
+/// Subtle background for thinking blocks.
+pub const BG_THOUGHT: Color = Color::Rgb(24, 26, 34);
 /// Purple — `[tool]` tag in pretty log mode.
 pub const ACCENT_TOOL: Color = Color::Rgb(140, 120, 200);
 /// Muted blue — "info" log level (replaces raw Color::Blue).
