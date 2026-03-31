@@ -1011,6 +1011,7 @@ impl WorkflowExecutor {
             self.opts.tui_tx.clone(),
         ).await.ok();
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+        ctx.reviewing_pr = Some(pr.clone());
 
         self.opts.tui_tx.send(TuiEvent::RunStarted {
             workflow_name: self.config.name.clone(),

@@ -55,6 +55,10 @@ pub struct FetchIssuesOptions {
 }
 
 /// Fetch open GitHub issues according to the provided options.
+///
+/// When multiple labels are configured, issues matching ANY label are
+/// returned (OR logic).  This is done by making a separate `gh issue list`
+/// call per label and merging the results.
 pub async fn fetch_github_issues(options: &FetchIssuesOptions) -> Result<Vec<GitHubIssue>> {
     let repo = match &options.repo {
         Some(r) => r.clone(),
@@ -65,32 +69,46 @@ pub async fn fetch_github_issues(options: &FetchIssuesOptions) -> Result<Vec<Git
     let labels = options.labels.as_deref().unwrap_or(&[]);
     let limit = options.limit.unwrap_or(100);
 
-    if assignees.is_empty() {
-        // No assignee filter — single call.
-        let mut issues = fetch_issues_for_assignee(None, labels, limit, &repo).await?;
-        for issue in &mut issues {
-            issue.repo = repo.clone();
-        }
-        Ok(issues)
+    // Build label groups: one query per label (OR logic).
+    // When no labels are configured, query once with no label filter.
+    let label_groups: Vec<&[String]> = if labels.is_empty() {
+        vec![&[]]
     } else {
-        // One call per assignee, deduplicated by issue number.
-        let mut all: Vec<GitHubIssue> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for assignee in assignees {
-            let mut batch =
-                fetch_issues_for_assignee(Some(assignee), labels, limit, &repo).await?;
-            for issue in batch.drain(..) {
+        labels.iter().map(std::slice::from_ref).collect()
+    };
+
+    let mut all: Vec<GitHubIssue> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for label_group in &label_groups {
+        if assignees.is_empty() {
+            let mut issues =
+                fetch_issues_for_assignee(None, label_group, limit, &repo).await?;
+            for issue in issues.drain(..) {
                 if seen.insert(issue.number) {
                     let mut i = issue;
                     i.repo = repo.clone();
                     all.push(i);
                 }
             }
+        } else {
+            for assignee in assignees {
+                let mut batch =
+                    fetch_issues_for_assignee(Some(assignee), label_group, limit, &repo)
+                        .await?;
+                for issue in batch.drain(..) {
+                    if seen.insert(issue.number) {
+                        let mut i = issue;
+                        i.repo = repo.clone();
+                        all.push(i);
+                    }
+                }
+            }
         }
-        all.sort_by_key(|i| i.number);
-        all.truncate(limit);
-        Ok(all)
     }
+
+    all.sort_by_key(|i| i.number);
+    Ok(all)
 }
 
 async fn fetch_issues_for_assignee(
