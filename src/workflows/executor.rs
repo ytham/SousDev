@@ -1203,7 +1203,7 @@ impl WorkflowExecutor {
                 let status = if has_new_comments {
                     ItemStatus::NewComments
                 } else {
-                    ItemStatus::None
+                    ItemStatus::NoNewComments
                 };
                 summaries.push(ItemSummary {
                     id: format!("PR #{}", pr.number),

@@ -117,6 +117,8 @@ pub enum ItemStatus {
     Reviewed,
     /// PR has new unaddressed reviewer comments (pr-responder specific).
     NewComments,
+    /// PR has been checked and has no new comments (pr-responder specific).
+    NoNewComments,
 }
 
 /// Which workflow mode is being executed.

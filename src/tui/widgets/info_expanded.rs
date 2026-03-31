@@ -240,6 +240,7 @@ fn status_description(status: ItemStatus) -> &'static str {
         ItemStatus::Cooldown => "In cooldown (will retry later)",
         ItemStatus::Reviewed => "Review posted",
         ItemStatus::NewComments => "Has new reviewer comments",
+        ItemStatus::NoNewComments => "No new comments",
     }
 }
 
@@ -253,6 +254,7 @@ fn status_badge(status: ItemStatus) -> (String, Color) {
         ItemStatus::Cooldown => ("[!!]".into(), Color::Red),
         ItemStatus::Reviewed => ("[OK]".into(), Color::Green),
         ItemStatus::NewComments => ("[**]".into(), Color::Cyan),
+        ItemStatus::NoNewComments => ("[--]".into(), Color::DarkGray),
     }
 }
 
