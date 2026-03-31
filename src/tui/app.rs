@@ -559,7 +559,11 @@ impl App {
                         let is_last_skipped = wf
                             .logs
                             .last()
-                            .map(|l| l.stage == "executor" && l.message.starts_with("No new items"))
+                            .map(|l| {
+                                l.stage == "executor"
+                                    && (l.message.starts_with("No new items")
+                                        || l.message.starts_with("Run completed: skipped"))
+                            })
                             .unwrap_or(false);
                         if is_last_skipped {
                             if let Some(last) = wf.logs.last_mut() {

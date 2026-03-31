@@ -47,6 +47,7 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
     let key = bg.fg(Color::White);
     let label = bg.fg(Color::DarkGray);
 
+    let version = env!("CARGO_PKG_VERSION");
     let line = Line::from(vec![
         Span::styled("▎ ", border),
         Span::styled(" ESC ", key),
@@ -58,7 +59,8 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
         Span::styled("c ", key),
         Span::styled("schedule  ", label),
         Span::styled("p ", key),
-        Span::styled("pause/resume", label),
+        Span::styled("pause/resume  ", label),
+        Span::styled(format!("v{}", version), bg.fg(Color::DarkGray)),
     ]);
 
     let block = Block::default().style(bg);
