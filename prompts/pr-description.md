@@ -1,4 +1,4 @@
-Write a GitHub pull request title and description for the following change.
+Write a GitHub pull request title and description for the following change. Include the Issue/Ticket if it exists.
 
 ## Original issue
 

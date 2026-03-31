@@ -1141,13 +1141,30 @@ impl WorkflowExecutor {
                 fetch_inline_review_comments(&pr.repo, pr.number, after_inline)
                     .await
                     .unwrap_or_default();
-            let timeline =
+            let mut timeline =
                 fetch_pr_comments(&pr.repo, pr.number, after_timeline)
                     .await
                     .unwrap_or_default();
 
+            // Also fetch PR review bodies (submitted reviews with body text).
+            // These are a separate API endpoint from timeline comments.
+            let review_comments =
+                crate::workflows::github_prs::fetch_pr_review_comments(
+                    &pr.repo, pr.number, after_timeline,
+                )
+                .await
+                .unwrap_or_default();
+            // Merge review comments into timeline (dedup by ID).
+            let existing_ids: std::collections::HashSet<u64> =
+                timeline.iter().map(|c| c.id).collect();
+            for rc in review_comments {
+                if !existing_ids.contains(&rc.id) {
+                    timeline.push(rc);
+                }
+            }
+
             logger.info(&format!(
-                "PR #{}: found {} inline, {} timeline comments after cursor",
+                "PR #{}: found {} inline, {} timeline/review comments after cursor",
                 pr.number, inline.len(), timeline.len()
             ));
 

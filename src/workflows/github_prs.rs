@@ -286,6 +286,40 @@ pub async fn fetch_pr_comments(
     }
 }
 
+/// Fetch PR review bodies (submitted reviews with a body comment).
+///
+/// These are reviews submitted via "Submit review" on GitHub — they have
+/// a body but are NOT inline diff comments or timeline comments.  They
+/// live under the `/pulls/{pr}/reviews` API.
+///
+/// If `after_id` is provided, only reviews with an `id` greater than that
+/// are returned.
+pub async fn fetch_pr_review_comments(
+    repo: &str,
+    pr_number: u64,
+    after_id: Option<u64>,
+) -> Result<Vec<PRComment>> {
+    let cmd_str = format!(
+        "gh api /repos/{}/pulls/{}/reviews --jq '[.[] | select(.body != null and .body != \"\") | {{id: .id, login: .user.login, body: .body, createdAt: .submitted_at}}]'",
+        repo, pr_number
+    );
+    let output = Command::new("sh").arg("-c").arg(&cmd_str).output().await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() || stdout.trim() == "null" {
+        return Ok(vec![]);
+    }
+
+    let all: Vec<PRComment> = serde_json::from_str(&stdout)
+        .map_err(|e| anyhow::anyhow!("Failed to parse PR review comments: {}", e))?;
+
+    if let Some(cursor) = after_id {
+        Ok(all.into_iter().filter(|c| c.id > cursor).collect())
+    } else {
+        Ok(all)
+    }
+}
+
 /// Fetch inline review comments (diff-level) for a pull request.
 ///
 /// Only root comments (those without an `in_reply_to_id`) are returned.

@@ -75,11 +75,29 @@ impl Stage for PrReviewPosterStage {
         })?;
         let pr = pr.clone();
 
-        let agent_output = ctx
+        // Use the agent's answer, or fall back to the trajectory thinking
+        // text if the answer is empty (e.g. agent timed out before producing
+        // a final result event).
+        let agent_output: String = ctx
             .agent_result
             .as_ref()
-            .map(|r| r.answer.as_str())
-            .unwrap_or("");
+            .map(|r| {
+                if !r.answer.is_empty() {
+                    r.answer.clone()
+                } else {
+                    // Extract all thinking text from the trajectory.
+                    r.trajectory
+                        .iter()
+                        .filter(|s| {
+                            s.step_type == crate::types::technique::StepType::Thought
+                        })
+                        .map(|s| s.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                }
+            })
+            .unwrap_or_default();
+        let agent_output = agent_output.as_str();
 
         // Resolve the HEAD SHA of the PR branch.
         let head_sha = resolve_head_sha(&ctx.workspace_dir).await;
