@@ -8,6 +8,46 @@ Run bare `sousdev` to launch the interactive TUI dashboard. All workflows, logs,
 
 ---
 
+## Quickstart
+
+### Prerequisites
+
+- Rust 1.74+ (stable)
+- `git` and [`gh` CLI](https://cli.github.com/) authenticated (`gh auth login`)
+- `claude` CLI installed (`npm install -g @anthropic-ai/claude-code`)
+
+### Setup
+
+```bash
+cd sousdev
+cargo build --release
+
+# Authenticate the Claude CLI (one-time — no API key needed)
+claude
+
+# Edit the config
+cp config.toml my-project/config.toml
+# Edit target_repo, git_method, schedules, etc.
+
+# Optional: set up .env for harness-native techniques or Linear
+cp .env.example .env
+# Edit .env if needed (most users won't need this)
+```
+
+### Run
+
+```bash
+# Launch the TUI dashboard (recommended)
+./target/release/sousdev
+
+# Or use CLI commands:
+sousdev list                              # list configured workflows
+sousdev workflow issue-autofix            # run a workflow once
+sousdev start                             # start headless cron daemon
+```
+
+---
+
 ## Workflows
 
 | Mode | Config field | What it does |
@@ -56,46 +96,6 @@ cron tick
       → ReviewFeedbackLoopStage (self-review before push)
       → PullRequestStage (push to existing branch)
       → PrCommentResponderStage (reply "Addressed in <sha>" + summary)
-```
-
----
-
-## Quickstart
-
-### Prerequisites
-
-- Rust 1.74+ (stable)
-- `git` and [`gh` CLI](https://cli.github.com/) authenticated (`gh auth login`)
-- `claude` CLI installed (`npm install -g @anthropic-ai/claude-code`)
-
-### Setup
-
-```bash
-cd sousdev
-cargo build --release
-
-# Authenticate the Claude CLI (one-time — no API key needed)
-claude
-
-# Edit the config
-cp config.toml my-project/config.toml
-# Edit target_repo, git_method, schedules, etc.
-
-# Optional: set up .env for harness-native techniques or Linear
-cp .env.example .env
-# Edit .env if needed (most users won't need this)
-```
-
-### Run
-
-```bash
-# Launch the TUI dashboard (recommended)
-./target/release/sousdev
-
-# Or use CLI commands:
-sousdev list                              # list configured workflows
-sousdev workflow issue-autofix            # run a workflow once
-sousdev start                             # start headless cron daemon
 ```
 
 ---
