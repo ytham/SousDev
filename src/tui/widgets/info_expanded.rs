@@ -213,16 +213,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::styled(" ↑↓ ", bg.fg(Color::White)),
         Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("⏎ ", bg.fg(Color::White)),
-        Span::styled("show  ", bg.fg(Color::DarkGray)),
-        Span::styled("g ", bg.fg(Color::White)),
-        Span::styled("open", bg.fg(Color::DarkGray)),
+        Span::styled("show", bg.fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("▎ ", border),
-        Span::styled(" c ", bg.fg(Color::White)),
-        Span::styled("clear  ", bg.fg(Color::DarkGray)),
-        Span::styled("C ", bg.fg(Color::White)),
-        Span::styled("clear all  ", bg.fg(Color::DarkGray)),
+        Span::styled(" c/C ", bg.fg(Color::White)),
+        Span::styled("clear/all  ", bg.fg(Color::DarkGray)),
+        Span::styled("g ", bg.fg(Color::White)),
+        Span::styled("open  ", bg.fg(Color::DarkGray)),
         Span::styled("ESC ", bg.fg(Color::White)),
         Span::styled("close", bg.fg(Color::DarkGray)),
     ]));

@@ -60,7 +60,7 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
         // Commands row.
         Line::from(vec![
             Span::styled("▎ ", border),
-            Span::styled("  ESC ", key),
+            Span::styled(" ESC ", key),
             Span::styled("close  ", label),
             Span::styled("q ", key),
             Span::styled("quit  ", label),

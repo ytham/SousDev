@@ -129,17 +129,17 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled(" ", bg)));
     }
     lines.push(Line::from(Span::styled(
-        "─".repeat(area.width.saturating_sub(2) as usize),
+        "─".repeat(area.width.saturating_sub(3) as usize),
         bg.fg(Color::DarkGray),
     )));
     lines.push(Line::from(vec![
-        Span::styled(" ↑↓ ", bg.fg(Color::White)),
+        Span::styled("↑↓ ", bg.fg(Color::White)),
         Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("←→ ", bg.fg(Color::White)),
         Span::styled("pane", bg.fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(" i ", bg.fg(Color::White)),
+        Span::styled("i ", bg.fg(Color::White)),
         Span::styled("info expanded", bg.fg(Color::DarkGray)),
     ]));
 
