@@ -503,3 +503,43 @@ fn draw_logs_flat(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowState,
     let paragraph = Paragraph::new(lines).block(Block::default().style(bg));
     f.render_widget(paragraph, area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_flatten_newlines_basic() {
+        assert_eq!(flatten_newlines("a\nb\nc"), "a  b  c");
+    }
+
+    #[test]
+    fn test_flatten_newlines_no_newlines() {
+        assert_eq!(flatten_newlines("no newlines here"), "no newlines here");
+    }
+
+    #[test]
+    fn test_flatten_newlines_cr_lf() {
+        assert_eq!(flatten_newlines("line1\r\nline2"), "line1  line2");
+    }
+
+    #[test]
+    fn test_flatten_newlines_empty() {
+        assert_eq!(flatten_newlines(""), "");
+    }
+
+    #[test]
+    fn test_truncate_msg_short() {
+        assert_eq!(truncate_msg("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_msg_long() {
+        assert_eq!(truncate_msg("hello world!", 5), "hell…");
+    }
+
+    #[test]
+    fn test_truncate_msg_exact() {
+        assert_eq!(truncate_msg("12345", 5), "12345");
+    }
+}

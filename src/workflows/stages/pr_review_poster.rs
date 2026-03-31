@@ -127,8 +127,42 @@ impl Stage for PrReviewPosterStage {
             }
         }
 
-        // Post summary comment.
-        let summary_posted = if let Some(body) = &summary {
+        // Post summary comment.  If no SUMMARY markers were found, fall back
+        // to posting the cleaned agent output directly (this happens when the
+        // agent times out or doesn't follow the exact marker format).
+        let summary_to_post = summary.or_else(|| {
+            if agent_output.is_empty() {
+                return None;
+            }
+            // Extract clean text from the agent output, filtering out JSON/stream data.
+            let clean_lines: Vec<&str> = agent_output
+                .lines()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty()
+                        && !t.starts_with('{')
+                        && !t.starts_with('[')
+                        && !t.starts_with("INLINE_COMMENT")
+                        && !t.starts_with("END_INLINE_COMMENT")
+                })
+                .collect();
+            if clean_lines.is_empty() {
+                None
+            } else {
+                let text = clean_lines.join("\n");
+                let truncated = if text.len() > 4000 {
+                    format!("{}…", &text[..4000])
+                } else {
+                    text
+                };
+                Some(format!(
+                    "## 🧑‍🍳 PR Review\n\n{}\n",
+                    truncated
+                ))
+            }
+        });
+
+        let summary_posted = if let Some(body) = &summary_to_post {
             ctx.logger.info("PrReviewPosterStage: posting summary comment");
             match post_summary_comment(&pr.repo, pr.number, body).await {
                 Ok(()) => true,
@@ -140,6 +174,7 @@ impl Stage for PrReviewPosterStage {
                 }
             }
         } else {
+            ctx.logger.info("PrReviewPosterStage: no review content to post");
             false
         };
 

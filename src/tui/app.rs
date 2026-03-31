@@ -598,10 +598,18 @@ impl App {
 
                 // Update info expanded panel item status.
                 if let Some(ref label) = item_label {
-                    let new_status = if success {
-                        ItemStatus::Success
-                    } else {
+                    let wf_mode = self
+                        .workflows
+                        .iter()
+                        .find(|w| w.name == workflow_name)
+                        .map(|w| w.mode);
+                    let new_status = if !success {
                         ItemStatus::Error
+                    } else {
+                        match wf_mode {
+                            Some(WorkflowMode::PrReview) => ItemStatus::Reviewed,
+                            _ => ItemStatus::Success,
+                        }
                     };
                     self.update_item_status(&workflow_name, label, new_status);
                 }
@@ -1917,27 +1925,6 @@ async fn load_initial_items(
             _ => {}
         }
 
-        // Load failure-cooldown items that don't have a success record yet.
-        if let Ok(failures) = failure_store.get_failures_for_workflow(wf_name).await {
-            let existing_ids: std::collections::HashSet<String> =
-                items.iter().map(|i| extract_item_key(&i.id)).collect();
-            for (item_key, _rec) in failures {
-                if !existing_ids.contains(&item_key) {
-                    let id = if let Some(num) = item_key.strip_prefix("pr-") {
-                        format!("PR #{}", num)
-                    } else {
-                        format!("#{}", item_key)
-                    };
-                    items.push(ItemSummary {
-                        id,
-                        title: "(failed — details on next tick)".into(),
-                        url: String::new(),
-                        status: ItemStatus::Error,
-                    });
-                }
-            }
-        }
-
         if !items.is_empty() {
             items.sort_by(|a, b| a.id.cmp(&b.id));
             app.workflow_items.insert(wf_name.clone(), items);
@@ -2023,6 +2010,161 @@ async fn load_previous_logs(
     }
 }
 
+/// Fetch current items from GitHub/Linear for each workflow and populate
+/// the Info pane.  Runs once on startup so the Info pane has up-to-date
+/// data before the first cron tick.
+async fn refresh_info_from_remote(
+    app: &mut App,
+    config: &crate::types::config::HarnessConfig,
+    project_root: &std::path::Path,
+) {
+    use crate::tui::events::{ItemStatus, ItemSummary};
+    use crate::workflows::github_issues::{fetch_github_issues, repo_to_gh_identifier, FetchIssuesOptions};
+    use crate::workflows::github_prs::{fetch_github_prs, FetchPRsOptions};
+    use crate::workflows::stores::{FailureCooldownStore, HandledIssueStore, PrReviewStore};
+
+    let issue_store = HandledIssueStore::new(project_root);
+    let review_store = PrReviewStore::new(project_root);
+    let failure_store = FailureCooldownStore::new(project_root);
+
+    for wf_config in &config.workflows {
+        let wf_name = &wf_config.name;
+
+        // ── Issues mode ──────────────────────────────────────────────────
+        if let Some(ref issues_cfg) = wf_config.github_issues {
+            let gh_repo = issues_cfg
+                .repo
+                .clone()
+                .or_else(|| repo_to_gh_identifier(config.target_repo.as_deref()));
+
+            let items = fetch_github_issues(&FetchIssuesOptions {
+                repo: gh_repo,
+                assignees: issues_cfg.assignees.clone(),
+                labels: issues_cfg.labels.clone(),
+                limit: issues_cfg.limit,
+            })
+            .await
+            .unwrap_or_default();
+
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for item in &items {
+                let is_handled = issue_store
+                    .is_handled(wf_name, item.number)
+                    .await
+                    .unwrap_or(false);
+                let in_cooldown = failure_store
+                    .is_in_cooldown(wf_name, &item.number.to_string())
+                    .await
+                    .unwrap_or(false);
+                let status = if is_handled {
+                    ItemStatus::Success
+                } else if in_cooldown {
+                    ItemStatus::Cooldown
+                } else {
+                    ItemStatus::None
+                };
+                summaries.push(ItemSummary {
+                    id: format!("#{}", item.number),
+                    title: item.title.chars().take(50).collect(),
+                    url: item.url.clone(),
+                    status,
+                });
+            }
+
+
+            if !summaries.is_empty() {
+                app.workflow_items.insert(wf_name.clone(), summaries);
+            }
+            continue;
+        }
+
+        // ── PR review mode ───────────────────────────────────────────────
+        if let Some(ref prs_cfg) = wf_config.github_prs {
+            let gh_repo = prs_cfg
+                .repo
+                .clone()
+                .or_else(|| repo_to_gh_identifier(config.target_repo.as_deref()));
+
+            let prs = fetch_github_prs(&FetchPRsOptions {
+                repo: gh_repo,
+                search: prs_cfg.search.clone(),
+                limit: prs_cfg.limit,
+                raw_search: false,
+            })
+            .await
+            .unwrap_or_default();
+
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for pr in &prs {
+                let pr_key = format!("pr-{}", pr.number);
+                let in_cooldown = failure_store
+                    .is_in_cooldown(wf_name, &pr_key)
+                    .await
+                    .unwrap_or(false);
+                let is_reviewed = review_store
+                    .get_record(wf_name, pr.number)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let status = if in_cooldown {
+                    ItemStatus::Cooldown
+                } else if is_reviewed {
+                    ItemStatus::Reviewed
+                } else {
+                    ItemStatus::None
+                };
+                summaries.push(ItemSummary {
+                    id: format!("PR #{}", pr.number),
+                    title: pr.title.chars().take(50).collect(),
+                    url: pr.url.clone(),
+                    status,
+                });
+            }
+
+            if !summaries.is_empty() {
+                app.workflow_items.insert(wf_name.clone(), summaries);
+            }
+            continue;
+        }
+
+        // ── PR response mode ─────────────────────────────────────────────
+        if wf_config.github_pr_responses.is_some() {
+            let gh_repo = wf_config
+                .github_pr_responses
+                .as_ref()
+                .and_then(|c| c.repo.clone())
+                .or_else(|| repo_to_gh_identifier(config.target_repo.as_deref()));
+
+            let prs = fetch_github_prs(&FetchPRsOptions {
+                repo: gh_repo,
+                search: Some("author:@me".into()),
+                limit: wf_config
+                    .github_pr_responses
+                    .as_ref()
+                    .and_then(|c| c.limit),
+                raw_search: true,
+            })
+            .await
+            .unwrap_or_default();
+
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for pr in &prs {
+                summaries.push(ItemSummary {
+                    id: format!("PR #{}", pr.number),
+                    title: pr.title.chars().take(50).collect(),
+                    url: pr.url.clone(),
+                    status: ItemStatus::None,
+                });
+            }
+
+            if !summaries.is_empty() {
+                app.workflow_items.insert(wf_name.clone(), summaries);
+            }
+        }
+    }
+}
+
 /// Return the ordered stage names for a given workflow mode.
 fn stages_for_mode(mode: WorkflowMode) -> Vec<String> {
     match mode {
@@ -2093,6 +2235,9 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
         })
         .collect();
 
+    // Clone workflow configs for the initial refresh (before config is moved).
+    let config_for_refresh = config.clone();
+
     // Set up the TUI event channel.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TuiEvent>();
     let tui_tx = TuiEventSender::new(tx);
@@ -2131,6 +2276,7 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     // before the first cron tick.
     load_initial_items(&mut app, &project_root, &workflow_infos).await;
     load_previous_logs(&mut app, &project_root, &workflow_infos).await;
+    refresh_info_from_remote(&mut app, &config_for_refresh, &project_root).await;
 
     // Main event loop.
     loop {
@@ -4209,5 +4355,127 @@ mod tests {
         ));
         assert_eq!(app.active_left_pane, LeftPane::Info);
         assert_eq!(app.info_selected, 2);
+    }
+
+    #[test]
+    fn test_mouse_click_in_info_pane_sets_log_filter() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_open = false;
+        app.active_left_pane = LeftPane::Workflows;
+        app.layout.info = ratatui::layout::Rect::new(27, 0, 24, 30);
+        // Click row 1 (item index 1 = first real item "#1")
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            30,
+            1,
+        ));
+        assert_eq!(app.info_selected, 1);
+        assert_eq!(app.log_filter, Some("#1".into()));
+    }
+
+    #[test]
+    fn test_mouse_click_all_logs_clears_filter() {
+        let mut app = app_with_info_expanded();
+        app.info_expanded_open = false;
+        app.log_filter = Some("#1".into());
+        app.active_left_pane = LeftPane::Workflows;
+        app.layout.info = ratatui::layout::Rect::new(27, 0, 24, 30);
+        // Click row 0 ("All logs")
+        app.handle_mouse(make_mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            30,
+            0,
+        ));
+        assert!(app.log_filter.is_none());
+    }
+
+    // ── Skipped run dedup ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_skipped_run_dedup_updates_in_place() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        // First skipped run creates a new log line.
+        app.handle_tui_event(TuiEvent::RunCompleted {
+            workflow_name: "p".into(),
+            run_id: "r1".into(),
+            success: true,
+            skipped: true,
+            error: None,
+            pr_url: None,
+        });
+        let log_count_after_first = app.workflows[0].logs.len();
+        assert_eq!(log_count_after_first, 1);
+        assert!(app.workflows[0].logs[0].message.contains("No new items"));
+
+        // Second skipped run updates the same line (no new log added).
+        app.handle_tui_event(TuiEvent::RunCompleted {
+            workflow_name: "p".into(),
+            run_id: "r2".into(),
+            success: true,
+            skipped: true,
+            error: None,
+            pr_url: None,
+        });
+        assert_eq!(app.workflows[0].logs.len(), log_count_after_first);
+        assert!(app.workflows[0].logs[0].message.contains("No new items"));
+    }
+
+    #[test]
+    fn test_skipped_after_non_skipped_creates_new_line() {
+        let mut app = app_with_workflow("p", WorkflowMode::Issues);
+        // Non-skipped run.
+        app.handle_tui_event(TuiEvent::RunCompleted {
+            workflow_name: "p".into(),
+            run_id: "r1".into(),
+            success: true,
+            skipped: false,
+            error: None,
+            pr_url: Some("https://github.com/o/r/pull/1".into()),
+        });
+        let count_after_success = app.workflows[0].logs.len();
+
+        // Skipped run creates a NEW line (previous was not skipped).
+        app.handle_tui_event(TuiEvent::RunCompleted {
+            workflow_name: "p".into(),
+            run_id: "r2".into(),
+            success: true,
+            skipped: true,
+            error: None,
+            pr_url: None,
+        });
+        assert_eq!(app.workflows[0].logs.len(), count_after_success + 1);
+    }
+
+    // ── Single-line thought with embedded newlines ────────────────────────
+
+    #[test]
+    fn test_single_logline_thought_with_newlines_is_expandable() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: vec![make_log("thought", "line1\nline2\nline3")],
+            expanded: false,
+        };
+        // Single LogLine but 3 visual lines -> collapsed = 2 (first + indicator)
+        assert_eq!(entry.row_count(), 2);
+    }
+
+    #[test]
+    fn test_single_logline_thought_with_newlines_expanded() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: vec![make_log("thought", "line1\nline2\nline3")],
+            expanded: true,
+        };
+        assert_eq!(entry.row_count(), 3);
+    }
+
+    #[test]
+    fn test_truly_single_line_thought_not_expandable() {
+        let entry = LogEntry {
+            kind: LogEntryKind::Thought,
+            lines: vec![make_log("thought", "just one line")],
+            expanded: false,
+        };
+        assert_eq!(entry.row_count(), 1);
     }
 }
