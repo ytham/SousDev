@@ -198,6 +198,138 @@ impl WorkflowExecutor {
         }
     }
 
+    /// Lightweight refresh: fetch items and emit `ItemsSummary` without
+    /// processing anything.  Called on every cron tick (even when a previous
+    /// run is still active) so the Info pane stays up-to-date.
+    pub async fn refresh_info_only(&self) {
+        if let Some(ref issues_cfg) = self.config.github_issues {
+            let gh_repo = issues_cfg
+                .repo
+                .clone()
+                .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+            let items = fetch_github_issues(&FetchIssuesOptions {
+                repo: gh_repo,
+                assignees: issues_cfg.assignees.clone(),
+                labels: issues_cfg.labels.clone(),
+                limit: issues_cfg.limit,
+            })
+            .await
+            .unwrap_or_default();
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for item in &items {
+                let is_handled = self
+                    .issue_store
+                    .is_handled(&self.config.name, item.number)
+                    .await
+                    .unwrap_or(false);
+                let in_cooldown = self
+                    .failure_store
+                    .is_in_cooldown(&self.config.name, &item.number.to_string())
+                    .await
+                    .unwrap_or(false);
+                let status = if is_handled {
+                    ItemStatus::Success
+                } else if in_cooldown {
+                    ItemStatus::Cooldown
+                } else {
+                    ItemStatus::None
+                };
+                summaries.push(ItemSummary {
+                    id: format!("#{}", item.number),
+                    title: truncate_title(&item.title, 50),
+                    url: item.url.clone(),
+                    status,
+                });
+            }
+            self.opts.tui_tx.send(TuiEvent::ItemsSummary {
+                workflow_name: self.config.name.clone(),
+                items: summaries,
+            });
+        } else if let Some(ref prs_cfg) = self.config.github_prs {
+            let gh_repo = prs_cfg
+                .repo
+                .clone()
+                .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+            let prs = fetch_github_prs(&FetchPRsOptions {
+                repo: gh_repo,
+                search: prs_cfg.search.clone(),
+                limit: prs_cfg.limit,
+                raw_search: false,
+            })
+            .await
+            .unwrap_or_default();
+            // Apply the individual-reviewer/assignee filter.
+            let reviewer_login = self.get_reviewer_login().await.unwrap_or_default();
+            let prs: Vec<_> = prs
+                .into_iter()
+                .filter(|pr| {
+                    pr.requested_reviewers.iter().any(|r| r == &reviewer_login)
+                        || pr.assignees.iter().any(|a| a == &reviewer_login)
+                })
+                .collect();
+            let mut summaries: Vec<ItemSummary> = Vec::new();
+            for pr in &prs {
+                let pr_key = format!("pr-{}", pr.number);
+                let in_cooldown = self
+                    .failure_store
+                    .is_in_cooldown(&self.config.name, &pr_key)
+                    .await
+                    .unwrap_or(false);
+                let is_reviewed = self
+                    .pr_review_store
+                    .get_record(&self.config.name, pr.number)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let status = if in_cooldown {
+                    ItemStatus::Cooldown
+                } else if is_reviewed {
+                    ItemStatus::Reviewed
+                } else {
+                    ItemStatus::None
+                };
+                summaries.push(ItemSummary {
+                    id: format!("PR #{}", pr.number),
+                    title: truncate_title(&pr.title, 50),
+                    url: pr.url.clone(),
+                    status,
+                });
+            }
+            self.opts.tui_tx.send(TuiEvent::ItemsSummary {
+                workflow_name: self.config.name.clone(),
+                items: summaries,
+            });
+        } else if let Some(ref resp_cfg) = self.config.github_pr_responses {
+            let gh_repo = resp_cfg
+                .repo
+                .clone()
+                .or_else(|| repo_to_gh_identifier(self.opts.target_repo.as_deref()));
+            let search = resp_cfg.search.clone().unwrap_or_else(|| "author:@me".into());
+            let prs = fetch_github_prs(&FetchPRsOptions {
+                repo: gh_repo,
+                search: Some(search),
+                limit: resp_cfg.limit,
+                raw_search: true,
+            })
+            .await
+            .unwrap_or_default();
+            let summaries: Vec<ItemSummary> = prs
+                .iter()
+                .map(|pr| ItemSummary {
+                    id: format!("PR #{}", pr.number),
+                    title: truncate_title(&pr.title, 50),
+                    url: pr.url.clone(),
+                    status: ItemStatus::None,
+                })
+                .collect();
+            self.opts.tui_tx.send(TuiEvent::ItemsSummary {
+                workflow_name: self.config.name.clone(),
+                items: summaries,
+            });
+        }
+    }
+
     /// Select and run the appropriate workflow mode.
     pub async fn run(&self) -> Result<WorkflowResult> {
         if self.config.github_pr_responses.is_some() {

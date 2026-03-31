@@ -33,7 +33,9 @@ impl Stage for AgentLoopStage {
 
     async fn run(&self, ctx: &mut StageContext) -> Result<()> {
         let technique = ctx.config.agent_loop.technique.clone();
-        let max_retries = ctx.config.agent_loop.max_retries.unwrap_or(1);
+        // Default retries: 0 for PR review (reviews shouldn't retry), 1 for all others.
+        let default_retries = if ctx.config.github_prs.is_some() { 0 } else { 1 };
+        let max_retries = ctx.config.agent_loop.max_retries.unwrap_or(default_retries);
         let base_backoff = ctx.config.agent_loop.backoff_ms.unwrap_or(2_000);
         let ext_cfg = ctx
             .config

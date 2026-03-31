@@ -322,6 +322,27 @@ fn create_job(
                 }
             }
 
+            // Lightweight Info pane refresh — runs on every tick even when
+            // a previous run is still active, so the Info pane stays current.
+            {
+                let harness_root =
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let refresh_opts = ExecutorOptions {
+                    provider: Arc::new(crate::providers::provider::NoopProvider),
+                    registry: Arc::new(ToolRegistry::new()),
+                    store: s.store.clone(),
+                    no_workspace: true,
+                    target_repo: s.harness_config.target_repo.clone(),
+                    git_method: s.harness_config.git_method.clone(),
+                    harness_root: Some(harness_root),
+                    prompts: s.harness_config.prompts.clone(),
+                    system_prompt: None,
+                    tui_tx: s.tui_tx.clone(),
+                };
+                let refresher = WorkflowExecutor::new(s.wf_config.clone(), refresh_opts);
+                refresher.refresh_info_only().await;
+            }
+
             // Overlap guard.
             {
                 let mut lock = s.active.lock().await;

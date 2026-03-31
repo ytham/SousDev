@@ -69,3 +69,20 @@ pub trait LLMProvider: Send + Sync {
         options: Option<&CompleteOptions>,
     ) -> Result<CompletionResult>;
 }
+
+/// A no-op provider that never makes API calls.  Used for lightweight
+/// operations (like Info pane refresh) that don't need LLM access.
+pub struct NoopProvider;
+
+#[async_trait]
+impl LLMProvider for NoopProvider {
+    fn name(&self) -> &str { "noop" }
+    fn model(&self) -> &str { "noop" }
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _options: Option<&CompleteOptions>,
+    ) -> Result<CompletionResult> {
+        Err(anyhow::anyhow!("NoopProvider: no LLM available"))
+    }
+}
