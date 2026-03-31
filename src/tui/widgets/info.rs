@@ -135,14 +135,14 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(" ↑↓ ", bg.fg(Color::White)),
         Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("⏎ ", bg.fg(Color::White)),
-        Span::styled("filter  ", bg.fg(Color::DarkGray)),
+        Span::styled("show  ", bg.fg(Color::DarkGray)),
         Span::styled("g ", bg.fg(Color::White)),
         Span::styled("open", bg.fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
-        Span::styled("  c  ", bg.fg(Color::White)),
-        Span::styled("clear   ", bg.fg(Color::DarkGray)),
+        Span::styled(" c ", bg.fg(Color::White)),
+        Span::styled("clear  ", bg.fg(Color::DarkGray)),
         Span::styled("C ", bg.fg(Color::White)),
         Span::styled("clear all", bg.fg(Color::DarkGray)),
     ]));

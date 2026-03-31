@@ -905,7 +905,7 @@ impl App {
                     }
                 }
 
-                // Click in Info pane: select item and activate Info pane.
+                // Click in Info pane: select item, activate pane, and show logs.
                 if panel == Panel::Info {
                     self.active_left_pane = LeftPane::Info;
                     let info_rect = &self.layout.info;
@@ -913,6 +913,7 @@ impl App {
                     let item_count = self.selected_items().len() + 1; // +1 for "All logs"
                     if item_row < item_count {
                         self.info_selected = item_row;
+                        self.set_log_filter_from_info();
                     }
                 }
 

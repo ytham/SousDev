@@ -123,7 +123,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Pad to fill the sidebar, then add separator + key hints at the bottom.
-    let hints_lines = 4; // separator + 3 hint lines
+    let hints_lines = 3; // separator + 2 hint lines
     let hints_row = area.height.saturating_sub(hints_lines) as usize;
     while lines.len() < hints_row {
         lines.push(Line::from(Span::styled(" ", bg)));
@@ -134,14 +134,12 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     )));
     lines.push(Line::from(vec![
         Span::styled(" ↑↓ ", bg.fg(Color::White)),
-        Span::styled("select workflow", bg.fg(Color::DarkGray)),
+        Span::styled("select  ", bg.fg(Color::DarkGray)),
+        Span::styled("←→ ", bg.fg(Color::White)),
+        Span::styled("pane", bg.fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(" ←→ ", bg.fg(Color::White)),
-        Span::styled("switch pane", bg.fg(Color::DarkGray)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("  i  ", bg.fg(Color::White)),
+        Span::styled(" i ", bg.fg(Color::White)),
         Span::styled("info expanded", bg.fg(Color::DarkGray)),
     ]));
 
