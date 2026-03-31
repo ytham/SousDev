@@ -122,12 +122,16 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
-    // Pad to fill the sidebar, then add key hints at the bottom.
-    let hints_lines = 3;
+    // Pad to fill the sidebar, then add separator + key hints at the bottom.
+    let hints_lines = 4; // separator + 3 hint lines
     let hints_row = area.height.saturating_sub(hints_lines) as usize;
     while lines.len() < hints_row {
         lines.push(Line::from(Span::styled(" ", bg)));
     }
+    lines.push(Line::from(Span::styled(
+        "─".repeat(area.width.saturating_sub(2) as usize),
+        bg.fg(Color::DarkGray),
+    )));
     lines.push(Line::from(vec![
         Span::styled(" ↑↓ ", bg.fg(Color::White)),
         Span::styled("select workflow", bg.fg(Color::DarkGray)),

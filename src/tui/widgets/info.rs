@@ -116,7 +116,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Pad to footer.
-    let footer_lines = 4;
+    let footer_lines = 3;
     let footer_row = area.height.saturating_sub(footer_lines) as usize;
     while lines.len() < footer_row {
         lines.push(Line::from(vec![
@@ -135,19 +135,16 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(" ↑↓ ", bg.fg(Color::White)),
         Span::styled("select  ", bg.fg(Color::DarkGray)),
         Span::styled("⏎ ", bg.fg(Color::White)),
-        Span::styled("filter", bg.fg(Color::DarkGray)),
+        Span::styled("filter  ", bg.fg(Color::DarkGray)),
+        Span::styled("g ", bg.fg(Color::White)),
+        Span::styled("open", bg.fg(Color::DarkGray)),
     ]));
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
-        Span::styled("  g  ", bg.fg(Color::White)),
-        Span::styled("open    ", bg.fg(Color::DarkGray)),
-        Span::styled("c ", bg.fg(Color::White)),
-        Span::styled("clear", bg.fg(Color::DarkGray)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(border_char, border_style),
-        Span::styled(" ESC ", bg.fg(Color::White)),
-        Span::styled("close", bg.fg(Color::DarkGray)),
+        Span::styled("  c  ", bg.fg(Color::White)),
+        Span::styled("clear   ", bg.fg(Color::DarkGray)),
+        Span::styled("C ", bg.fg(Color::White)),
+        Span::styled("clear all", bg.fg(Color::DarkGray)),
     ]));
 
     let block = Block::default().style(bg);

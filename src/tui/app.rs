@@ -84,11 +84,16 @@ impl LogEntry {
     pub fn row_count(&self) -> usize {
         match self.kind {
             LogEntryKind::Thought => {
-                if self.lines.len() <= 1 {
-                    1 // Single-line thought — always fully shown.
+                // Count total visual lines (LogLines + embedded newlines).
+                let total_visual: usize = self
+                    .lines
+                    .iter()
+                    .map(|l| l.message.split('\n').count())
+                    .sum();
+                if total_visual <= 1 {
+                    1 // Truly single-line — always fully shown.
                 } else if self.expanded {
-                    // Count embedded newlines in expanded mode.
-                    self.lines.iter().map(|l| l.message.split('\n').count()).sum()
+                    total_visual
                 } else {
                     2 // First line + "[…] N more lines" indicator.
                 }
@@ -546,19 +551,43 @@ impl App {
                     wf.run_id = None;
                     wf.current_item_label = None;
 
-                    let mut msg = format!("Run completed: {}", wf.status);
-                    if let Some(url) = pr_url {
-                        msg.push_str(&format!(" | PR: {}", url));
+                    if skipped {
+                        // For skipped runs, update the last log line in-place
+                        // instead of appending a new one every tick.
+                        let now = chrono::Local::now().format("%-I:%M:%S %p").to_string();
+                        let msg = format!("No new items to process — last checked {}", now);
+                        let is_last_skipped = wf
+                            .logs
+                            .last()
+                            .map(|l| l.stage == "executor" && l.message.starts_with("No new items"))
+                            .unwrap_or(false);
+                        if is_last_skipped {
+                            if let Some(last) = wf.logs.last_mut() {
+                                last.message = msg;
+                            }
+                        } else {
+                            wf.logs.push(LogLine {
+                                level: "info".into(),
+                                stage: "executor".into(),
+                                message: msg,
+                                run_id: completed_run_id.clone(),
+                            });
+                        }
+                    } else {
+                        let mut msg = format!("Run completed: {}", wf.status);
+                        if let Some(url) = pr_url {
+                            msg.push_str(&format!(" | PR: {}", url));
+                        }
+                        if let Some(err) = error {
+                            msg.push_str(&format!(" | Error: {}", err));
+                        }
+                        wf.logs.push(LogLine {
+                            level: if success { "info" } else { "error" }.into(),
+                            stage: "executor".into(),
+                            message: msg,
+                            run_id: completed_run_id.clone(),
+                        });
                     }
-                    if let Some(err) = error {
-                        msg.push_str(&format!(" | Error: {}", err));
-                    }
-                    wf.logs.push(LogLine {
-                        level: if success { "info" } else { "error" }.into(),
-                        stage: "executor".into(),
-                        message: msg,
-                        run_id: completed_run_id.clone(),
-                    });
                 }
 
                 dirty_workflow = Some(workflow_name.clone());
@@ -1382,16 +1411,18 @@ impl App {
             if click_offset >= accum && click_offset < accum + entry_rows {
                 // All expandable entries respond to clicks.
                 match entry.kind {
-                    LogEntryKind::Thought if entry.lines.len() > 1 => {
-                        target_idx = Some(i);
+                    LogEntryKind::Thought => {
+                        // Expandable if multiple LogLines OR embedded newlines.
+                        let has_content = entry.lines.len() > 1
+                            || entry.lines.iter().any(|l| l.message.contains('\n'));
+                        if has_content || entry.expanded {
+                            target_idx = Some(i);
+                        }
                     }
-                    LogEntryKind::ToolCall if entry.lines.len() > 1 => {
+                    LogEntryKind::ToolCall if entry.lines.len() > 1 || entry.expanded => {
                         target_idx = Some(i);
                     }
                     LogEntryKind::ConsolidatedTools => {
-                        target_idx = Some(i);
-                    }
-                    LogEntryKind::ToolCall if entry.expanded => {
                         target_idx = Some(i);
                     }
                     _ => {}

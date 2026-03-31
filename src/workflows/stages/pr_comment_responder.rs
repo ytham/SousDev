@@ -111,6 +111,28 @@ impl Stage for PrCommentResponderStage {
                 }
             };
 
+        // ── Update PR description if changes are significant ──────────────
+        // Check if the diff is large enough to warrant a description update.
+        let diff_stat = get_diff_stat(&ctx.workspace_dir, &pr.base_ref_name).await;
+        let files_changed = diff_stat.lines().count();
+
+        if files_changed >= 2 {
+            ctx.logger.info(&format!(
+                "PrCommentResponderStage: {} files changed — updating PR description",
+                files_changed
+            ));
+            match update_pr_description(&pr.repo, pr.number, ctx).await {
+                Ok(()) => {
+                    ctx.logger.info("PrCommentResponderStage: PR description updated");
+                }
+                Err(e) => {
+                    let msg = format!("Failed to update PR description: {}", e);
+                    ctx.logger.info(&msg);
+                    // Non-fatal — the PR is still valid without an updated description.
+                }
+            }
+        }
+
         ctx.pr_response_result = Some(PrResponseResult {
             inline_replies_posted: inline_replies,
             summary_posted,
@@ -136,6 +158,133 @@ async fn resolve_head_sha(workspace_dir: &std::path::Path) -> String {
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+/// Get `git diff --stat` against the base branch.
+async fn get_diff_stat(workspace_dir: &std::path::Path, base_branch: &str) -> String {
+    let range = format!("origin/{}...HEAD", base_branch);
+    Command::new("git")
+        .args(["diff", "--stat", &range])
+        .current_dir(workspace_dir)
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Update the PR description using the Claude CLI to generate a holistic
+/// summary of all changes in the PR.
+async fn update_pr_description(
+    repo: &str,
+    pr_number: u64,
+    ctx: &StageContext,
+) -> Result<()> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let base_branch = ctx
+        .config
+        .workspace
+        .as_ref()
+        .and_then(|w| w.base_branch.as_deref())
+        .unwrap_or("main");
+
+    // Get the full diff for the PR.
+    let diff = Command::new("git")
+        .args(["diff", &format!("origin/{}...HEAD", base_branch)])
+        .current_dir(&ctx.workspace_dir)
+        .output()
+        .await
+        .ok()
+        .map(|o| {
+            let raw = String::from_utf8_lossy(&o.stdout);
+            if raw.len() > 30000 {
+                format!("{}\n… (diff truncated)", &raw[..30000])
+            } else {
+                raw.to_string()
+            }
+        })
+        .unwrap_or_default();
+
+    let prompt = format!(
+        "Write an updated pull request description for this PR.\n\n\
+         The PR has been modified since it was originally opened. \
+         Write a holistic description that covers ALL current changes \
+         (not just the latest commit).\n\n\
+         ## Current diff\n\n```\n{}\n```\n\n\
+         Output ONLY the new PR body in markdown. Do not include a title line. \
+         Keep it concise but comprehensive. Include:\n\
+         - A summary paragraph\n\
+         - A bullet list of key changes\n\
+         - Any notes for reviewers",
+        diff
+    );
+
+    // Call Claude CLI.
+    let mut args = vec![
+        "--print".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--output-format".to_string(),
+        "text".to_string(),
+    ];
+    if let Some(ref sp) = ctx.system_prompt {
+        args.push("--system-prompt".to_string());
+        args.push(sp.clone());
+    }
+    args.push("-".to_string());
+
+    let mut child = Command::new("claude")
+        .args(&args)
+        .current_dir(&ctx.workspace_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(prompt.as_bytes()).await?;
+    }
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Claude CLI timed out generating PR description"))??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("Claude CLI failed: {}", &stderr[..stderr.len().min(200)]));
+    }
+
+    let new_body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if new_body.is_empty() {
+        return Err(anyhow::anyhow!("Claude CLI returned empty description"));
+    }
+
+    // Update the PR description via gh CLI.
+    let mut tmp = tempfile::NamedTempFile::new()?;
+    std::io::Write::write_all(&mut tmp, new_body.as_bytes())?;
+    let tmp_path = tmp.path().to_owned();
+
+    let gh_output = Command::new("gh")
+        .arg("pr")
+        .arg("edit")
+        .arg(pr_number.to_string())
+        .arg("--repo")
+        .arg(repo)
+        .arg("--body-file")
+        .arg(&tmp_path)
+        .output()
+        .await?;
+
+    if !gh_output.status.success() {
+        let stderr = String::from_utf8_lossy(&gh_output.stderr);
+        return Err(anyhow::anyhow!("gh pr edit failed: {}", stderr));
+    }
+
+    Ok(())
 }
 
 /// Build the reply body for a single inline review comment.

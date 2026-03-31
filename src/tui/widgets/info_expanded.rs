@@ -21,7 +21,7 @@ pub const INFO_EXPANDED_WIDTH: u16 = 60;
 const HEADER_ROWS: u16 = 2;
 
 /// Number of reserved rows at the bottom (separator + hints).
-const FOOTER_ROWS: u16 = 4;
+const FOOTER_ROWS: u16 = 5;
 
 /// Draw the info expanded panel as a floating overlay if it is open.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -173,6 +173,33 @@ pub fn draw(f: &mut Frame, app: &App) {
         ]));
     }
 
+    // ── Selected item status ────────────────────────────────────────────────
+    let selected = app.info_expanded_selected;
+    let status_text = if selected == 0 {
+        "Showing all logs".to_string()
+    } else {
+        let items = app.selected_items();
+        let item_idx = selected.saturating_sub(1);
+        if let Some(item) = items.get(item_idx) {
+            let status_desc = status_description(item.status);
+            format!("{} — {}", item.id, status_desc)
+        } else {
+            String::new()
+        }
+    };
+
+    if !status_text.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("▎ ", border),
+            Span::styled(format!(" {}", status_text), bg.fg(Color::Gray)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("▎ ", border),
+            Span::styled(" ", bg),
+        ]));
+    }
+
     // ── Footer (hints) ────────────────────────────────────────────────────
     lines.push(Line::from(vec![
         Span::styled("▎ ", border),
@@ -203,6 +230,19 @@ pub fn draw(f: &mut Frame, app: &App) {
     let block = Block::default().style(bg);
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, panel_area);
+}
+
+/// Return a human-readable description of an item status.
+fn status_description(status: ItemStatus) -> &'static str {
+    match status {
+        ItemStatus::None => "Not yet processed",
+        ItemStatus::InProgress => "In progress",
+        ItemStatus::Success => "PR opened / completed",
+        ItemStatus::Error => "Failed (will retry after cooldown)",
+        ItemStatus::Cooldown => "In cooldown (will retry later)",
+        ItemStatus::Reviewed => "Review posted",
+        ItemStatus::NewComments => "Has new reviewer comments",
+    }
 }
 
 /// Return the display badge and color for an item status.

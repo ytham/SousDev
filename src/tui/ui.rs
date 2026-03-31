@@ -23,8 +23,7 @@ pub const BG_SIDEBAR: Color = Color::Rgb(24, 24, 32);
 pub const BG_INFO_EXPANDED: Color = Color::Rgb(28, 28, 38);
 /// Status bar background.
 pub const BG_STATUS_BAR: Color = Color::Rgb(30, 30, 42);
-/// Command menu / cron edit overlay background.
-pub const BG_MENU: Color = Color::Rgb(34, 34, 48);
+
 /// The terminal default background shows through the 1-char gaps.
 pub const BG_GAP: Color = Color::Reset;
 

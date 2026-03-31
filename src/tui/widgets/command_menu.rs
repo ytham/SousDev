@@ -1,7 +1,8 @@
 /// Command menu overlay — shown at the bottom when the user presses `:`.
 /// Also renders the cron edit input when in CronEdit mode.
 ///
-/// Styled to match the overall muted dark theme with a blue left border.
+/// Floating modals use consistent BG_INFO_EXPANDED background with
+/// blue left border and standard margins.
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -9,8 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::{App, InputMode};
-
-use crate::tui::ui::{ACCENT_BORDER, BG_MENU};
+use crate::tui::ui::{ACCENT_BORDER, BG_INFO_EXPANDED};
 
 /// Draw the command menu or cron edit overlay.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -22,24 +22,28 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 /// Draw the command menu overlay.
+///
+/// Floats 1 line from the bottom, 2 chars from the left.
 fn draw_command_menu(f: &mut Frame, _app: &App) {
     let area = f.area();
     let menu_height = 1u16;
-    if area.height < menu_height + 1 {
+    let margin_left: u16 = 2;
+    let margin_bottom: u16 = 1;
+    if area.height < menu_height + margin_bottom + 1 || area.width < margin_left + 20 {
         return;
     }
 
     let menu_area = Rect {
-        x: area.x,
-        y: area.y + area.height - menu_height,
-        width: area.width,
+        x: area.x + margin_left,
+        y: area.y + area.height - menu_height - margin_bottom,
+        width: area.width - margin_left,
         height: menu_height,
     };
 
     f.render_widget(Clear, menu_area);
 
-    let bg = Style::default().bg(BG_MENU);
-    let border = Style::default().fg(ACCENT_BORDER).bg(BG_MENU);
+    let bg = Style::default().bg(BG_INFO_EXPANDED);
+    let border = Style::default().fg(ACCENT_BORDER).bg(BG_INFO_EXPANDED);
     let key = bg.fg(Color::White);
     let label = bg.fg(Color::DarkGray);
 
@@ -63,24 +67,28 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
 }
 
 /// Draw the cron schedule edit input overlay.
+///
+/// Same positioning as the command menu.
 fn draw_cron_edit(f: &mut Frame, app: &App) {
     let area = f.area();
     let edit_height = 1u16;
-    if area.height < edit_height + 1 {
+    let margin_left: u16 = 2;
+    let margin_bottom: u16 = 1;
+    if area.height < edit_height + margin_bottom + 1 || area.width < margin_left + 20 {
         return;
     }
 
     let edit_area = Rect {
-        x: area.x,
-        y: area.y + area.height - edit_height,
-        width: area.width,
+        x: area.x + margin_left,
+        y: area.y + area.height - edit_height - margin_bottom,
+        width: area.width - margin_left,
         height: edit_height,
     };
 
     f.render_widget(Clear, edit_area);
 
-    let bg = Style::default().bg(BG_MENU);
-    let border = Style::default().fg(ACCENT_BORDER).bg(BG_MENU);
+    let bg = Style::default().bg(BG_INFO_EXPANDED);
+    let border = Style::default().fg(ACCENT_BORDER).bg(BG_INFO_EXPANDED);
     let key = bg.fg(Color::White);
     let label = bg.fg(Color::DarkGray);
     let cursor = "\u{2588}";
