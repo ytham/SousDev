@@ -485,6 +485,30 @@ impl WorkflowExecutor {
                     status,
                 });
             }
+            // Also include previously-handled issues from the store that
+            // weren't in the current fetch (they may have been closed or
+            // no longer match the filters, but should still show as [PR]).
+            let fetched_numbers: std::collections::HashSet<u64> =
+                items.iter().map(|i| i.number).collect();
+            if let Ok(handled) = self
+                .issue_store
+                .get_all_records(&self.config.name)
+                .await
+            {
+                for (num_str, rec) in &handled {
+                    if let Ok(num) = num_str.parse::<u64>() {
+                        if !fetched_numbers.contains(&num) {
+                            summaries.push(ItemSummary {
+                                id: format!("#{}", num),
+                                title: truncate_title(&rec.issue_title, 50),
+                                url: rec.issue_url.clone(),
+                                status: ItemStatus::Success,
+                            });
+                        }
+                    }
+                }
+            }
+
             self.opts.tui_tx.send(TuiEvent::ItemsSummary {
                 workflow_name: self.config.name.clone(),
                 items: summaries,

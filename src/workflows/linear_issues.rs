@@ -60,7 +60,7 @@ pub async fn fetch_linear_issues(options: &FetchLinearIssuesOptions) -> Result<V
     let api_key = std::env::var("LINEAR_API_KEY")
         .map_err(|_| anyhow::anyhow!("LINEAR_API_KEY environment variable not set"))?;
 
-    let limit = options.limit.unwrap_or(10);
+    let limit = options.limit.unwrap_or(100);
     let states = options
         .states
         .as_deref()

@@ -114,7 +114,7 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .unwrap_or("");
-    let limit = options.limit.unwrap_or(10);
+    let limit = options.limit.unwrap_or(100);
     let json_fields = "number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,assignees,createdAt,updatedAt";
 
     // Raw search mode: use the provided search query directly (for pr-responder).

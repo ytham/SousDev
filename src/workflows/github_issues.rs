@@ -63,7 +63,7 @@ pub async fn fetch_github_issues(options: &FetchIssuesOptions) -> Result<Vec<Git
 
     let assignees = options.assignees.as_deref().unwrap_or(&[]);
     let labels = options.labels.as_deref().unwrap_or(&[]);
-    let limit = options.limit.unwrap_or(10);
+    let limit = options.limit.unwrap_or(100);
 
     if assignees.is_empty() {
         // No assignee filter — single call.
