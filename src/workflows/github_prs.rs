@@ -299,11 +299,15 @@ pub async fn fetch_pr_comments(
     pr_number: u64,
     after_id: Option<u64>,
 ) -> Result<Vec<PRComment>> {
-    let cmd_str = format!(
-        "gh api /repos/{}/issues/{}/comments --jq '[.[] | {{id: .id, login: .user.login, body: .body, createdAt: .created_at}}]'",
-        repo, pr_number
-    );
-    let output = Command::new("sh").arg("-c").arg(&cmd_str).output().await?;
+    let endpoint = format!("/repos/{}/issues/{}/comments", repo, pr_number);
+    let jq = "[.[] | {id: .id, login: .user.login, body: .body, createdAt: .created_at}]";
+    let output = Command::new("gh")
+        .arg("api")
+        .arg(&endpoint)
+        .arg("--jq")
+        .arg(jq)
+        .output()
+        .await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() || stdout.trim() == "null" {
@@ -333,11 +337,15 @@ pub async fn fetch_pr_review_comments(
     pr_number: u64,
     after_id: Option<u64>,
 ) -> Result<Vec<PRComment>> {
-    let cmd_str = format!(
-        "gh api /repos/{}/pulls/{}/reviews --jq '[.[] | select(.body != null and .body != \"\") | {{id: .id, login: .user.login, body: .body, createdAt: .submitted_at}}]'",
-        repo, pr_number
-    );
-    let output = Command::new("sh").arg("-c").arg(&cmd_str).output().await?;
+    let endpoint = format!("/repos/{}/pulls/{}/reviews", repo, pr_number);
+    let jq = r#"[.[] | select(.body != null and .body != "") | {id: .id, login: .user.login, body: .body, createdAt: .submitted_at}]"#;
+    let output = Command::new("gh")
+        .arg("api")
+        .arg(&endpoint)
+        .arg("--jq")
+        .arg(jq)
+        .output()
+        .await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() || stdout.trim() == "null" {
@@ -364,11 +372,15 @@ pub async fn fetch_inline_review_comments(
     pr_number: u64,
     after_id: Option<u64>,
 ) -> Result<Vec<InlineReviewComment>> {
-    let cmd_str = format!(
-        "gh api /repos/{}/pulls/{}/comments --jq '[.[] | {{id: .id, login: .user.login, body: .body, path: .path, line: .line, diffHunk: .diff_hunk, createdAt: .created_at, inReplyToId: .in_reply_to_id}}]'",
-        repo, pr_number
-    );
-    let output = Command::new("sh").arg("-c").arg(&cmd_str).output().await?;
+    let endpoint = format!("/repos/{}/pulls/{}/comments", repo, pr_number);
+    let jq = "[.[] | {id: .id, login: .user.login, body: .body, path: .path, line: .line, diffHunk: .diff_hunk, createdAt: .created_at, inReplyToId: .in_reply_to_id}]";
+    let output = Command::new("gh")
+        .arg("api")
+        .arg(&endpoint)
+        .arg("--jq")
+        .arg(jq)
+        .output()
+        .await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() || stdout.trim() == "null" {
@@ -398,16 +410,18 @@ pub async fn post_inline_comment(
     line: u64,
     body: &str,
 ) -> Result<()> {
-    let cmd_str = format!(
-        "gh api --method POST /repos/{}/pulls/{}/comments -f commit_id={} -f path={} -F line={} -f side=RIGHT -f body={}",
-        repo,
-        pr_number,
-        shell_escape(head_sha),
-        shell_escape(path),
-        line,
-        shell_escape(body)
-    );
-    let output = Command::new("sh").arg("-c").arg(&cmd_str).output().await?;
+    let endpoint = format!("/repos/{}/pulls/{}/comments", repo, pr_number);
+    let output = Command::new("gh")
+        .arg("api")
+        .arg("--method").arg("POST")
+        .arg(&endpoint)
+        .arg("-f").arg(format!("commit_id={}", head_sha))
+        .arg("-f").arg(format!("path={}", path))
+        .arg("-F").arg(format!("line={}", line))
+        .arg("-f").arg("side=RIGHT")
+        .arg("-f").arg(format!("body={}", body))
+        .output()
+        .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!("Failed to post inline comment: {}", stderr));
@@ -436,13 +450,14 @@ pub async fn post_summary_comment(repo: &str, pr_number: u64, body: &str) -> Res
 
 /// Reply to an existing inline review comment.
 pub async fn reply_to_inline_comment(repo: &str, comment_id: u64, body: &str) -> Result<()> {
-    let cmd_str = format!(
-        "gh api --method POST /repos/{}/pulls/comments/{}/replies -f body={}",
-        repo,
-        comment_id,
-        shell_escape(body)
-    );
-    let output = Command::new("sh").arg("-c").arg(&cmd_str).output().await?;
+    let endpoint = format!("/repos/{}/pulls/comments/{}/replies", repo, comment_id);
+    let output = Command::new("gh")
+        .arg("api")
+        .arg("--method").arg("POST")
+        .arg(&endpoint)
+        .arg("-f").arg(format!("body={}", body))
+        .output()
+        .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!("Failed to reply to inline comment: {}", stderr));
@@ -467,6 +482,7 @@ pub async fn detect_github_login() -> Result<String> {
 }
 
 /// Single-quote escape a string for use in a shell command.
+#[cfg(test)]
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
