@@ -24,9 +24,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 /// Draw the command menu overlay.
 ///
 /// Floats 1 line from the bottom, 2 chars from the left.
+/// 1 row + 1 char padding all around inside the box.
 fn draw_command_menu(f: &mut Frame, _app: &App) {
     let area = f.area();
-    let menu_height = 1u16;
+    let menu_height = 4u16; // top pad + title + commands + bottom pad
     let margin_left: u16 = 2;
     let margin_bottom: u16 = 1;
     if area.height < menu_height + margin_bottom + 1 || area.width < margin_left + 20 {
@@ -46,25 +47,36 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
     let border = Style::default().fg(ACCENT_BORDER).bg(BG_INFO_EXPANDED);
     let key = bg.fg(Color::White);
     let label = bg.fg(Color::DarkGray);
-
     let version = env!("CARGO_PKG_VERSION");
-    let line = Line::from(vec![
-        Span::styled("▎ ", border),
-        Span::styled(" ESC ", key),
-        Span::styled("close  ", label),
-        Span::styled("q ", key),
-        Span::styled("quit  ", label),
-        Span::styled("e ", key),
-        Span::styled("enable/disable  ", label),
-        Span::styled("c ", key),
-        Span::styled("schedule  ", label),
-        Span::styled("p ", key),
-        Span::styled("pause/resume  ", label),
-        Span::styled(format!("v{}", version), bg.fg(Color::DarkGray)),
-    ]);
+
+    let lines = vec![
+        // Top padding row.
+        Line::from(vec![Span::styled("▎ ", border), Span::styled(" ", bg)]),
+        // Title row.
+        Line::from(vec![
+            Span::styled("▎ ", border),
+            Span::styled(format!(" 🧑‍🍳 SousDev v{}", version), bg.fg(Color::Gray)),
+        ]),
+        // Commands row.
+        Line::from(vec![
+            Span::styled("▎ ", border),
+            Span::styled("  ESC ", key),
+            Span::styled("close  ", label),
+            Span::styled("q ", key),
+            Span::styled("quit  ", label),
+            Span::styled("e ", key),
+            Span::styled("enable/disable  ", label),
+            Span::styled("c ", key),
+            Span::styled("schedule  ", label),
+            Span::styled("p ", key),
+            Span::styled("pause/resume", label),
+        ]),
+        // Bottom padding row.
+        Line::from(vec![Span::styled("▎ ", border), Span::styled(" ", bg)]),
+    ];
 
     let block = Block::default().style(bg);
-    let paragraph = Paragraph::new(line).block(block);
+    let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, menu_area);
 }
 
