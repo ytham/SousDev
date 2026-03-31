@@ -1157,13 +1157,15 @@ impl WorkflowExecutor {
                 login.ends_with("[bot]") || login == "github-actions"
             };
 
-            // Inline review comments: only from humans, excluding yourself.
+            // Inline review comments: include all humans (including yourself).
+            // You may leave inline comments on your own PR to direct the agent
+            // (e.g. "use a toast instead of an alert").
             let new_inline: Vec<_> = inline
                 .into_iter()
-                .filter(|c| c.login != reviewer_login && !is_bot(&c.login))
+                .filter(|c| !is_bot(&c.login))
                 .collect();
 
-            // Timeline comments: include humans only (including yourself).
+            // Timeline comments: include all humans (including yourself).
             let new_timeline: Vec<_> = timeline
                 .into_iter()
                 .filter(|c| !is_bot(&c.login))

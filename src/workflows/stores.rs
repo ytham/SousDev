@@ -1417,6 +1417,9 @@ impl FailureCooldownStore {
             return Ok(HashMap::new());
         }
         let content = fs::read_to_string(&self.file_path).await?;
+        if content.trim().is_empty() {
+            return Ok(HashMap::new());
+        }
         let data: HashMap<String, FailureRecord> = serde_json::from_str(&content)?;
         Ok(data)
     }
@@ -1528,5 +1531,101 @@ mod failure_cooldown_tests {
         let failures = store.get_failures_for_workflow("wf1").await.unwrap();
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].0, "42");
+    }
+
+    // ── Missing / empty / corrupt file resilience ─────────────────────────
+
+    #[tokio::test]
+    async fn test_run_store_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let store = RunStore::new(dir.path());
+        let runs = store.get_history(Some("any"), 10).await.unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handled_issue_store_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let store = HandledIssueStore::new(dir.path());
+        assert!(!store.is_handled("wf", 42).await.unwrap());
+        let all = store.get_all_records("wf").await.unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pr_review_store_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let store = PrReviewStore::new(dir.path());
+        assert!(store.get_record("wf", 42).await.unwrap().is_none());
+        let all = store.get_all_records("wf").await.unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pr_response_store_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let store = PrResponseStore::new(dir.path());
+        assert!(store.get_record("wf", 42).await.unwrap().is_none());
+        let all = store.get_all_records("wf").await.unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_failure_cooldown_store_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        assert!(!store.is_in_cooldown("wf", "42").await.unwrap());
+        let failures = store.get_failures_for_workflow("wf").await.unwrap();
+        assert!(failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_failure_cooldown_store_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        // Create the output dir and write an empty file.
+        let output_dir = dir.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("failure-cooldowns.json"), "").unwrap();
+        // Should not crash.
+        assert!(!store.is_in_cooldown("wf", "42").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_run_store_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let store = RunStore::new(dir.path());
+        let output_dir = dir.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("runs.json"), "").unwrap();
+        let runs = store.get_history(Some("any"), 10).await.unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handled_issue_store_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let store = HandledIssueStore::new(dir.path());
+        let output_dir = dir.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("handled-issues.json"), "").unwrap();
+        assert!(!store.is_handled("wf", 42).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_stores_recreate_after_deletion() {
+        let dir = TempDir::new().unwrap();
+        let store = FailureCooldownStore::new(dir.path());
+        // Write something.
+        store.record_failure("wf", "42").await.unwrap();
+        assert!(store.is_in_cooldown("wf", "42").await.unwrap());
+        // Delete the output directory entirely.
+        let output_dir = dir.path().join("output");
+        std::fs::remove_dir_all(&output_dir).unwrap();
+        // Should not crash — returns empty.
+        assert!(!store.is_in_cooldown("wf", "42").await.unwrap());
+        // Writing should recreate the directory.
+        store.record_failure("wf", "99").await.unwrap();
+        assert!(store.is_in_cooldown("wf", "99").await.unwrap());
     }
 }
