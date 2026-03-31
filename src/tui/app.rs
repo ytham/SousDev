@@ -2091,7 +2091,7 @@ async fn refresh_info_from_remote(
                 .clone()
                 .or_else(|| repo_to_gh_identifier(config.target_repo.as_deref()));
 
-            let prs = fetch_github_prs(&FetchPRsOptions {
+            let all_prs = fetch_github_prs(&FetchPRsOptions {
                 repo: gh_repo,
                 search: prs_cfg.search.clone(),
                 limit: prs_cfg.limit,
@@ -2099,6 +2099,25 @@ async fn refresh_info_from_remote(
             })
             .await
             .unwrap_or_default();
+
+            // Apply the same individual-reviewer/assignee filter as the executor.
+            let reviewer_login = crate::workflows::github_prs::detect_github_login()
+                .await
+                .unwrap_or_default();
+            let prs: Vec<_> = all_prs
+                .into_iter()
+                .filter(|pr| {
+                    // Individually requested as reviewer.
+                    if pr.requested_reviewers.iter().any(|r| r == &reviewer_login) {
+                        return true;
+                    }
+                    // Assigned to the user.
+                    if pr.assignees.iter().any(|a| a == &reviewer_login) {
+                        return true;
+                    }
+                    false
+                })
+                .collect();
 
             let mut summaries: Vec<ItemSummary> = Vec::new();
             for pr in &prs {
