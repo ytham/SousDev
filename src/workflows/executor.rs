@@ -770,7 +770,13 @@ impl WorkflowExecutor {
                     return true;
                 }
 
-                // Check 2: assigned to the user (when assignee filter is configured).
+                // Check 2: assigned to the user.
+                // Always check assignees — if you're assigned, you should review.
+                if pr.assignees.iter().any(|a| a == &reviewer_login) {
+                    return true;
+                }
+
+                // Check 3: assignee filter from config (for additional assignees).
                 if let Some(ref allowed) = assignee_filter {
                     if pr.assignees.iter().any(|a| allowed.contains(a)) {
                         return true;

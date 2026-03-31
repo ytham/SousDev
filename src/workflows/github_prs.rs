@@ -216,6 +216,40 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
         }
     }
 
+    // Search 3: broader review-requested:@me (includes team requests).
+    // Catches cases where user-review-requested:@me misses due to
+    // GitHub search index delays.
+    let search3 = if extra_search.is_empty() {
+        "review-requested:@me is:open".to_string()
+    } else {
+        format!("review-requested:@me is:open {}", extra_search)
+    };
+
+    let output3 = Command::new("gh")
+        .arg("pr").arg("list")
+        .arg("--repo").arg(&repo)
+        .arg("--search").arg(&search3)
+        .arg("--limit").arg(limit.to_string())
+        .arg("--json").arg(json_fields)
+        .output()
+        .await;
+
+    if let Ok(output3) = output3 {
+        if output3.status.success() {
+            let stdout3 = String::from_utf8_lossy(&output3.stdout);
+            if !stdout3.trim().is_empty() {
+                let raw3: Vec<RawGhPR> = serde_json::from_str(&stdout3).unwrap_or_default();
+                let existing: std::collections::HashSet<u64> =
+                    raw.iter().map(|r| r.number).collect();
+                for r in raw3 {
+                    if !existing.contains(&r.number) {
+                        raw.push(r);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(raw
         .into_iter()
         .map(|r| map_raw_pr(r, &repo))

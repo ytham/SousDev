@@ -1147,9 +1147,9 @@ impl App {
         let item_idx = self.info_expanded_selected - 1;
         if let Some(items) = self.workflow_items.get_mut(&wf_name) {
             if let Some(item) = items.get_mut(item_idx) {
-                if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
-                    item.status = ItemStatus::None;
+                if item.status != ItemStatus::None && item.status != ItemStatus::InProgress {
                     let item_key = extract_item_key(&item.id);
+                    item.status = ItemStatus::None;
                     self.clear_requests.push((wf_name, item_key));
                     self.show_toast("Cleared — will retry next tick", Duration::from_secs(3));
                 }
@@ -1157,7 +1157,7 @@ impl App {
         }
     }
 
-    /// Clear all errored/cooldown items for the selected workflow.
+    /// Clear all non-pending items for the selected workflow.
     pub fn clear_all_errored_items(&mut self) {
         let wf_name = match self.selected_workflow() {
             Some(wf) => wf.name.clone(),
@@ -1166,7 +1166,7 @@ impl App {
         let mut count = 0usize;
         if let Some(items) = self.workflow_items.get_mut(&wf_name) {
             for item in items.iter_mut() {
-                if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
+                if item.status != ItemStatus::None && item.status != ItemStatus::InProgress {
                     item.status = ItemStatus::None;
                     let item_key = extract_item_key(&item.id);
                     self.clear_requests.push((wf_name.clone(), item_key));
@@ -1216,9 +1216,10 @@ impl App {
         let item_idx = self.info_selected - 1;
         if let Some(items) = self.workflow_items.get_mut(&wf_name) {
             if let Some(item) = items.get_mut(item_idx) {
-                if item.status == ItemStatus::Error || item.status == ItemStatus::Cooldown {
-                    item.status = ItemStatus::None;
+                // Allow clearing any non-None, non-InProgress status.
+                if item.status != ItemStatus::None && item.status != ItemStatus::InProgress {
                     let item_key = extract_item_key(&item.id);
+                    item.status = ItemStatus::None;
                     self.clear_requests.push((wf_name, item_key));
                     self.show_toast("Cleared — will retry next tick", Duration::from_secs(3));
                 }
@@ -1468,7 +1469,12 @@ impl App {
                 let matching_run_ids: HashSet<String> = self
                     .run_id_to_item
                     .iter()
-                    .filter(|(_, label)| label.contains(item_id))
+                    .filter(|(_, label)| {
+                        // Exact match on the item ID within the label.
+                        // Label is e.g. "issue #12073" or "PR #12073".
+                        // item_id is e.g. "#12073" or "PR #12073".
+                        label.as_str() == item_id || label.ends_with(item_id.as_str())
+                    })
                     .map(|(rid, _)| rid.clone())
                     .collect();
 
@@ -1505,7 +1511,7 @@ impl App {
                 self.log_filter.as_ref().map(|item_id| {
                     self.run_id_to_item
                         .iter()
-                        .filter(|(_, label)| label.contains(item_id.as_str()))
+                        .filter(|(_, label)| label.as_str() == item_id.as_str() || label.ends_with(item_id.as_str()))
                         .map(|(rid, _)| rid.clone())
                         .collect()
                 })
@@ -2309,12 +2315,25 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
             }
         }
 
-        // Process pending failure cooldown clears.
+        // Process pending clear requests — clear from all relevant stores.
         if !app.clear_requests.is_empty() {
             if let Some(ref root) = app.project_root {
-                let store = crate::workflows::stores::FailureCooldownStore::new(root);
+                let failure_store = crate::workflows::stores::FailureCooldownStore::new(root);
+                let review_store = crate::workflows::stores::PrReviewStore::new(root);
+                let issue_store = crate::workflows::stores::HandledIssueStore::new(root);
                 for (wf_name, item_key) in app.clear_requests.drain(..) {
-                    let _ = store.clear_failure(&wf_name, &item_key).await;
+                    // Clear failure cooldown.
+                    let _ = failure_store.clear_failure(&wf_name, &item_key).await;
+                    // Clear PR review record (for pr-reviewer items like "pr-12073").
+                    if let Some(pr_num) = item_key.strip_prefix("pr-") {
+                        if let Ok(num) = pr_num.parse::<u64>() {
+                            let _ = review_store.remove_record(&wf_name, num).await;
+                        }
+                    }
+                    // Clear handled issue record (for issue items like "12345").
+                    if let Ok(num) = item_key.parse::<u64>() {
+                        let _ = issue_store.unmark_handled(&wf_name, num).await;
+                    }
                 }
             } else {
                 app.clear_requests.clear();
