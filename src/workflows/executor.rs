@@ -612,10 +612,12 @@ impl WorkflowExecutor {
             issue.body
         ));
 
-        let wf_log = WorkflowLog::with_tui_sender(
+        let log_label = format!("issue-{}", issue.number);
+        let wf_log = WorkflowLog::with_tui_sender_and_label(
             &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
             &self.config.name,
             &run_id,
+            Some(&log_label),
             self.opts.tui_tx.clone(),
         ).await.ok();
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
@@ -967,7 +969,7 @@ impl WorkflowExecutor {
     async fn run_single_pr_review(
         &self,
         pr: &GitHubPR,
-        reviewer_login: &str,
+        _reviewer_login: &str,
     ) -> Result<WorkflowResult> {
         // Runtime enforcement: must be claude-loop
         if self.config.agent_loop.technique != "claude-loop" {
@@ -1000,28 +1002,15 @@ impl WorkflowExecutor {
 
         let parsed_task =
             ParsedTask::new(format!("Review PR #{}: {}", pr.number, pr.title));
-        let wf_log = WorkflowLog::with_tui_sender(
+        let log_label = format!("pr-{}", pr.number);
+        let wf_log = WorkflowLog::with_tui_sender_and_label(
             &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
             &self.config.name,
             &run_id,
+            Some(&log_label),
             self.opts.tui_tx.clone(),
         ).await.ok();
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
-        ctx.reviewing_pr = Some(pr.clone());
-        ctx.reviewer_login = Some(reviewer_login.to_string());
-        ctx.branch = pr.head_ref_name.clone();
-
-        // Load and render the pr-review prompt.
-        let loader = PromptLoader::new(&ctx.harness_root);
-        let mut vars = HashMap::new();
-        vars.insert("pr_title".to_string(), pr.title.clone());
-        vars.insert("pr_author".to_string(), pr.author.login.clone());
-        vars.insert("pr_head_ref".to_string(), pr.head_ref_name.clone());
-        vars.insert("pr_base_ref".to_string(), pr.base_ref_name.clone());
-        vars.insert("pr_body".to_string(), pr.body_str().to_string());
-        if let Ok(rendered) = loader.load(&ctx.prompts.pr_review, &vars).await {
-            ctx.parsed_task.task = rendered;
-        }
 
         self.opts.tui_tx.send(TuiEvent::RunStarted {
             workflow_name: self.config.name.clone(),
@@ -1335,10 +1324,12 @@ impl WorkflowExecutor {
             "Address review comments on PR #{}: {}",
             pr.number, pr.title
         ));
-        let wf_log = WorkflowLog::with_tui_sender(
+        let log_label = format!("pr-{}-response", pr.number);
+        let wf_log = WorkflowLog::with_tui_sender_and_label(
             &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
             &self.config.name,
             &run_id,
+            Some(&log_label),
             self.opts.tui_tx.clone(),
         ).await.ok();
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());

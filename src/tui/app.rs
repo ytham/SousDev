@@ -150,6 +150,8 @@ pub struct WorkflowState {
     pub logs: Vec<LogLine>,
     /// Structured log entries for pretty mode rendering.
     pub log_entries: Vec<LogEntry>,
+    /// Cached total row count for log_entries (avoids recomputing every frame).
+    pub log_entries_total_rows: usize,
     /// Whether this workflow is enabled (cron ticks are skipped when disabled).
     pub enabled: bool,
     /// The item label of the currently running item (for info expanded panel updates).
@@ -396,6 +398,7 @@ impl App {
                     run_id: None,
                     logs: Vec::new(),
                     log_entries: Vec::new(),
+                    log_entries_total_rows: 0,
                     enabled,
                     current_item_label: None,
                 });
@@ -972,45 +975,108 @@ impl App {
             None => return,
         };
 
-        if wf.logs.is_empty() {
-            return;
-        }
-
         let log_rect = &self.layout.logs;
         if log_rect.height == 0 {
             return;
         }
 
-        // Determine which log lines are visible (same logic as log_view::draw_logs).
-        let visible_height = log_rect.height as usize;
-        let total = wf.logs.len();
-        let start = if self.log_scroll == 0 {
-            total.saturating_sub(visible_height)
-        } else {
-            total
-                .saturating_sub(visible_height)
-                .saturating_sub(self.log_scroll)
-        };
-
-        // Convert terminal rows to log-line indices.
         let sel_top = self.selection.start_row.min(self.selection.end_row);
         let sel_bot = self.selection.start_row.max(self.selection.end_row);
         let first_log_row = log_rect.y;
 
-        let mut selected_lines = Vec::new();
-        for screen_row in sel_top..=sel_bot {
-            if screen_row < first_log_row {
-                continue;
+        let mut selected_lines: Vec<String> = Vec::new();
+
+        if self.pretty_logs && !wf.log_entries.is_empty() {
+            // Pretty mode: walk entries, find which ones overlap the selection,
+            // and output ALL their lines (fully expanded) regardless of
+            // collapsed/visible state.
+            let entries = &wf.log_entries;
+            let total_rows = total_entry_rows(entries);
+            let visible_height = log_rect.height as usize;
+            let start_offset = if self.log_scroll == 0 {
+                total_rows.saturating_sub(visible_height)
+            } else {
+                total_rows
+                    .saturating_sub(visible_height)
+                    .saturating_sub(self.log_scroll)
+            };
+
+            let mut accum = 0usize;
+            for (i, entry) in entries.iter().enumerate() {
+                let entry_rows = entry.row_count();
+                let entry_screen_start = (accum as i64 - start_offset as i64 + first_log_row as i64) as i64;
+                let entry_screen_end = entry_screen_start + entry_rows as i64 - 1;
+
+                // Check if this entry overlaps the selection range.
+                if entry_screen_end >= sel_top as i64 && entry_screen_start <= sel_bot as i64 {
+                    // Output ALL lines from this entry (expanded content).
+                    match entry.kind {
+                        LogEntryKind::Thought => {
+                            for log in &entry.lines {
+                                // Split on embedded newlines for full content.
+                                for sub_line in log.message.split('\n') {
+                                    selected_lines.push(sub_line.to_string());
+                                }
+                            }
+                        }
+                        LogEntryKind::ToolCall | LogEntryKind::ConsolidatedTools => {
+                            for log in &entry.lines {
+                                let prefix = if log.stage == "tool" {
+                                    "[tool] "
+                                } else {
+                                    "  └─ "
+                                };
+                                selected_lines.push(format!("{}{}", prefix, log.message));
+                            }
+                        }
+                        LogEntryKind::System => {
+                            for log in &entry.lines {
+                                selected_lines.push(format!(
+                                    "{:<5} [{}] {}",
+                                    log.level.to_uppercase(),
+                                    log.stage,
+                                    log.message
+                                ));
+                            }
+                        }
+                    }
+                    // Add blank line between entries of different kinds.
+                    if i + 1 < entries.len() && entries[i].kind != entries[i + 1].kind {
+                        selected_lines.push(String::new());
+                    }
+                }
+
+                accum += entry_rows;
+                if i + 1 < entries.len() && entries[i].kind != entries[i + 1].kind {
+                    accum += 1;
+                }
             }
-            let line_idx = start + (screen_row - first_log_row) as usize;
-            if line_idx < total {
-                let log = &wf.logs[line_idx];
-                selected_lines.push(format!(
-                    "{:<5} [{}] {}",
-                    log.level.to_uppercase(),
-                    log.stage,
-                    log.message
-                ));
+        } else if !wf.logs.is_empty() {
+            // Flat mode: simple 1:1 row-to-line mapping.
+            let total = wf.logs.len();
+            let visible_height = log_rect.height as usize;
+            let start = if self.log_scroll == 0 {
+                total.saturating_sub(visible_height)
+            } else {
+                total
+                    .saturating_sub(visible_height)
+                    .saturating_sub(self.log_scroll)
+            };
+
+            for screen_row in sel_top..=sel_bot {
+                if screen_row < first_log_row {
+                    continue;
+                }
+                let line_idx = start + (screen_row - first_log_row) as usize;
+                if line_idx < total {
+                    let log = &wf.logs[line_idx];
+                    selected_lines.push(format!(
+                        "{:<5} [{}] {}",
+                        log.level.to_uppercase(),
+                        log.stage,
+                        log.message
+                    ));
+                }
             }
         }
 
@@ -1343,6 +1409,7 @@ impl App {
             let wf_name = self.workflows[self.selected].name.clone();
             if let Some(wf) = self.workflows.iter_mut().find(|w| w.name == wf_name) {
                 wf.log_entries[idx].expanded = !wf.log_entries[idx].expanded;
+                wf.log_entries_total_rows = total_entry_rows(&wf.log_entries);
             }
         }
     }
@@ -1444,6 +1511,7 @@ impl App {
                     }
                 }
 
+                wf.log_entries_total_rows = total_entry_rows(&new_entries);
                 wf.log_entries = new_entries;
             }
         }
@@ -1841,6 +1909,84 @@ async fn load_initial_items(
     }
 }
 
+/// Load the most recent log files for each workflow into the TUI log pane.
+///
+/// Reads `output/logs/<workflow_name>/` and loads all log files, populating
+/// `wf.logs` so the log pane has content on startup before the first cron tick.
+async fn load_previous_logs(
+    app: &mut App,
+    project_root: &std::path::Path,
+    workflow_infos: &[(String, WorkflowMode)],
+) {
+    for (wf_name, _) in workflow_infos {
+        let log_dir = project_root.join("output").join("logs").join(wf_name);
+        if !log_dir.exists() {
+            continue;
+        }
+
+        // Collect all log files sorted by modification time (most recent last).
+        let mut log_files: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(mut entries) = tokio::fs::read_dir(&log_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    log_files.push(path);
+                }
+            }
+        }
+        log_files.sort();
+
+        // Load the most recent log files (up to 5 to avoid loading too much).
+        let recent = if log_files.len() > 5 {
+            &log_files[log_files.len() - 5..]
+        } else {
+            &log_files
+        };
+
+        let wf = match app.workflows.iter_mut().find(|w| w.name == *wf_name) {
+            Some(wf) => wf,
+            None => continue,
+        };
+
+        for log_path in recent {
+            if let Ok(content) = tokio::fs::read_to_string(log_path).await {
+                if let Ok(log_file) = serde_json::from_str::<crate::workflows::workflow_log::LogFile>(&content) {
+                    // Extract the run_id from the header.
+                    let run_id = log_file.header.run_id.clone();
+
+                    // Add a separator line showing which log file this is from.
+                    let filename = log_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unknown".into());
+                    wf.logs.push(LogLine {
+                        level: "info".into(),
+                        stage: "history".into(),
+                        message: format!("── {} ({}) ──", filename, log_file.header.status),
+                        run_id: Some(run_id.clone()),
+                    });
+
+                    // Add each log entry.
+                    for entry in &log_file.entries {
+                        wf.logs.push(LogLine {
+                            level: entry.level.clone(),
+                            stage: entry.stage.clone(),
+                            message: entry.message.clone(),
+                            run_id: Some(run_id.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Rebuild log entries for pretty mode.
+        if app.pretty_logs && !wf.logs.is_empty() {
+            wf.log_entries = rebuild_log_entries(&wf.logs);
+            wf.log_entries_total_rows = total_entry_rows(&wf.log_entries);
+        }
+    }
+}
+
 /// Return the ordered stage names for a given workflow mode.
 fn stages_for_mode(mode: WorkflowMode) -> Vec<String> {
     match mode {
@@ -1948,6 +2094,7 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     // Load historical item data from stores so the info expanded panel has data
     // before the first cron tick.
     load_initial_items(&mut app, &project_root, &workflow_infos).await;
+    load_previous_logs(&mut app, &project_root, &workflow_infos).await;
 
     // Main event loop.
     loop {

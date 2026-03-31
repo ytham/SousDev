@@ -88,13 +88,37 @@ impl WorkflowLog {
         run_id: &str,
         tui_tx: TuiEventSender,
     ) -> Result<Self> {
+        Self::with_tui_sender_and_label(project_root, workflow_name, run_id, None, tui_tx).await
+    }
+
+    /// Create a new workflow log with a TUI event sender and a human-readable label.
+    ///
+    /// The label is used for the log filename instead of the run_id UUID.
+    /// Example: `issue-10649.json` instead of `a1b2c3d4-...json`.
+    pub async fn with_tui_sender_and_label(
+        project_root: &Path,
+        workflow_name: &str,
+        run_id: &str,
+        label: Option<&str>,
+        tui_tx: TuiEventSender,
+    ) -> Result<Self> {
         let dir = project_root
             .join("output")
             .join("logs")
             .join(workflow_name);
         fs::create_dir_all(&dir).await?;
 
-        let file_path = dir.join(format!("{}.json", run_id));
+        // Use the label for the filename when available, sanitized for filesystem safety.
+        let filename = if let Some(lbl) = label {
+            let safe = lbl
+                .replace([' ', '/', '\\'], "-")
+                .replace('#', "")
+                .to_lowercase();
+            format!("{}.json", safe)
+        } else {
+            format!("{}.json", run_id)
+        };
+        let file_path = dir.join(filename);
 
         let log_file = LogFile {
             header: LogFileHeader {

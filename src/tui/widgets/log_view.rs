@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::app::{total_entry_rows, App, LogEntryKind, Panel};
+use crate::tui::app::{App, LogEntryKind, Panel};
 use crate::tui::ui::{
     ACCENT_INFO_LEVEL, ACCENT_THOUGHT, ACCENT_TOOL, BG_LOGS, BG_STATUS_BAR, BG_TEXT_SELECTION,
 };
@@ -124,7 +124,7 @@ fn draw_logs_pretty(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowStat
     let max_width = area.width.saturating_sub(2) as usize;
 
     let entries = &wf.log_entries;
-    let total_rows = total_entry_rows(entries);
+    let total_rows = wf.log_entries_total_rows;
 
     // Determine the row offset for scrolling.
     let start_offset = if app.log_scroll == 0 {
@@ -157,8 +157,13 @@ fn draw_logs_pretty(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowStat
         let entry_rows = entry.row_count();
         let entry_end = row_accum + entry_rows;
 
+        // Early exit: if we've passed the visible window, stop rendering.
+        if row_accum >= start_offset + visible_height {
+            break;
+        }
+
         // Only render entries that overlap the visible window.
-        if entry_end > start_offset && row_accum < start_offset + visible_height {
+        if entry_end > start_offset {
             let screen_y_base = area.y as usize + row_accum.saturating_sub(start_offset);
 
             match entry.kind {
