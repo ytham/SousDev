@@ -1281,20 +1281,33 @@ impl WorkflowExecutor {
                     .unwrap_or_default();
 
             // Also fetch PR review bodies (submitted reviews with body text).
-            // These are a separate API endpoint from timeline comments.
+            // Review IDs are from a DIFFERENT numbering sequence than timeline
+            // comment IDs, so we cannot use `after_timeline` to filter them.
+            // Instead, fetch all reviews and filter by timestamp.
             let review_comments =
                 crate::workflows::github_prs::fetch_pr_review_comments(
-                    &pr.repo, pr.number, after_timeline,
+                    &pr.repo, pr.number, None, // fetch ALL reviews
                 )
                 .await
                 .unwrap_or_default();
-            // Merge review comments into timeline (dedup by ID).
+
+            // Filter reviews to only those posted after the last response.
+            let last_responded_at = record
+                .as_ref()
+                .map(|r| r.responded_at.clone())
+                .unwrap_or_default();
             let existing_ids: std::collections::HashSet<u64> =
                 timeline.iter().map(|c| c.id).collect();
             for rc in review_comments {
-                if !existing_ids.contains(&rc.id) {
-                    timeline.push(rc);
+                // Skip reviews already in the timeline (by ID).
+                if existing_ids.contains(&rc.id) {
+                    continue;
                 }
+                // Skip reviews posted before the last response.
+                if !last_responded_at.is_empty() && rc.created_at <= last_responded_at {
+                    continue;
+                }
+                timeline.push(rc);
             }
 
             logger.info(&format!(
