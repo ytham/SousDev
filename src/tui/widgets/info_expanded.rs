@@ -36,17 +36,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // Position: left side with margins (10 from left, 2 from top/bottom).
     let margin_x: u16 = 10;
-    let margin_top: u16 = 1;
-    let margin_bottom: u16 = 2;
-    let panel_height = area.height.saturating_sub(margin_top + margin_bottom);
-    if panel_height < 8 {
-        return;
-    }
     let panel_area = Rect {
         x: area.x + margin_x,
-        y: area.y + margin_top,
+        y: area.y,
         width: INFO_EXPANDED_WIDTH,
-        height: panel_height,
+        height: area.height,
     };
 
     f.render_widget(Clear, panel_area);

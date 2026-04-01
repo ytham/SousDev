@@ -39,9 +39,17 @@ pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         _ => Color::DarkGray,
     };
 
-    let filter_label = match &app.log_filter {
-        None => "All logs".to_string(),
-        Some(id) => id.clone(),
+    let (filter_label, filter_title) = match &app.log_filter {
+        None => ("All logs".to_string(), String::new()),
+        Some(id) => {
+            let item_title = app
+                .selected_items()
+                .iter()
+                .find(|item| &item.id == id)
+                .map(|item| item.title.clone())
+                .unwrap_or_default();
+            (id.clone(), item_title)
+        }
     };
 
     let info_line = Line::from(vec![
@@ -60,6 +68,11 @@ pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 Color::DarkGray
             }),
         ),
+        if !filter_title.is_empty() {
+            Span::styled(format!(" {} ", filter_title), bg.fg(Color::DarkGray))
+        } else {
+            Span::raw("")
+        },
     ]);
 
     // Second line: key hints for the log pane.
