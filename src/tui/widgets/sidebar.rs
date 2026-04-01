@@ -240,7 +240,7 @@ fn abbreviate_stage(name: &str) -> String {
         "pr-comment-responder" => "respond".into(),
         other => {
             if other.len() > 16 {
-                format!("{}...", &other[..13])
+                crate::utils::truncate::safe_truncate(other, 16)
             } else {
                 other.to_string()
             }
@@ -267,7 +267,7 @@ mod tests {
     fn test_abbreviate_long_unknown_stage() {
         assert_eq!(
             abbreviate_stage("a-very-long-stage-name"),
-            "a-very-long-s..."
+            "a-very-long-s…"
         );
     }
 

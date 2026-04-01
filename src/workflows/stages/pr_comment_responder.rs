@@ -399,7 +399,7 @@ fn extract_clean_summary(agent_output: &str) -> String {
     // Truncate to a reasonable length.
     let result = clean_lines.join("\n");
     if result.len() > 3000 {
-        format!("{}…", &result[..3000])
+        crate::utils::truncate::safe_truncate(&result, 3000)
     } else {
         result
     }

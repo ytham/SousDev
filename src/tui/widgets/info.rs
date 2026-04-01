@@ -97,7 +97,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
             let id_display = &item.id;
             let max_title = (INFO_WIDTH as usize).saturating_sub(id_display.len() + 10);
             let title = if item.title.len() > max_title && max_title > 1 {
-                format!("{}…", &item.title[..max_title.saturating_sub(1)])
+                crate::utils::truncate::safe_truncate(&item.title, max_title)
             } else if max_title == 0 {
                 String::new()
             } else {

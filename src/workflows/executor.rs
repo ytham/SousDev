@@ -15,11 +15,7 @@ use crate::workflows::workflow::{make_skipped_result, ParsedTask};
 
 /// Truncate a string for info panel display.
 fn truncate_title(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}…", &s[..max.saturating_sub(1)])
-    } else {
-        s.to_string()
-    }
+    crate::utils::truncate::safe_truncate(s, max)
 }
 use crate::workflows::stage::{ResolvedPrompts, Stage, StageContext, UnaddressedComments};
 use crate::workflows::stages::agent_loop::AgentLoopStage;
@@ -1921,7 +1917,7 @@ mod tests {
 
     #[test]
     fn test_truncate_title_long() {
-        assert_eq!(truncate_title("a very long title indeed", 10), "a very lo…");
+        assert_eq!(truncate_title("a very long title indeed", 10), "a very …");
     }
 
     #[test]

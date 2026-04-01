@@ -184,7 +184,7 @@ impl Stage for PrReviewPosterStage {
             } else {
                 let text = clean_lines.join("\n");
                 let truncated = if text.len() > 4000 {
-                    format!("{}…", &text[..4000])
+                    crate::utils::truncate::safe_truncate(&text, 4000)
                 } else {
                     text
                 };

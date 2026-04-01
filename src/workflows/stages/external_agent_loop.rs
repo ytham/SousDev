@@ -530,7 +530,7 @@ async fn stream_parse_claude_line(
                             .and_then(|o| o.as_str())
                             .unwrap_or("");
                         let output_display = if output.len() > 500 {
-                            format!("{}…", &output[..500])
+                            crate::utils::truncate::safe_truncate(output, 500)
                         } else {
                             output.to_string()
                         };
@@ -640,7 +640,7 @@ fn parse_claude_stream_trajectory(stdout: &str, agent_name: &str) -> Vec<Traject
                                 .and_then(|o| o.as_str())
                                 .unwrap_or("");
                             let output_display = if output.len() > 500 {
-                                format!("{}…", &output[..500])
+                                crate::utils::truncate::safe_truncate(output, 500)
                             } else {
                                 output.to_string()
                             };
@@ -755,11 +755,7 @@ fn format_value(key: &str, val: &serde_json::Value) -> String {
 
 /// Truncate a string for display, appending "…" if needed.
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() > max {
-        format!("{}…", &s[..max])
-    } else {
-        s.to_string()
-    }
+    crate::utils::truncate::safe_truncate(s, max)
 }
 
 /// Extract the final answer from `claude --output-format=stream-json` stdout.

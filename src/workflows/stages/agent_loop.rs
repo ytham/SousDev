@@ -207,7 +207,7 @@ async fn generate_reflection(
 
     if let Some(result) = prior_result {
         let answer = if result.answer.len() > 1000 {
-            format!("{}… (truncated)", &result.answer[..1000])
+            crate::utils::truncate::safe_truncate(&result.answer, 1000)
         } else {
             result.answer.clone()
         };

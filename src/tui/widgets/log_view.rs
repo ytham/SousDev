@@ -240,11 +240,7 @@ fn flatten_newlines(msg: &str) -> String {
 }
 
 fn truncate_msg(msg: &str, max: usize) -> String {
-    if msg.len() > max {
-        format!("{}…", &msg[..max.saturating_sub(1)])
-    } else {
-        msg.to_string()
-    }
+    crate::utils::truncate::safe_truncate(msg, max)
 }
 
 fn render_thought(
@@ -495,11 +491,7 @@ fn draw_logs_flat(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowState,
 
             let prefix = format!("{:<5} [{}] ", log.level.to_uppercase(), log.stage);
             let available = max_width.saturating_sub(prefix.len());
-            let msg = if log.message.len() > available {
-                format!("{}…", &log.message[..available.saturating_sub(1)])
-            } else {
-                log.message.clone()
-            };
+            let msg = truncate_msg(&log.message, available);
 
             Line::from(vec![
                 Span::styled(" ", row_bg),
@@ -548,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_truncate_msg_long() {
-        assert_eq!(truncate_msg("hello world!", 5), "hell…");
+        assert_eq!(truncate_msg("hello world!", 8), "hello…");
     }
 
     #[test]

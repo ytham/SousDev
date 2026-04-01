@@ -139,7 +139,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             let (badge, badge_color) = status_badge(item.status);
             let max_title = (INFO_EXPANDED_WIDTH as usize).saturating_sub(item.id.len() + 12);
             let title = if item.title.len() > max_title {
-                format!("{}…", &item.title[..max_title.saturating_sub(1)])
+                crate::utils::truncate::safe_truncate(&item.title, max_title)
             } else {
                 item.title.clone()
             };
