@@ -24,8 +24,49 @@ use crate::workflows::stage::{Stage, StageContext};
 /// 8. Parse the PR URL from stdout; store in `ctx.pr_url`.
 pub struct PullRequestStage;
 
-/// Commit message template used when the agent doesn't produce one.
+/// Commit message fallback when no better source is available.
 const DEFAULT_COMMIT_MSG: &str = "chore: apply sousdev agent changes";
+
+/// Build the best available commit message from context.
+///
+/// Priority:
+/// 1. Explicit title from `pull_request` config
+/// 2. LLM-generated PR title (`ctx.pr_title`, set by PrDescriptionStage)
+/// 3. First line of the parsed task (e.g. "Fix issue #42: <title>")
+/// 4. Hardcoded fallback
+fn derive_commit_message(ctx: &StageContext) -> String {
+    // 1. Explicit config override.
+    if let Some(title) = ctx
+        .config
+        .pull_request
+        .as_ref()
+        .and_then(|pr| pr.title.as_deref())
+    {
+        return title.to_string();
+    }
+
+    // 2. LLM-generated PR title (set by PrDescriptionStage which runs before us).
+    if let Some(ref title) = ctx.pr_title {
+        if !title.is_empty() {
+            return title.clone();
+        }
+    }
+
+    // 3. First line of the parsed task — typically "Fix issue #N: <title>".
+    let first_line = ctx.parsed_task.task.lines().next().unwrap_or("");
+    if !first_line.is_empty() && first_line.len() > 5 {
+        // Truncate to a reasonable commit message length.
+        let truncated = if first_line.len() > 100 {
+            format!("{}...", &first_line[..97])
+        } else {
+            first_line.to_string()
+        };
+        return truncated;
+    }
+
+    // 4. Hardcoded fallback.
+    DEFAULT_COMMIT_MSG.to_string()
+}
 
 #[async_trait]
 impl Stage for PullRequestStage {
@@ -90,14 +131,9 @@ async fn try_automated_pr(ctx: &mut StageContext) -> Result<()> {
     // ── 2. Commit if dirty ───────────────────────────────────────────────
     let status = exec_git(&["status", "--porcelain"], dir).await?;
     if !status.trim().is_empty() {
-        let commit_msg = ctx
-            .config
-            .pull_request
-            .as_ref()
-            .and_then(|pr| pr.title.as_deref())
-            .unwrap_or(DEFAULT_COMMIT_MSG);
-        exec_git(&["commit", "-m", commit_msg], dir).await?;
-        ctx.logger.info("Committed workspace changes.");
+        let commit_msg = derive_commit_message(ctx);
+        exec_git(&["commit", "-m", &commit_msg], dir).await?;
+        ctx.logger.info(&format!("Committed workspace changes: {}", commit_msg));
     }
 
     // ── 3. Check whether there are new commits beyond base ───────────────
@@ -526,5 +562,121 @@ mod tests {
     fn test_pr_url_regex_not_found() {
         let re = Regex::new(r"https://github\.com/[^\s]+").unwrap();
         assert!(re.find("no url here").is_none());
+    }
+
+    // ── derive_commit_message tests ───────────────────────────────────────
+
+    /// Stub LLM provider for tests (never called).
+    struct StubProvider;
+
+    #[async_trait]
+    impl crate::providers::provider::LLMProvider for StubProvider {
+        fn name(&self) -> &str { "stub" }
+        fn model(&self) -> &str { "stub" }
+        async fn complete(
+            &self,
+            _messages: &[crate::providers::provider::Message],
+            _options: Option<&crate::providers::provider::CompleteOptions>,
+        ) -> anyhow::Result<crate::providers::provider::CompletionResult> {
+            unimplemented!("stub")
+        }
+    }
+
+    fn make_ctx(task: &str) -> StageContext {
+        use crate::workflows::workflow::ParsedTask;
+        use crate::workflows::stage::ResolvedPrompts;
+        use crate::utils::logger::Logger;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        StageContext {
+            config: Arc::new(crate::types::config::WorkflowConfig::default()),
+            provider: Arc::new(StubProvider),
+            registry: Arc::new(crate::tools::registry::ToolRegistry::new()),
+            workspace_dir: std::path::PathBuf::from("/tmp"),
+            branch: "main".to_string(),
+            parsed_task: ParsedTask::new(task),
+            harness_root: std::path::PathBuf::from("/tmp"),
+            prompts: ResolvedPrompts::default(),
+            system_prompt: None,
+            target_repo: None,
+            logger: Logger::new("test"),
+            run_id: "test".to_string(),
+            retry_count: 0,
+            review_rounds: 0,
+            agent_result: None,
+            review_result: None,
+            review_feedback: None,
+            issue_url: None,
+            issue_display_id: None,
+            pr_url: None,
+            pr_title: None,
+            pr_generated_body: None,
+            reviewing_pr: None,
+            pr_review_result: None,
+            responding_pr: None,
+            unaddressed_comments: None,
+            pr_response_result: None,
+            reviewer_login: None,
+            workflow_log: None,
+            aborted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn test_derive_commit_message_from_pr_title() {
+        let mut ctx = make_ctx("Fix issue #42: Some bug");
+        ctx.pr_title = Some("fix(auth): resolve token expiry race condition".to_string());
+        assert_eq!(
+            derive_commit_message(&ctx),
+            "fix(auth): resolve token expiry race condition"
+        );
+    }
+
+    #[test]
+    fn test_derive_commit_message_from_task_first_line() {
+        let ctx = make_ctx("Fix issue #42: Rename equities routes to instruments");
+        assert_eq!(
+            derive_commit_message(&ctx),
+            "Fix issue #42: Rename equities routes to instruments"
+        );
+    }
+
+    #[test]
+    fn test_derive_commit_message_truncates_long_task() {
+        let long_task = "Fix issue #99: ".to_string() + &"a".repeat(200);
+        let ctx = make_ctx(&long_task);
+        let msg = derive_commit_message(&ctx);
+        assert!(msg.len() <= 100);
+        assert!(msg.ends_with("..."));
+    }
+
+    #[test]
+    fn test_derive_commit_message_fallback() {
+        let ctx = make_ctx("");
+        assert_eq!(derive_commit_message(&ctx), DEFAULT_COMMIT_MSG);
+    }
+
+    #[test]
+    fn test_derive_commit_message_config_takes_priority() {
+        let mut cfg = crate::types::config::WorkflowConfig::default();
+        cfg.pull_request = Some(crate::types::config::PullRequestConfig {
+            title: Some("custom: configured title".to_string()),
+            ..Default::default()
+        });
+        let mut ctx = make_ctx("Fix issue #42: Some bug");
+        ctx.config = std::sync::Arc::new(cfg);
+        ctx.pr_title = Some("feat: generated title".to_string());
+        assert_eq!(derive_commit_message(&ctx), "custom: configured title");
+    }
+
+    #[test]
+    fn test_derive_commit_message_pr_title_over_task() {
+        let mut ctx = make_ctx("Fix issue #42: Some bug\n\nLong body text here");
+        ctx.pr_title = Some("feat(equity): add v2 instrument routes".to_string());
+        assert_eq!(
+            derive_commit_message(&ctx),
+            "feat(equity): add v2 instrument routes"
+        );
     }
 }
