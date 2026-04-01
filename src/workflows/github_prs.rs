@@ -33,6 +33,12 @@ pub struct GitHubPR {
     /// Logins of users assigned to this PR.
     #[serde(default)]
     pub assignees: Vec<String>,
+    /// Number of lines added in this PR.
+    #[serde(default)]
+    pub additions: u64,
+    /// Number of lines deleted in this PR.
+    #[serde(default)]
+    pub deletions: u64,
     /// Populated after fetch; not part of the JSON payload.
     #[serde(skip, default)]
     pub repo: String,
@@ -115,7 +121,7 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
         .filter(|s| !s.is_empty())
         .unwrap_or("");
     let limit = options.limit.unwrap_or(100);
-    let json_fields = "number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,assignees,createdAt,updatedAt";
+    let json_fields = "number,title,body,url,headRefName,headRefOid,baseRefName,author,labels,reviewDecision,reviewRequests,assignees,additions,deletions,createdAt,updatedAt";
 
     // Raw search mode: use the provided search query directly (for pr-responder).
     if options.raw_search {
@@ -284,6 +290,8 @@ fn map_raw_pr(r: RawGhPR, repo: &str) -> GitHubPR {
             .iter()
             .map(|a| a.login.clone())
             .collect(),
+        additions: r.additions,
+        deletions: r.deletions,
         created_at: r.created_at,
         updated_at: r.updated_at,
         repo: repo.to_string(),
@@ -511,6 +519,10 @@ struct RawGhPR {
     review_requests: Vec<RawReviewRequest>,
     #[serde(default)]
     assignees: Vec<PRAuthor>,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
     #[serde(rename = "createdAt")]
     created_at: String,
     #[serde(rename = "updatedAt")]
@@ -565,6 +577,8 @@ mod tests {
             requested_reviewers: vec![],
             requested_teams: vec![],
             assignees: vec![],
+            additions: 0,
+            deletions: 0,
         };
         assert_eq!(pr.body_str(), "");
     }
@@ -588,6 +602,8 @@ mod tests {
             requested_reviewers: vec![],
             requested_teams: vec![],
             assignees: vec![],
+            additions: 0,
+            deletions: 0,
         };
         assert_eq!(pr.body_str(), "desc");
     }
@@ -613,6 +629,8 @@ mod tests {
             requested_reviewers: vec![],
             requested_teams: vec![],
             assignees: vec![],
+            additions: 0,
+            deletions: 0,
         };
         assert_eq!(pr.body_str(), "This PR adds usage metrics tracking.");
     }
@@ -636,6 +654,8 @@ mod tests {
             requested_reviewers: vec![],
             requested_teams: vec![],
             assignees: vec![],
+            additions: 0,
+            deletions: 0,
         };
         assert_eq!(pr.body_str(), "");
     }
@@ -720,6 +740,8 @@ mod tests {
                 RawReviewRequest { login: None, slug: Some("org/eng".into()) },
             ],
             assignees: vec![PRAuthor { login: "carol".into() }],
+            additions: 42,
+            deletions: 10,
             created_at: "2025-01-01".into(),
             updated_at: "2025-01-02".into(),
         };
@@ -748,6 +770,8 @@ mod tests {
             review_decision: None,
             review_requests: vec![],
             assignees: vec![],
+            additions: 0,
+            deletions: 0,
             created_at: "c".into(),
             updated_at: "u".into(),
         };

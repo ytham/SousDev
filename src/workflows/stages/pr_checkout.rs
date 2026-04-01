@@ -71,6 +71,8 @@ mod tests {
             requested_reviewers: vec![],
             requested_teams: vec![],
             assignees: vec![],
+            additions: 0,
+            deletions: 0,
         }
     }
 

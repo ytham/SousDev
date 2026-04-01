@@ -953,11 +953,29 @@ impl WorkflowExecutor {
                     to_review.push(pr);
                 }
                 Some(ref rec) if rec.head_sha != pr.head_ref_oid => {
-                    logger.info(&format!(
-                        "PR #{} has new commits — re-reviewing",
-                        pr.number
-                    ));
-                    to_review.push(pr);
+                    // SHA changed — but this could be a rebase (same code, new SHA).
+                    // Check if the additions/deletions count changed to distinguish
+                    // real code changes from rebases.
+                    if pr.additions != rec.additions || pr.deletions != rec.deletions {
+                        logger.info(&format!(
+                            "PR #{} has new code changes (additions/deletions changed) — re-reviewing",
+                            pr.number
+                        ));
+                        to_review.push(pr);
+                    } else {
+                        // Same diff size, different SHA — likely a rebase. Skip.
+                        logger.info(&format!(
+                            "PR #{} was rebased (SHA changed but diff unchanged) — skipping",
+                            pr.number
+                        ));
+                        // Update the stored SHA so we don't re-check on every tick.
+                        let mut updated_rec = rec.clone();
+                        updated_rec.head_sha = pr.head_ref_oid.clone();
+                        let _ = self
+                            .pr_review_store
+                            .mark_reviewed(&self.config.name, updated_rec)
+                            .await;
+                    }
                 }
                 Some(ref rec) => {
                     let new_comments =
@@ -1053,6 +1071,8 @@ impl WorkflowExecutor {
                             pr_title: pr.title.clone(),
                             pr_repo: pr.repo.clone(),
                             head_sha: pr.head_ref_oid.clone(),
+                            additions: pr.additions,
+                            deletions: pr.deletions,
                             last_comment_id,
                             reviewed_at: Utc::now().to_rfc3339(),
                         },

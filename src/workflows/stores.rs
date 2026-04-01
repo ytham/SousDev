@@ -254,6 +254,12 @@ pub struct PrReviewRecord {
     pub pr_repo: String,
     /// The HEAD commit SHA that was reviewed.
     pub head_sha: String,
+    /// Lines added at time of review (for detecting real changes vs rebases).
+    #[serde(default)]
+    pub additions: u64,
+    /// Lines deleted at time of review.
+    #[serde(default)]
+    pub deletions: u64,
     /// The highest comment ID seen during this review pass (used as a cursor
     /// for the next pass).
     pub last_comment_id: u64,
@@ -607,6 +613,8 @@ mod tests {
             pr_title: "t".into(),
             pr_repo: "owner/repo".into(),
             head_sha: "abc1234".into(),
+                            additions: 0,
+                            deletions: 0,
             last_comment_id: 100,
             reviewed_at: now(),
         };
@@ -629,6 +637,8 @@ mod tests {
                     pr_title: "t".into(),
                     pr_repo: "r".into(),
                     head_sha: "old".into(),
+                            additions: 0,
+                            deletions: 0,
                     last_comment_id: 10,
                     reviewed_at: now(),
                 },
@@ -644,6 +654,8 @@ mod tests {
                     pr_title: "t".into(),
                     pr_repo: "r".into(),
                     head_sha: "new".into(),
+                            additions: 0,
+                            deletions: 0,
                     last_comment_id: 20,
                     reviewed_at: now(),
                 },
@@ -668,6 +680,8 @@ mod tests {
                     pr_title: "t".into(),
                     pr_repo: "r".into(),
                     head_sha: "s".into(),
+                            additions: 0,
+                            deletions: 0,
                     last_comment_id: 0,
                     reviewed_at: now(),
                 },
@@ -1125,6 +1139,8 @@ mod tests {
                         pr_title: "t".into(),
                         pr_repo: "r".into(),
                         head_sha: "sha123".into(),
+                            additions: 0,
+                            deletions: 0,
                         last_comment_id: 50,
                         reviewed_at: now(),
                     },
@@ -1150,6 +1166,8 @@ mod tests {
                     pr_title: "t".into(),
                     pr_repo: "r".into(),
                     head_sha: "s".into(),
+                            additions: 0,
+                            deletions: 0,
                     last_comment_id: 0,
                     reviewed_at: now(),
                 },
