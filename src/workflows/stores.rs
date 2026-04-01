@@ -618,7 +618,8 @@ mod tests {
             head_sha: "abc1234".into(),
                             additions: 0,
                             deletions: 0,
-            last_comment_id: 100,
+            has_concerns: false,
+                            last_comment_id: 100,
             reviewed_at: now(),
         };
         store.mark_reviewed("my-pipeline", record.clone()).await.unwrap();
@@ -642,7 +643,8 @@ mod tests {
                     head_sha: "old".into(),
                             additions: 0,
                             deletions: 0,
-                    last_comment_id: 10,
+                    has_concerns: false,
+                            last_comment_id: 10,
                     reviewed_at: now(),
                 },
             )
@@ -659,7 +661,8 @@ mod tests {
                     head_sha: "new".into(),
                             additions: 0,
                             deletions: 0,
-                    last_comment_id: 20,
+                    has_concerns: false,
+                            last_comment_id: 20,
                     reviewed_at: now(),
                 },
             )
@@ -685,7 +688,8 @@ mod tests {
                     head_sha: "s".into(),
                             additions: 0,
                             deletions: 0,
-                    last_comment_id: 0,
+                    has_concerns: false,
+                            last_comment_id: 0,
                     reviewed_at: now(),
                 },
             )
@@ -1144,7 +1148,8 @@ mod tests {
                         head_sha: "sha123".into(),
                             additions: 0,
                             deletions: 0,
-                        last_comment_id: 50,
+                        has_concerns: false,
+                            last_comment_id: 50,
                         reviewed_at: now(),
                     },
                 )
@@ -1171,7 +1176,8 @@ mod tests {
                     head_sha: "s".into(),
                             additions: 0,
                             deletions: 0,
-                    last_comment_id: 0,
+                    has_concerns: false,
+                            last_comment_id: 0,
                     reviewed_at: now(),
                 },
             )

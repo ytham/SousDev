@@ -1078,7 +1078,7 @@ impl WorkflowExecutor {
                             head_sha: pr.head_ref_oid.clone(),
                             additions: pr.additions,
                             deletions: pr.deletions,
-                            has_concerns: ctx
+                            has_concerns: result
                                 .pr_review_result
                                 .as_ref()
                                 .map(|r| r.inline_comment_count > 0)

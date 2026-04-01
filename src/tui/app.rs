@@ -400,7 +400,6 @@ impl App {
                     stages,
                     stage_statuses,
                     status,
-                    comment_count: 0,
                     run_id: None,
                     logs: Vec::new(),
                     log_entries: Vec::new(),
@@ -1366,7 +1365,6 @@ impl App {
     /// The label is matched against item IDs (e.g. "issue #42" matches "#42",
     /// "PR #12050" matches "PR #12050").
     fn update_item_status(&mut self, workflow_name: &str, item_label: &str, status: ItemStatus) {
-                    comment_count: 0,
         if let Some(items) = self.workflow_items.get_mut(workflow_name) {
             for item in items.iter_mut() {
                 if item_label.contains(&item.id) {
