@@ -119,6 +119,9 @@ pub enum ItemStatus {
     ReviewedApproved,
     /// PR review posted — agent found concerns (needs manual review + approval).
     ReviewedConcerns,
+    /// The PR has been approved on GitHub (reviewDecision == APPROVED)
+    /// but is still open/unmerged.
+    Approved,
     /// PR has new unaddressed reviewer comments (pr-responder specific).
     NewComments,
     /// PR has been checked and has no new comments (pr-responder specific).

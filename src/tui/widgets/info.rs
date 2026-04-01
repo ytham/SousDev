@@ -160,6 +160,7 @@ fn status_badge(status: ItemStatus) -> (String, Color) {
         ItemStatus::Cooldown => ("[!!]".into(), Color::Red),
         ItemStatus::ReviewedApproved => ("[A✓]".into(), Color::Green),
         ItemStatus::ReviewedConcerns => ("[A✗]".into(), Color::Yellow),
+        ItemStatus::Approved => ("[✓✓]".into(), Color::Green),
         ItemStatus::NewComments => ("[**]".into(), Color::Cyan),
         ItemStatus::NoNewComments => ("[--]".into(), Color::DarkGray),
     }
@@ -178,6 +179,7 @@ mod tests {
         assert_eq!(status_badge(ItemStatus::Cooldown).0, "[!!]");
         assert_eq!(status_badge(ItemStatus::ReviewedApproved).0, "[A✓]");
         assert_eq!(status_badge(ItemStatus::ReviewedConcerns).0, "[A✗]");
+        assert_eq!(status_badge(ItemStatus::Approved).0, "[✓✓]");
         assert_eq!(status_badge(ItemStatus::NewComments).0, "[**]");
     }
 
@@ -189,6 +191,7 @@ mod tests {
         assert_eq!(status_badge(ItemStatus::Error).1, Color::Red);
         assert_eq!(status_badge(ItemStatus::ReviewedApproved).1, Color::Green);
         assert_eq!(status_badge(ItemStatus::ReviewedConcerns).1, Color::Yellow);
+        assert_eq!(status_badge(ItemStatus::Approved).1, Color::Green);
         assert_eq!(status_badge(ItemStatus::NewComments).1, Color::Cyan);
     }
 }

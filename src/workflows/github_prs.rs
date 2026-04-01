@@ -256,6 +256,42 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
         }
     }
 
+    // Search 4: PRs already reviewed by the user (reviewed-by:@me).
+    // Once a review is submitted, GitHub removes the user from
+    // `reviewRequests`, so searches 1-3 no longer find the PR.
+    // This search ensures reviewed PRs stay visible in the Info pane
+    // while they remain open.
+    let search4 = if extra_search.is_empty() {
+        "reviewed-by:@me is:open".to_string()
+    } else {
+        format!("reviewed-by:@me is:open {}", extra_search)
+    };
+
+    let output4 = Command::new("gh")
+        .arg("pr").arg("list")
+        .arg("--repo").arg(&repo)
+        .arg("--search").arg(&search4)
+        .arg("--limit").arg(limit.to_string())
+        .arg("--json").arg(json_fields)
+        .output()
+        .await;
+
+    if let Ok(output4) = output4 {
+        if output4.status.success() {
+            let stdout4 = String::from_utf8_lossy(&output4.stdout);
+            if !stdout4.trim().is_empty() {
+                let raw4: Vec<RawGhPR> = serde_json::from_str(&stdout4).unwrap_or_default();
+                let existing: std::collections::HashSet<u64> =
+                    raw.iter().map(|r| r.number).collect();
+                for r in raw4 {
+                    if !existing.contains(&r.number) {
+                        raw.push(r);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(raw
         .into_iter()
         .map(|r| map_raw_pr(r, &repo))
@@ -302,20 +338,33 @@ fn map_raw_pr(r: RawGhPR, repo: &str) -> GitHubPR {
 ///
 /// If `after_id` is provided, only comments with an `id` greater than that
 /// value are returned.
+///
+/// Uses `--paginate` to ensure all comments are returned even when
+/// the PR has more than 30 comments (GitHub's default page size).
 pub async fn fetch_pr_comments(
     repo: &str,
     pr_number: u64,
     after_id: Option<u64>,
 ) -> Result<Vec<PRComment>> {
-    let endpoint = format!("/repos/{}/issues/{}/comments", repo, pr_number);
+    let endpoint = format!("/repos/{}/issues/{}/comments?per_page=100", repo, pr_number);
     let jq = "[.[] | {id: .id, login: .user.login, body: .body, createdAt: .created_at}]";
     let output = Command::new("gh")
         .arg("api")
+        .arg("--paginate")
         .arg(&endpoint)
         .arg("--jq")
         .arg(jq)
         .output()
         .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "gh api {} failed: {}",
+            endpoint.split('?').next().unwrap_or(&endpoint),
+            stderr
+        ));
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() || stdout.trim() == "null" {
@@ -340,20 +389,32 @@ pub async fn fetch_pr_comments(
 ///
 /// If `after_id` is provided, only reviews with an `id` greater than that
 /// are returned.
+///
+/// Uses `--paginate` to ensure all reviews are returned.
 pub async fn fetch_pr_review_comments(
     repo: &str,
     pr_number: u64,
     after_id: Option<u64>,
 ) -> Result<Vec<PRComment>> {
-    let endpoint = format!("/repos/{}/pulls/{}/reviews", repo, pr_number);
+    let endpoint = format!("/repos/{}/pulls/{}/reviews?per_page=100", repo, pr_number);
     let jq = r#"[.[] | select(.body != null and .body != "") | {id: .id, login: .user.login, body: .body, createdAt: .submitted_at}]"#;
     let output = Command::new("gh")
         .arg("api")
+        .arg("--paginate")
         .arg(&endpoint)
         .arg("--jq")
         .arg(jq)
         .output()
         .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "gh api {} failed: {}",
+            endpoint.split('?').next().unwrap_or(&endpoint),
+            stderr
+        ));
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() || stdout.trim() == "null" {
@@ -375,20 +436,32 @@ pub async fn fetch_pr_review_comments(
 /// Only root comments (those without an `in_reply_to_id`) are returned.
 /// If `after_id` is provided, only comments with an `id` greater than that
 /// value are included.
+///
+/// Uses `--paginate` to ensure all comments are returned.
 pub async fn fetch_inline_review_comments(
     repo: &str,
     pr_number: u64,
     after_id: Option<u64>,
 ) -> Result<Vec<InlineReviewComment>> {
-    let endpoint = format!("/repos/{}/pulls/{}/comments", repo, pr_number);
+    let endpoint = format!("/repos/{}/pulls/{}/comments?per_page=100", repo, pr_number);
     let jq = "[.[] | {id: .id, login: .user.login, body: .body, path: .path, line: .line, diffHunk: .diff_hunk, createdAt: .created_at, inReplyToId: .in_reply_to_id}]";
     let output = Command::new("gh")
         .arg("api")
+        .arg("--paginate")
         .arg(&endpoint)
         .arg("--jq")
         .arg(jq)
         .output()
         .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "gh api {} failed: {}",
+            endpoint.split('?').next().unwrap_or(&endpoint),
+            stderr
+        ));
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() || stdout.trim() == "null" {

@@ -2146,8 +2146,11 @@ async fn refresh_info_from_remote(
                     .ok()
                     .flatten()
                     .is_some();
+                let pr_approved = pr.review_decision == "APPROVED";
                 let status = if in_cooldown {
                     ItemStatus::Cooldown
+                } else if pr_approved {
+                    ItemStatus::Approved
                 } else if is_reviewed {
                     ItemStatus::ReviewedApproved
                 } else {

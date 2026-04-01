@@ -255,32 +255,40 @@ impl WorkflowExecutor {
             })
             .await
             .unwrap_or_default();
-            // Apply the individual-reviewer/assignee filter.
+            // Apply the individual-reviewer/assignee/reviewed filter.
+            // A PR is included if the user is a requested reviewer, an
+            // assignee, OR has already reviewed it (review record exists).
             let reviewer_login = self.get_reviewer_login().await.unwrap_or_default();
-            let prs: Vec<_> = prs
-                .into_iter()
-                .filter(|pr| {
-                    pr.requested_reviewers.iter().any(|r| r == &reviewer_login)
-                        || pr.assignees.iter().any(|a| a == &reviewer_login)
-                })
-                .collect();
             let mut summaries: Vec<ItemSummary> = Vec::new();
             for pr in &prs {
+                let individually_requested = pr
+                    .requested_reviewers
+                    .iter()
+                    .any(|r| r == &reviewer_login);
+                let is_assignee = pr.assignees.iter().any(|a| a == &reviewer_login);
+                let review_record = self
+                    .pr_review_store
+                    .get_record(&self.config.name, pr.number)
+                    .await
+                    .ok()
+                    .flatten();
+                let has_review_record = review_record.is_some();
+
+                if !individually_requested && !is_assignee && !has_review_record {
+                    continue;
+                }
+
                 let pr_key = format!("pr-{}", pr.number);
                 let in_cooldown = self
                     .failure_store
                     .is_in_cooldown(&self.config.name, &pr_key)
                     .await
                     .unwrap_or(false);
-                let review_record = self
-                    .pr_review_store
-                    .get_record(&self.config.name, pr.number)
-                    .await
-                    .ok()
-                    .flatten()
-                    ;
+                let pr_approved = pr.review_decision == "APPROVED";
                 let status = if in_cooldown {
                     ItemStatus::Cooldown
+                } else if pr_approved {
+                    ItemStatus::Approved
                 } else if let Some(ref rec) = review_record {
                     if rec.has_concerns { ItemStatus::ReviewedConcerns } else { ItemStatus::ReviewedApproved }
                 } else {
@@ -884,42 +892,57 @@ impl WorkflowExecutor {
         //
         // A PR is included if ANY of these are true:
         //   1. The user is individually listed as a requested reviewer
-        //   2. The user is in the assignees list (when assignee filter is configured)
+        //   2. The user is in the assignees list
+        //   3. The user has a review record for this PR (already reviewed it)
+        //   4. The assignee filter from config matches
         //
         // PRs that only match via team-level review requests (e.g. "eng" team
-        // auto-added to all PRs) are excluded unless the user is also assigned
-        // or individually requested.
-        let prs: Vec<GitHubPR> = prs
-            .into_iter()
-            .filter(|pr| {
-                // Check 1: individually requested as reviewer.
-                let individually_requested = pr
-                    .requested_reviewers
-                    .iter()
-                    .any(|r| r == &reviewer_login);
+        // auto-added to all PRs) are excluded unless the user is also assigned,
+        // individually requested, or has already reviewed the PR.
+        let mut filtered_prs: Vec<GitHubPR> = Vec::new();
+        for pr in prs {
+            // Check 1: individually requested as reviewer.
+            let individually_requested = pr
+                .requested_reviewers
+                .iter()
+                .any(|r| r == &reviewer_login);
 
-                if individually_requested {
-                    return true;
+            if individually_requested {
+                filtered_prs.push(pr);
+                continue;
+            }
+
+            // Check 2: assigned to the user.
+            if pr.assignees.iter().any(|a| a == &reviewer_login) {
+                filtered_prs.push(pr);
+                continue;
+            }
+
+            // Check 3: already reviewed by the user (review record exists).
+            // After submitting a review, GitHub removes the user from
+            // reviewRequests, so checks 1 & 2 no longer match. This keeps
+            // the PR visible while it's still open.
+            let has_review_record = self
+                .pr_review_store
+                .get_record(&self.config.name, pr.number)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if has_review_record {
+                filtered_prs.push(pr);
+                continue;
+            }
+
+            // Check 4: assignee filter from config (for additional assignees).
+            if let Some(ref allowed) = assignee_filter {
+                if pr.assignees.iter().any(|a| allowed.contains(a)) {
+                    filtered_prs.push(pr);
+                    continue;
                 }
-
-                // Check 2: assigned to the user.
-                // Always check assignees — if you're assigned, you should review.
-                if pr.assignees.iter().any(|a| a == &reviewer_login) {
-                    return true;
-                }
-
-                // Check 3: assignee filter from config (for additional assignees).
-                if let Some(ref allowed) = assignee_filter {
-                    if pr.assignees.iter().any(|a| allowed.contains(a)) {
-                        return true;
-                    }
-                }
-
-                // Neither individually requested nor assigned — skip.
-                // This filters out PRs that only match via team membership.
-                false
-            })
-            .collect();
+            }
+        }
+        let prs = filtered_prs;
 
         logger.info(&format!(
             "{} PR(s) after filtering (reviewer: {}{})",
@@ -983,13 +1006,20 @@ impl WorkflowExecutor {
                 }
                 Some(ref rec) => {
                     let new_comments =
-                        fetch_pr_comments(&pr.repo, pr.number, Some(rec.last_comment_id))
-                            .await
-                            .unwrap_or_default();
+                        match fetch_pr_comments(&pr.repo, pr.number, Some(rec.last_comment_id)).await {
+                            Ok(comments) => comments,
+                            Err(e) => {
+                                logger.error(&format!(
+                                    "PR #{}: failed to fetch comments for re-review check: {}",
+                                    pr.number, e
+                                ));
+                                vec![]
+                            }
+                        };
                     let trigger = format!("@{}", reviewer_login);
-                    if new_comments.iter().any(|c| c.body.trim() == trigger) {
+                    if new_comments.iter().any(|c| c.body.contains(&trigger)) {
                         logger.info(&format!(
-                            "PR #{} has a \"{}\" comment — re-reviewing",
+                            "PR #{} has a \"{}\" mention — re-reviewing",
                             pr.number, trigger
                         ));
                         to_review.push(pr);
@@ -1020,8 +1050,11 @@ impl WorkflowExecutor {
                     .ok()
                     .flatten()
                     ;
+                let pr_approved = pr.review_decision == "APPROVED";
                 let status = if in_cooldown {
                     ItemStatus::Cooldown
+                } else if pr_approved {
+                    ItemStatus::Approved
                 } else if let Some(ref rec) = review_record {
                     if rec.has_concerns { ItemStatus::ReviewedConcerns } else { ItemStatus::ReviewedApproved }
                 } else {
@@ -1303,30 +1336,54 @@ impl WorkflowExecutor {
             ));
 
             let inline =
-                fetch_inline_review_comments(&pr.repo, pr.number, after_inline)
-                    .await
-                    .unwrap_or_default();
+                match fetch_inline_review_comments(&pr.repo, pr.number, after_inline).await {
+                    Ok(comments) => comments,
+                    Err(e) => {
+                        logger.error(&format!(
+                            "PR #{}: failed to fetch inline comments: {}",
+                            pr.number, e
+                        ));
+                        vec![]
+                    }
+                };
             let mut timeline =
-                fetch_pr_comments(&pr.repo, pr.number, after_timeline)
-                    .await
-                    .unwrap_or_default();
+                match fetch_pr_comments(&pr.repo, pr.number, after_timeline).await {
+                    Ok(comments) => comments,
+                    Err(e) => {
+                        logger.error(&format!(
+                            "PR #{}: failed to fetch timeline comments: {}",
+                            pr.number, e
+                        ));
+                        vec![]
+                    }
+                };
 
             // Also fetch PR review bodies (submitted reviews with body text).
             // Review IDs are from a DIFFERENT numbering sequence than timeline
             // comment IDs, so we cannot use `after_timeline` to filter them.
             // Instead, fetch all reviews and filter by timestamp.
             let review_comments =
-                crate::workflows::github_prs::fetch_pr_review_comments(
+                match crate::workflows::github_prs::fetch_pr_review_comments(
                     &pr.repo, pr.number, None, // fetch ALL reviews
                 )
                 .await
-                .unwrap_or_default();
+                {
+                    Ok(comments) => comments,
+                    Err(e) => {
+                        logger.error(&format!(
+                            "PR #{}: failed to fetch review bodies: {}",
+                            pr.number, e
+                        ));
+                        vec![]
+                    }
+                };
 
             // Filter reviews to only those posted after the last response.
-            let last_responded_at = record
+            // Use proper datetime parsing — GitHub uses `Z` suffix while chrono
+            // produces `+00:00`, making naive string comparison unreliable.
+            let last_responded_at_dt = record
                 .as_ref()
-                .map(|r| r.responded_at.clone())
-                .unwrap_or_default();
+                .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.responded_at).ok());
             let existing_ids: std::collections::HashSet<u64> =
                 timeline.iter().map(|c| c.id).collect();
             for rc in review_comments {
@@ -1335,8 +1392,14 @@ impl WorkflowExecutor {
                     continue;
                 }
                 // Skip reviews posted before the last response.
-                if !last_responded_at.is_empty() && rc.created_at <= last_responded_at {
-                    continue;
+                if let Some(cutoff) = last_responded_at_dt {
+                    if let Ok(review_dt) = chrono::DateTime::parse_from_rfc3339(&rc.created_at) {
+                        if review_dt <= cutoff {
+                            continue;
+                        }
+                    }
+                    // If we can't parse the review timestamp, include it to
+                    // be safe — better to re-process than to miss it.
                 }
                 timeline.push(rc);
             }

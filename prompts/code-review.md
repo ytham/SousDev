@@ -17,7 +17,12 @@ Your review should check:
 1. **Correctness** — does the implementation solve the stated task?
 2. **Bugs and edge cases** — are there any regressions or unhandled cases?
 3. **Code quality** — is the code readable, idiomatic, and well-structured?
-4. **Tests** — are there adequate tests that cover the fix?
+4. **Tests** — are there adequate tests that cover the fix? Are there negative
+   tests confirming that existing behaviour which should NOT change is preserved?
+5. **Data flow** — for every changed filter, guard, or data transformation,
+   trace ALL downstream consumers. If a filter was removed or relaxed, check
+   whether other computed values, derived state, or sibling functions assumed
+   that filter was in place. Flag any that were missed.
 
 If you are satisfied with the changes, end your review with exactly this token
 on its own line:

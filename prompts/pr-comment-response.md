@@ -33,6 +33,12 @@ Address **every** comment above. For each inline comment:
 
 For timeline comments requesting broader changes (e.g. "update the tests"), make those changes too.
 
+**After addressing each comment, look for the same class of issue in sibling
+code.** For example, if a reviewer pointed out a missing guard in one derived
+value, check whether other derived values, computed properties, or functions
+that read from the same data source have the same gap. Fix proactively — do
+not wait for another round of review.
+
 After you have addressed all comments:
 - Run the full test suite one final time
 - Commit all changes with a clear message: `fix: address review comments — <brief summary>`
