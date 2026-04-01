@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use regex::Regex;
 use tokio::process::Command;
-use crate::workflows::github_prs::{post_inline_comment, post_summary_comment};
+use crate::workflows::github_prs::post_summary_comment;
 use crate::workflows::stage::{Stage, StageContext};
 use crate::workflows::stores::PrReviewResult;
 
@@ -122,52 +122,24 @@ impl Stage for PrReviewPosterStage {
         let summary = parse_summary(agent_output);
 
         ctx.logger.info(&format!(
-            "PrReviewPosterStage: posting {} inline comment(s) to PR #{}",
+            "PrReviewPosterStage: found {} inline observation(s) for PR #{}",
             inline_comments.len(),
             pr.number
         ));
 
         let mut errors: Vec<String> = Vec::new();
-        let mut inline_count = 0usize;
+        let inline_count = inline_comments.len();
 
-        // Post inline comments.
-        for comment in &inline_comments {
-            match post_inline_comment(
-                &pr.repo,
-                pr.number,
-                &head_sha,
-                &comment.path,
-                comment.line,
-                &comment.body,
-            )
-            .await
-            {
-                Ok(()) => {
-                    inline_count += 1;
-                    ctx.logger.debug(&format!(
-                        "  Posted inline comment on {}:{}",
-                        comment.path, comment.line
-                    ));
-                }
-                Err(e) => {
-                    let msg = format!(
-                        "Failed to post inline comment on {}:{} — {}",
-                        comment.path, comment.line, e
-                    );
-                    ctx.logger.error(&msg);
-                    errors.push(msg);
-                }
-            }
-        }
+        // Build a single combined comment with summary + inline observations.
+        // Posted as a timeline comment (NOT a formal review) so it doesn't
+        // count as an approval or request changes.
+        let mut body_parts: Vec<String> = Vec::new();
 
-        // Post summary comment.  If no SUMMARY markers were found, fall back
-        // to posting the cleaned agent output directly (this happens when the
-        // agent times out or doesn't follow the exact marker format).
-        let summary_to_post = summary.or_else(|| {
+        // Summary section.
+        let summary_text = summary.or_else(|| {
             if agent_output.is_empty() {
                 return None;
             }
-            // Extract clean text from the agent output, filtering out JSON/stream data.
             let clean_lines: Vec<&str> = agent_output
                 .lines()
                 .filter(|l| {
@@ -183,24 +155,33 @@ impl Stage for PrReviewPosterStage {
                 None
             } else {
                 let text = clean_lines.join("\n");
-                let truncated = if text.len() > 4000 {
-                    crate::utils::truncate::safe_truncate(&text, 4000)
-                } else {
-                    text
-                };
-                Some(format!(
-                    "## 🧑‍🍳 PR Review\n\n{}\n",
-                    truncated
-                ))
+                Some(crate::utils::truncate::safe_truncate(&text, 4000))
             }
         });
 
-        let summary_posted = if let Some(body) = &summary_to_post {
-            ctx.logger.info("PrReviewPosterStage: posting summary comment");
-            match post_summary_comment(&pr.repo, pr.number, body).await {
+        if let Some(ref text) = summary_text {
+            body_parts.push(format!("## 🧑‍🍳 PR Review\n\n{}", text));
+        }
+
+        // Inline observations section (formatted as markdown, not formal review comments).
+        if !inline_comments.is_empty() {
+            let mut inline_section = String::from("\n### Inline observations\n");
+            for comment in &inline_comments {
+                inline_section.push_str(&format!(
+                    "\n**`{}:{}`**\n{}\n",
+                    comment.path, comment.line, comment.body
+                ));
+            }
+            body_parts.push(inline_section);
+        }
+
+        let summary_posted = if !body_parts.is_empty() {
+            let full_body = body_parts.join("\n");
+            ctx.logger.info("PrReviewPosterStage: posting review comment");
+            match post_summary_comment(&pr.repo, pr.number, &full_body).await {
                 Ok(()) => true,
                 Err(e) => {
-                    let msg = format!("Failed to post summary comment — {}", e);
+                    let msg = format!("Failed to post review comment — {}", e);
                     ctx.logger.error(&msg);
                     errors.push(msg);
                     false

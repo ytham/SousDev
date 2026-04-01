@@ -260,6 +260,9 @@ pub struct PrReviewRecord {
     /// Lines deleted at time of review.
     #[serde(default)]
     pub deletions: u64,
+    /// Whether the review found concerns/issues (true) or approved cleanly (false).
+    #[serde(default)]
+    pub has_concerns: bool,
     /// The highest comment ID seen during this review pass (used as a cursor
     /// for the next pass).
     pub last_comment_id: u64,

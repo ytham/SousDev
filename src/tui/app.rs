@@ -400,6 +400,7 @@ impl App {
                     stages,
                     stage_statuses,
                     status,
+                    comment_count: 0,
                     run_id: None,
                     logs: Vec::new(),
                     log_entries: Vec::new(),
@@ -607,7 +608,7 @@ impl App {
                         ItemStatus::Error
                     } else {
                         match wf_mode {
-                            Some(WorkflowMode::PrReview) => ItemStatus::Reviewed,
+                            Some(WorkflowMode::PrReview) => ItemStatus::ReviewedApproved,
                             _ => ItemStatus::Success,
                         }
                     };
@@ -1365,6 +1366,7 @@ impl App {
     /// The label is matched against item IDs (e.g. "issue #42" matches "#42",
     /// "PR #12050" matches "PR #12050").
     fn update_item_status(&mut self, workflow_name: &str, item_label: &str, status: ItemStatus) {
+                    comment_count: 0,
         if let Some(items) = self.workflow_items.get_mut(workflow_name) {
             for item in items.iter_mut() {
                 if item_label.contains(&item.id) {
@@ -1889,6 +1891,7 @@ async fn load_initial_items(
                             title: rec.issue_title.clone(),
                             url: rec.issue_url.clone(),
                             status,
+                    comment_count: 0,
                         });
                     }
                 }
@@ -1904,13 +1907,14 @@ async fn load_initial_items(
                         let status = if in_cooldown {
                             ItemStatus::Cooldown
                         } else {
-                            ItemStatus::Reviewed
+                            ItemStatus::ReviewedApproved
                         };
                         items.push(ItemSummary {
                             id: format!("PR #{}", rec.pr_number),
                             title: rec.pr_title.clone(),
                             url: rec.pr_url.clone(),
                             status,
+                    comment_count: 0,
                         });
                     }
                 }
@@ -1924,6 +1928,7 @@ async fn load_initial_items(
                             title: String::new(),
                             url: rec.pr_url.clone(),
                             status,
+                    comment_count: 0,
                         });
                     }
                 }
@@ -2079,6 +2084,7 @@ async fn refresh_info_from_remote(
                     title: item.title.chars().take(50).collect(),
                     url: item.url.clone(),
                     status,
+                    comment_count: 0,
                 });
             }
 
@@ -2134,7 +2140,7 @@ async fn refresh_info_from_remote(
                 let status = if in_cooldown {
                     ItemStatus::Cooldown
                 } else if is_reviewed {
-                    ItemStatus::Reviewed
+                    ItemStatus::ReviewedApproved
                 } else {
                     ItemStatus::None
                 };
@@ -2143,6 +2149,7 @@ async fn refresh_info_from_remote(
                     title: pr.title.chars().take(50).collect(),
                     url: pr.url.clone(),
                     status,
+                    comment_count: 0,
                 });
             }
 
@@ -2182,6 +2189,7 @@ async fn refresh_info_from_remote(
                     title: pr.title.chars().take(50).collect(),
                     url: pr.url.clone(),
                     status: ItemStatus::None,
+                    comment_count: 0,
                 })
                 .collect();
 
@@ -3519,12 +3527,14 @@ mod tests {
                     title: "Fix bug".into(),
                     url: "https://github.com/o/r/issues/42".into(),
                     status: ItemStatus::None,
+                    comment_count: 0,
                 },
                 ItemSummary {
                     id: "#43".into(),
                     title: "Add feature".into(),
                     url: "https://github.com/o/r/issues/43".into(),
                     status: ItemStatus::Success,
+                    comment_count: 0,
                 },
             ],
         });
@@ -3543,6 +3553,7 @@ mod tests {
                 title: "Fix".into(),
                 url: "u".into(),
                 status: ItemStatus::None,
+                    comment_count: 0,
             }],
         });
         app.handle_tui_event(TuiEvent::RunStarted {
@@ -3564,6 +3575,7 @@ mod tests {
                 title: "Fix".into(),
                 url: "u".into(),
                 status: ItemStatus::InProgress,
+                    comment_count: 0,
             }],
         });
         // First a RunStarted to set current_item_label
@@ -3594,6 +3606,7 @@ mod tests {
                 title: "Fix".into(),
                 url: "u".into(),
                 status: ItemStatus::None,
+                    comment_count: 0,
             }],
         });
         app.handle_tui_event(TuiEvent::RunStarted {
@@ -3629,6 +3642,7 @@ mod tests {
                 title: "old".into(),
                 url: "u".into(),
                 status: ItemStatus::None,
+                    comment_count: 0,
             }],
         });
         assert_eq!(app.selected_items().len(), 1);
@@ -3641,12 +3655,14 @@ mod tests {
                     title: "new".into(),
                     url: "u".into(),
                     status: ItemStatus::Success,
+                    comment_count: 0,
                 },
                 ItemSummary {
                     id: "#2".into(),
                     title: "added".into(),
                     url: "u".into(),
                     status: ItemStatus::None,
+                    comment_count: 0,
                 },
             ],
         });
@@ -3667,18 +3683,21 @@ mod tests {
                     title: "First".into(),
                     url: "https://github.com/o/r/issues/1".into(),
                     status: ItemStatus::None,
+                    comment_count: 0,
                 },
                 ItemSummary {
                     id: "#2".into(),
                     title: "Second".into(),
                     url: "https://github.com/o/r/issues/2".into(),
                     status: ItemStatus::Error,
+                    comment_count: 0,
                 },
                 ItemSummary {
                     id: "#3".into(),
                     title: "Third".into(),
                     url: "https://github.com/o/r/issues/3".into(),
                     status: ItemStatus::Cooldown,
+                    comment_count: 0,
                 },
             ],
         });
@@ -3753,6 +3772,7 @@ mod tests {
                 title: "New".into(),
                 url: "u".into(),
                 status: ItemStatus::None,
+                    comment_count: 0,
             }],
         });
         assert_eq!(app.info_expanded_selected, 0);

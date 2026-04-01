@@ -136,7 +136,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 bg
             };
 
-            let (badge, badge_color) = status_badge(item.status);
+            let (badge, badge_color) = status_badge_for_item(item);
             let max_title = (INFO_EXPANDED_WIDTH as usize).saturating_sub(item.id.len() + 12);
             let title = if item.title.len() > max_title {
                 crate::utils::truncate::safe_truncate(&item.title, max_title)
@@ -232,7 +232,8 @@ fn status_description(status: ItemStatus) -> &'static str {
         ItemStatus::Success => "PR opened / completed",
         ItemStatus::Error => "Failed (will retry after cooldown)",
         ItemStatus::Cooldown => "In cooldown (will retry later)",
-        ItemStatus::Reviewed => "Review posted",
+        ItemStatus::ReviewedApproved => "Agent approved — needs your approval",
+        ItemStatus::ReviewedConcerns => "Agent found concerns — needs your review",
         ItemStatus::NewComments => "Has new reviewer comments",
         ItemStatus::NoNewComments => "No new comments",
     }
@@ -246,7 +247,8 @@ fn status_badge(status: ItemStatus) -> (String, Color) {
         ItemStatus::Success => ("[PR]".into(), Color::Green),
         ItemStatus::Error => ("[!!]".into(), Color::Red),
         ItemStatus::Cooldown => ("[!!]".into(), Color::Red),
-        ItemStatus::Reviewed => ("[OK]".into(), Color::Green),
+        ItemStatus::ReviewedApproved => ("[A✓]".into(), Color::Green),
+        ItemStatus::ReviewedConcerns => ("[A✗]".into(), Color::Yellow),
         ItemStatus::NewComments => ("[**]".into(), Color::Cyan),
         ItemStatus::NoNewComments => ("[--]".into(), Color::DarkGray),
     }
@@ -262,7 +264,23 @@ mod tests {
         assert_eq!(status_badge(ItemStatus::InProgress).0, "[>>]");
         assert_eq!(status_badge(ItemStatus::Success).0, "[PR]");
         assert_eq!(status_badge(ItemStatus::Error).0, "[!!]");
-        assert_eq!(status_badge(ItemStatus::Reviewed).0, "[OK]");
+        assert_eq!(status_badge(ItemStatus::ReviewedApproved).0, "[A✓]");
+        assert_eq!(status_badge(ItemStatus::ReviewedConcerns).0, "[A✗]");
         assert_eq!(status_badge(ItemStatus::NewComments).0, "[**]");
+    }
+}
+
+/// Status badge that uses item context for richer display.
+fn status_badge_for_item(item: &crate::tui::events::ItemSummary) -> (String, Color) {
+    match item.status {
+        ItemStatus::NoNewComments if item.comment_count > 0 => {
+            let count_str = if item.comment_count >= 100 {
+                format!("{}", item.comment_count % 100)
+            } else {
+                format!("{}", item.comment_count)
+            };
+            (format!("[{:>2}]", count_str), Color::DarkGray)
+        }
+        other => status_badge(other),
     }
 }

@@ -235,6 +235,7 @@ impl WorkflowExecutor {
                     title: truncate_title(&item.title, 50),
                     url: item.url.clone(),
                     status,
+                    comment_count: 0,
                 });
             }
             self.opts.tui_tx.send(TuiEvent::ItemsSummary {
@@ -271,17 +272,17 @@ impl WorkflowExecutor {
                     .is_in_cooldown(&self.config.name, &pr_key)
                     .await
                     .unwrap_or(false);
-                let is_reviewed = self
+                let review_record = self
                     .pr_review_store
                     .get_record(&self.config.name, pr.number)
                     .await
                     .ok()
                     .flatten()
-                    .is_some();
+                    ;
                 let status = if in_cooldown {
                     ItemStatus::Cooldown
-                } else if is_reviewed {
-                    ItemStatus::Reviewed
+                } else if let Some(ref rec) = review_record {
+                    if rec.has_concerns { ItemStatus::ReviewedConcerns } else { ItemStatus::ReviewedApproved }
                 } else {
                     ItemStatus::None
                 };
@@ -290,6 +291,7 @@ impl WorkflowExecutor {
                     title: truncate_title(&pr.title, 50),
                     url: pr.url.clone(),
                     status,
+                    comment_count: 0,
                 });
             }
             self.opts.tui_tx.send(TuiEvent::ItemsSummary {
@@ -317,6 +319,7 @@ impl WorkflowExecutor {
                     title: truncate_title(&pr.title, 50),
                     url: pr.url.clone(),
                     status: ItemStatus::None,
+                    comment_count: 0,
                 })
                 .collect();
             self.opts.tui_tx.send(TuiEvent::ItemsSummary {
@@ -611,6 +614,7 @@ impl WorkflowExecutor {
                     title: truncate_title(&item.title, 50),
                     url: item.url.clone(),
                     status,
+                    comment_count: 0,
                 });
             }
             self.opts.tui_tx.send(TuiEvent::ItemsSummary {
@@ -1009,17 +1013,17 @@ impl WorkflowExecutor {
                     .is_in_cooldown(&self.config.name, &pr_key)
                     .await
                     .unwrap_or(false);
-                let is_reviewed = self
+                let review_record = self
                     .pr_review_store
                     .get_record(&self.config.name, pr.number)
                     .await
                     .ok()
                     .flatten()
-                    .is_some();
+                    ;
                 let status = if in_cooldown {
                     ItemStatus::Cooldown
-                } else if is_reviewed {
-                    ItemStatus::Reviewed
+                } else if let Some(ref rec) = review_record {
+                    if rec.has_concerns { ItemStatus::ReviewedConcerns } else { ItemStatus::ReviewedApproved }
                 } else {
                     ItemStatus::None
                 };
@@ -1028,6 +1032,7 @@ impl WorkflowExecutor {
                     title: truncate_title(&pr.title, 50),
                     url: pr.url.clone(),
                     status,
+                    comment_count: 0,
                 });
             }
             self.opts.tui_tx.send(TuiEvent::ItemsSummary {
@@ -1073,6 +1078,11 @@ impl WorkflowExecutor {
                             head_sha: pr.head_ref_oid.clone(),
                             additions: pr.additions,
                             deletions: pr.deletions,
+                            has_concerns: ctx
+                                .pr_review_result
+                                .as_ref()
+                                .map(|r| r.inline_comment_count > 0)
+                                .unwrap_or(false),
                             last_comment_id,
                             reviewed_at: Utc::now().to_rfc3339(),
                         },
@@ -1278,6 +1288,7 @@ impl WorkflowExecutor {
         }
 
         let mut to_respond: Vec<PRWithComments> = Vec::new();
+        let mut total_comment_counts: HashMap<u64, usize> = HashMap::new();
         for pr in &prs {
             let record = self
                 .pr_response_store
@@ -1355,6 +1366,9 @@ impl WorkflowExecutor {
                 .filter(|c| !is_bot(&c.login))
                 .collect();
 
+            // Track total comment count for display in the Info pane.
+            total_comment_counts.insert(pr.number, new_inline.len() + new_timeline.len());
+
             if new_inline.is_empty() && new_timeline.is_empty() {
                 logger.info(&format!(
                     "PR #{} has no new comments after filtering — skipping",
@@ -1384,6 +1398,7 @@ impl WorkflowExecutor {
             let mut summaries: Vec<ItemSummary> = Vec::new();
             for pr in &prs {
                 let has_new_comments = responded_set.contains(&pr.number);
+                let count = *total_comment_counts.get(&pr.number).unwrap_or(&0);
                 let status = if has_new_comments {
                     ItemStatus::NewComments
                 } else {
@@ -1394,6 +1409,7 @@ impl WorkflowExecutor {
                     title: truncate_title(&pr.title, 50),
                     url: pr.url.clone(),
                     status,
+                    comment_count: count,
                 });
             }
             self.opts.tui_tx.send(TuiEvent::ItemsSummary {

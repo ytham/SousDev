@@ -98,6 +98,8 @@ pub struct ItemSummary {
     pub url: String,
     /// Current processing status.
     pub status: ItemStatus,
+    /// Total comment count (for pr-responder display). 0 if not applicable.
+    pub comment_count: usize,
 }
 
 /// Processing status of an issue or PR.
@@ -113,8 +115,10 @@ pub enum ItemStatus {
     Error,
     /// In failure cooldown — will retry after cooldown expires.
     Cooldown,
-    /// PR review has been posted (pr-reviewer specific).
-    Reviewed,
+    /// PR review posted — agent found no concerns (needs manual approval).
+    ReviewedApproved,
+    /// PR review posted — agent found concerns (needs manual review + approval).
+    ReviewedConcerns,
     /// PR has new unaddressed reviewer comments (pr-responder specific).
     NewComments,
     /// PR has been checked and has no new comments (pr-responder specific).
