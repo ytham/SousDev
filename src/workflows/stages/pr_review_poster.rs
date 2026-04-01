@@ -85,7 +85,6 @@ impl Stage for PrReviewPosterStage {
                 if !r.answer.is_empty() {
                     r.answer.clone()
                 } else {
-                    // Extract all thinking text from the trajectory.
                     r.trajectory
                         .iter()
                         .filter(|s| {
@@ -98,6 +97,22 @@ impl Stage for PrReviewPosterStage {
             })
             .unwrap_or_default();
         let agent_output = agent_output.as_str();
+
+        // Check if the agent already posted a review directly (via `gh pr review`).
+        // If so, skip posting to avoid duplicates.
+        let already_posted = check_agent_already_posted(&pr.repo, pr.number).await;
+        if already_posted {
+            ctx.logger.info(
+                "PrReviewPosterStage: agent already posted a review — skipping duplicate",
+            );
+            ctx.pr_review_result = Some(PrReviewResult {
+                inline_comment_count: 0,
+                summary_posted: true,
+                head_sha: resolve_head_sha(&ctx.workspace_dir).await,
+                errors: vec![],
+            });
+            return Ok(());
+        }
 
         // Resolve the HEAD SHA of the PR branch.
         let head_sha = resolve_head_sha(&ctx.workspace_dir).await;
@@ -209,6 +224,36 @@ impl Stage for PrReviewPosterStage {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Check if a review comment was already posted on this PR by the
+/// authenticated user within the last few minutes (indicating the agent
+/// posted it directly via `gh pr review`).
+async fn check_agent_already_posted(repo: &str, pr_number: u64) -> bool {
+    // Get the authenticated user's login.
+    let login = crate::workflows::github_prs::detect_github_login()
+        .await
+        .unwrap_or_default();
+    if login.is_empty() {
+        return false;
+    }
+
+    // Fetch recent reviews on this PR.
+    let reviews = crate::workflows::github_prs::fetch_pr_review_comments(
+        repo, pr_number, None,
+    )
+    .await
+    .unwrap_or_default();
+
+    // Check if any review from the authenticated user was posted recently
+    // (within the last 10 minutes).
+    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(10);
+    reviews.iter().any(|r| {
+        r.login == login
+            && chrono::DateTime::parse_from_rfc3339(&r.created_at)
+                .map(|dt| dt > cutoff)
+                .unwrap_or(false)
+    })
+}
 
 /// Resolve the current HEAD SHA in the workspace (short 7-char).
 async fn resolve_head_sha(workspace_dir: &std::path::Path) -> String {

@@ -2019,19 +2019,24 @@ async fn load_previous_logs(
 /// Fetch current items from GitHub/Linear for each workflow and populate
 /// the Info pane.  Runs once on startup so the Info pane has up-to-date
 /// data before the first cron tick.
+/// Fetch current items from GitHub/Linear for each workflow and send
+/// `ItemsSummary` events via the TUI channel.
+///
+/// Designed to run as a background task so the TUI renders immediately.
+/// Uses `TuiEventSender` to deliver results instead of mutating `App` directly.
 async fn refresh_info_from_remote(
-    app: &mut App,
-    config: &crate::types::config::HarnessConfig,
-    project_root: &std::path::Path,
+    config: crate::types::config::HarnessConfig,
+    project_root: std::path::PathBuf,
+    tui_tx: TuiEventSender,
 ) {
     use crate::tui::events::{ItemStatus, ItemSummary};
     use crate::workflows::github_issues::{fetch_github_issues, repo_to_gh_identifier, FetchIssuesOptions};
     use crate::workflows::github_prs::{fetch_github_prs, FetchPRsOptions};
     use crate::workflows::stores::{FailureCooldownStore, HandledIssueStore, PrReviewStore};
 
-    let issue_store = HandledIssueStore::new(project_root);
-    let review_store = PrReviewStore::new(project_root);
-    let failure_store = FailureCooldownStore::new(project_root);
+    let issue_store = HandledIssueStore::new(&project_root);
+    let review_store = PrReviewStore::new(&project_root);
+    let failure_store = FailureCooldownStore::new(&project_root);
 
     for wf_config in &config.workflows {
         let wf_name = &wf_config.name;
@@ -2077,9 +2082,11 @@ async fn refresh_info_from_remote(
                 });
             }
 
-
             if !summaries.is_empty() {
-                app.workflow_items.insert(wf_name.clone(), summaries);
+                tui_tx.send(TuiEvent::ItemsSummary {
+                    workflow_name: wf_name.clone(),
+                    items: summaries,
+                });
             }
             continue;
         }
@@ -2100,22 +2107,14 @@ async fn refresh_info_from_remote(
             .await
             .unwrap_or_default();
 
-            // Apply the same individual-reviewer/assignee filter as the executor.
             let reviewer_login = crate::workflows::github_prs::detect_github_login()
                 .await
                 .unwrap_or_default();
             let prs: Vec<_> = all_prs
                 .into_iter()
                 .filter(|pr| {
-                    // Individually requested as reviewer.
-                    if pr.requested_reviewers.iter().any(|r| r == &reviewer_login) {
-                        return true;
-                    }
-                    // Assigned to the user.
-                    if pr.assignees.iter().any(|a| a == &reviewer_login) {
-                        return true;
-                    }
-                    false
+                    pr.requested_reviewers.iter().any(|r| r == &reviewer_login)
+                        || pr.assignees.iter().any(|a| a == &reviewer_login)
                 })
                 .collect();
 
@@ -2148,7 +2147,10 @@ async fn refresh_info_from_remote(
             }
 
             if !summaries.is_empty() {
-                app.workflow_items.insert(wf_name.clone(), summaries);
+                tui_tx.send(TuiEvent::ItemsSummary {
+                    workflow_name: wf_name.clone(),
+                    items: summaries,
+                });
             }
             continue;
         }
@@ -2173,18 +2175,21 @@ async fn refresh_info_from_remote(
             .await
             .unwrap_or_default();
 
-            let mut summaries: Vec<ItemSummary> = Vec::new();
-            for pr in &prs {
-                summaries.push(ItemSummary {
+            let summaries: Vec<ItemSummary> = prs
+                .iter()
+                .map(|pr| ItemSummary {
                     id: format!("PR #{}", pr.number),
                     title: pr.title.chars().take(50).collect(),
                     url: pr.url.clone(),
                     status: ItemStatus::None,
-                });
-            }
+                })
+                .collect();
 
             if !summaries.is_empty() {
-                app.workflow_items.insert(wf_name.clone(), summaries);
+                tui_tx.send(TuiEvent::ItemsSummary {
+                    workflow_name: wf_name.clone(),
+                    items: summaries,
+                });
             }
         }
     }
@@ -2297,11 +2302,21 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
     app.schedule_tx = Some(schedule_tx);
     app.pretty_logs = pretty_logs;
 
-    // Load historical item data from stores so the info expanded panel has data
-    // before the first cron tick.
+    // Load historical data from local stores (fast, disk-only).
     load_initial_items(&mut app, &project_root, &workflow_infos).await;
     load_previous_logs(&mut app, &project_root, &workflow_infos).await;
-    refresh_info_from_remote(&mut app, &config_for_refresh, &project_root).await;
+
+    // Fetch live data from GitHub in a background task so the TUI renders
+    // immediately.  Results arrive via TuiEvent::ItemsSummary and update
+    // the Info pane asynchronously.
+    {
+        let refresh_config = config_for_refresh.clone();
+        let refresh_root = project_root.clone();
+        let refresh_tx = tui_tx.clone();
+        tokio::spawn(async move {
+            refresh_info_from_remote(refresh_config, refresh_root, refresh_tx).await;
+        });
+    }
 
     // Main event loop.
     loop {
