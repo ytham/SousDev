@@ -143,7 +143,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_toast(f, app);
 }
 
-/// Draw a toast notification in the bottom-right corner if one is active.
+/// Draw a toast notification centered horizontally with padding.
 fn draw_toast(f: &mut Frame, app: &App) {
     let toast = match &app.toast {
         Some(t) => t,
@@ -152,24 +152,33 @@ fn draw_toast(f: &mut Frame, app: &App) {
 
     let area = f.area();
     let msg = &toast.message;
-    let width = (msg.len() as u16) + 4;
-    let height = 1u16;
+    let pad_x: u16 = 2;
+    let pad_y: u16 = 1;
+    let content_width = msg.len() as u16 + pad_x * 2;
+    let content_height = 1 + pad_y * 2;
 
-    if area.width < width + 2 || area.height < height + 2 {
+    if area.width < content_width + 2 || area.height < content_height + 2 {
         return;
     }
 
     let toast_area = Rect {
-        x: area.x + area.width - width - 1,
-        y: area.y + area.height - height - 2,
-        width,
-        height,
+        x: area.x + (area.width.saturating_sub(content_width)) / 2,
+        y: area.y + area.height - content_height - 2,
+        width: content_width,
+        height: content_height,
     };
 
     f.render_widget(Clear, toast_area);
 
     let bg = Style::default().bg(ACCENT_TOAST).fg(Color::White);
-    let line = Line::from(vec![Span::styled(format!("  {}  ", msg), bg)]);
-    let paragraph = Paragraph::new(line).block(Block::default().style(bg));
+    let lines = vec![
+        Line::from(Span::styled(" ".repeat(content_width as usize), bg)),
+        Line::from(Span::styled(
+            format!("{:^width$}", msg, width = content_width as usize),
+            bg,
+        )),
+        Line::from(Span::styled(" ".repeat(content_width as usize), bg)),
+    ];
+    let paragraph = Paragraph::new(lines).block(Block::default().style(bg));
     f.render_widget(paragraph, toast_area);
 }
