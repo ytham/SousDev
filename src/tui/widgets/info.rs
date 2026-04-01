@@ -196,13 +196,18 @@ mod tests {
 /// Status badge that uses item context for richer display.
 fn status_badge_for_item(item: &crate::tui::events::ItemSummary) -> (String, Color) {
     match item.status {
-        ItemStatus::NoNewComments if item.comment_count > 0 => {
+        ItemStatus::NewComments | ItemStatus::NoNewComments if item.comment_count > 0 => {
             let count_str = if item.comment_count >= 100 {
                 format!("{}", item.comment_count % 100)
             } else {
                 format!("{}", item.comment_count)
             };
-            (format!("[{:>2}]", count_str), Color::DarkGray)
+            let color = if item.status == ItemStatus::NewComments {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
+            (format!("[{:>2}]", count_str), color)
         }
         other => status_badge(other),
     }

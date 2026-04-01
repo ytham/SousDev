@@ -1366,7 +1366,7 @@ impl WorkflowExecutor {
                 .filter(|c| !is_bot(&c.login))
                 .collect();
 
-            // Track total comment count for display in the Info pane.
+            // Track new comment count for display in the Info pane badge.
             total_comment_counts.insert(pr.number, new_inline.len() + new_timeline.len());
 
             if new_inline.is_empty() && new_timeline.is_empty() {

@@ -1,5 +1,23 @@
 # Future Improvements
 
+## Implemented (from initial session)
+
+- ✅ Reflexion-style reflection between retries (in `agent_loop.rs`)
+- ✅ TUI dashboard with three-column layout
+- ✅ Pretty log mode with collapsible entries
+- ✅ Info pane + Info Expanded floating panel
+- ✅ Linear issue source integration
+- ✅ System prompt with blocked commands
+- ✅ Session persistence (.session.toml)
+- ✅ Live cron rescheduling
+- ✅ Failure cooldown with exponential backoff
+- ✅ Smart timeout with commit detection
+- ✅ Background startup refresh (fast TUI render)
+- ✅ Security: shell injection fixes (no more `sh -c`)
+- ✅ Security: UTF-8 safe truncation everywhere
+
+---
+
 ## Skeleton-of-Thought Documentation Generation
 
 **Status:** Planned
@@ -37,59 +55,40 @@ enabled = true           # default false
 max_points = 5           # SoT max outline points
 ```
 
-**New prompt template:** `prompts/documentation.md`
-```markdown
-The following code changes were made to address this task:
-
-Task: {{task}}
-
-Diff summary:
-{{diff}}
-
-List {{max_points}} key documentation points about these changes.
-Each point should cover one distinct aspect (what changed, why,
-how it affects the system, migration notes, etc.).
-
-Format as a numbered list:
-1. ...
-2. ...
-```
-
 ### Insertion point
 
-After `PullRequestStage` in the stage pipeline in `run_single_issue`:
-```rust
-self.run_stage(&PullRequestStage, &mut ctx).await?;
-// Only run if documentation is enabled and PR was created
-if ctx.pr_url.is_some() && has_docs_config {
-    self.run_stage(&DocumentationStage, &mut ctx).await?;
-}
-```
-
-### Output
-
-Posted as a PR comment via `gh pr comment <number> --repo <repo> --body-file <temp>`.
-
-The comment contains assembled documentation:
-```markdown
-## Documentation — Automated by SousDev
-
-### 1. Database schema changes
-...
-
-### 2. New API endpoint
-...
-```
-
-### Why post as a PR comment, not a file commit
-
-- Doesn't pollute the PR's diff with auto-generated docs
-- Reviewer can edit/approve/reject the docs independently
-- Works for any project regardless of documentation structure
-- Could be promoted to a docs file in a follow-up PR if desired
+After `PullRequestStage` in `run_single_issue`. Posted as a PR comment.
 
 ### Cost
 
 - 1 LLM call for the skeleton
 - N LLM calls for expansion (3-6, in parallel)
-- Total: 4-7 LLM calls, ~15-30 seconds wall clock (parallel expansion)
+- Total: 4-7 LLM calls, ~15-30 seconds wall clock
+
+---
+
+## Potential Future Features
+
+### MCP Integration
+SousDev does not currently use MCP (Model Context Protocol). Could be added
+for richer tool integration with other AI tools/services.
+
+### Container Isolation
+The `blocked_commands` is prompt-level only. Technical enforcement via
+container/VM isolation for agent workloads would improve security.
+
+### Parallel Workflow Execution
+Currently workflows within a tick run sequentially. Could use `tokio::JoinSet`
+to process multiple issues/PRs in parallel.
+
+### Diff-Based PR Description Caching
+When the diff hasn't changed, the PR description generation could be skipped
+to save Claude CLI invocations.
+
+### Comment Threading
+The pr-responder could thread replies to specific inline comments instead of
+posting a single summary comment.
+
+### Notification System
+Desktop notifications (via `notify-rust` or similar) when a workflow completes,
+an issue is fixed, or a review is posted.

@@ -1,6 +1,7 @@
 # 🧑‍🍳 SousDev — Project Context
 
 This document describes the current state of SousDev for agent context.
+Last updated after ~200+ changes in the initial build session.
 
 ---
 
@@ -31,8 +32,6 @@ that edit code, run tests, open PRs, and post review comments.
 
 The default `claude-loop` workflow requires NO API keys — only `gh auth login` and `claude` CLI auth.
 
-`ANTHROPIC_API_KEY` is only needed for harness-native techniques (react, reflexion, etc.).
-
 ---
 
 ## Project layout
@@ -49,23 +48,23 @@ sousdev/
 │   ├── code-review.md               reviewer prompt
 │   ├── review-feedback.md           critique fed back to agent on rejection
 │   ├── pr-description.md            PR title + body generation
-│   ├── pr-review.md                 PR review (INLINE_COMMENT format)
+│   ├── pr-review.md                 PR review (IMPORTANT CONSTRAINTS at top)
 │   ├── pr-comment-response.md       PR comment response
 │   ├── reflect.md                   reflexion prompt for retry reasoning
 │   └── ...
 ├── output/                          state files + logs (gitignored)
-│   ├── runs.json                    run history
-│   ├── handled-issues.json          handled issue records
-│   ├── reviewed-prs.json            reviewed PR records
-│   ├── pr-responses.json            PR response records
+│   ├── runs.json
+│   ├── handled-issues.json
+│   ├── reviewed-prs.json
+│   ├── pr-responses.json
 │   ├── failure-cooldowns.json       failure tracking with exponential backoff
-│   └── logs/<workflow>/<label>.json  per-run structured logs (e.g. issue-10649.json)
+│   └── logs/<workflow>/<label>.json  per-run logs (e.g. issue-10649.json)
 └── src/
     ├── main.rs                      CLI entry point (clap)
     ├── lib.rs                       library root
     ├── types/
     │   ├── config.rs                HarnessConfig, WorkflowConfig, all sub-configs
-    │   └── technique.rs             RunResult, TrajectoryStep, StepType
+    │   └── technique.rs             RunResult, TrajectoryStep, StepType (PartialEq, Eq)
     ├── utils/
     │   ├── logger.rs                Logger (wraps tracing with prefix)
     │   ├── prompt_loader.rs         PromptLoader — file or inline, {{var}} substitution
@@ -94,13 +93,14 @@ sousdev/
     ├── workflows/
     │   ├── workflow.rs              ParsedTask, make_skipped_result
     │   ├── stage.rs                 Stage trait, StageContext, ResolvedPrompts
-    │   ├── executor.rs              WorkflowExecutor — all 4 modes + refresh_info_only
-    │   ├── cron_runner.rs           tokio-cron-scheduler + live rescheduling
+    │   ├── executor.rs              WorkflowExecutor — 4 modes + refresh_info_only
+    │   ├── cron_runner.rs           tokio-cron-scheduler + live rescheduling + info refresh
     │   ├── workspace.rs             WorkspaceManager (clone, checkout, reset, teardown)
     │   ├── github_issues.rs         fetch issues (OR-logic labels), comment, close
     │   ├── github_prs.rs            fetch PRs (3 searches), reviews, inline comments
     │   ├── linear_issues.rs         Linear GraphQL API issue fetching
-    │   ├── stores.rs                RunStore + HandledIssueStore + PrReviewStore + PrResponseStore + FailureCooldownStore
+    │   ├── stores.rs                RunStore + HandledIssueStore + PrReviewStore +
+    │   │                            PrResponseStore + FailureCooldownStore
     │   ├── workflow_log.rs          Per-run structured log files
     │   └── stages/
     │       ├── trigger.rs           Shell command → stdout
@@ -110,62 +110,61 @@ sousdev/
     │       ├── reviewer.rs          Claude review + LLM-judge strategies
     │       ├── review_feedback_loop.rs  Reviewer → agent feedback cycle
     │       ├── pr_description.rs    Claude CLI generates title + body from diff
-    │       ├── pull_request.rs      Commit, rebase CI changes, push, create PR
+    │       ├── pull_request.rs      Commit, rebase CI, push, create PR + agent fallback
     │       ├── pr_checkout.rs       Set ctx.branch from PR
-    │       ├── pr_review_poster.rs  Parse INLINE_COMMENT blocks → post to GitHub
-    │       └── pr_comment_responder.rs  Reply to threads + summary + update PR description
+    │       ├── pr_review_poster.rs  Posts timeline comment (NOT formal review) + dedup check
+    │       └── pr_comment_responder.rs  Reply + summary + update PR description
     └── techniques/                  8 standalone reasoning algorithms
-        ├── react/                   Think → Act → Observe
-        ├── reflexion/               Self-reflection + episodic memory
-        ├── tree_of_thoughts/        BFS/DFS scored reasoning tree
-        ├── self_consistency/        N-sample majority vote
-        ├── critique_loop/           Generate → Critique → Revise
-        ├── plan_and_solve/          Plan first, then execute
-        ├── skeleton_of_thought/     Outline → parallel expansion
-        └── multi_agent_debate/      N agents debate, judge synthesises
 ```
 
 ---
 
 ## TUI Dashboard
 
-Launched with bare `sousdev` (no subcommand). Three-column layout:
+Three-column layout: `Sidebar (26) | Info pane (24) | Log pane (remaining)`
+
+### Key routing (context stack, highest priority first)
 
 ```
-Sidebar (26) | Info pane (24) | Log pane (remaining)
+CronEdit > Command menu > Info Expanded > Info pane > Normal (Sidebar)
 ```
+
+Each context owns its keys exclusively. Universal: `Ctrl+C` quits.
+`Esc` pops the topmost context. `:` opens command menu from any context.
 
 ### Panels
 
-| Panel | Purpose | Key bindings |
+| Panel | Purpose |
+|---|---|
+| **Sidebar** | Workflow list + stage flowcharts. Blue thick border when active. |
+| **Info pane** | Compact item status. Clicking an item sets the log filter. |
+| **Log pane** | Real-time agent output in pretty mode. Click expands entries. |
+| **Info Expanded** | Floating left-side panel, full height, 10px left margin. |
+| **Command menu** | Floating bottom bar with padding, shows version. |
+| **Status bar** | Bottom 2 rows: workflow info + filter label + item title. |
+| **Toast** | Centered, padded, auto-expires. |
+
+### Pretty log mode
+
+- **Thinking**: Subtle background (`BG_THOUGHT`), thick cyan border (`▎`), collapsed to 1 line by default. Click expands. Newlines flattened to `  ` when collapsed, split to actual lines when expanded.
+- **Tool calls**: Purple `[tool]` prefix, result hidden. Click expands.
+- **Consolidated tools**: 3+ consecutive → last call + `[+] N more`. Click expands.
+- **Click vs drag**: < 3px movement = click (toggle expand), >= 3px = drag (copy).
+- **Copy**: Always includes full expanded content of selected entries.
+
+### Item statuses
+
+| Badge | Status | Used by |
 |---|---|---|
-| **Sidebar** | Workflow list + stage flowcharts | ↑↓ select, ←→ switch pane, i info expanded |
-| **Info pane** | Compact item status per workflow | ↑↓ select, ⏎ show logs, g open URL, c clear, C clear all |
-| **Log pane** | Real-time agent output (pretty mode) | f/b page, F/B begin/end, : menu |
-| **Info Expanded** | Floating detail panel (full height, left side) | Same as Info pane + ESC close |
-| **Command menu** | : triggered floating menu | ESC q e c p |
-| **Status bar** | Bottom bar with workflow info + filter label | — |
-
-### Pretty log mode (default)
-
-- **Thinking blocks**: Subtle background + cyan left border, collapsed to 1 line, click to expand
-- **Tool calls**: Purple `[tool]` prefix, result hidden, click to expand
-- **Consolidated tools**: 3+ consecutive calls → last call + `[+] N more`, click to expand
-- **System messages**: Stage transitions, executor messages
-- **Click vs drag**: Click (< 3px movement) toggles expand; drag copies to clipboard
-
-### Context-based key routing
-
-```
-Priority: CronEdit > Command > InfoExpanded > Info pane > Normal (Sidebar)
-```
-
-Each context handles its own keys exclusively. Universal: Ctrl+C quits.
-
-### Session persistence
-
-`.session.toml` stores enabled/disabled workflows. `config.toml` is updated when
-cron schedules change via `:c`.
+| `[  ]` | None / unchecked | All |
+| `[>>]` | InProgress | All (preserved across refreshes) |
+| `[PR]` | Success (PR opened) | issue-autofix |
+| `[!!]` | Error / Cooldown | All |
+| `[A✓]` | Agent approved, needs manual approval | pr-reviewer |
+| `[A✗]` | Agent found concerns, needs review | pr-reviewer |
+| `[--]` | No new comments (0 count) | pr-responder |
+| `[ N]` | Comment count (gray=no new, cyan=new) | pr-responder |
+| `[**]` | New comments (no count available) | pr-responder |
 
 ---
 
@@ -173,52 +172,39 @@ cron schedules change via `:c`.
 
 ### Mode 1: Issue autofix (`github_issues` or `linear_issues`)
 
-```
-Fetch issues (OR-logic labels, per-assignee queries)
-  → skip handled (HandledIssueStore) + failure cooldown
-  → for each unhandled:
-      clone repo → create branch
-      → AgentLoopStage (Claude fixes, reflexion-style reflection between retries)
-      → ReviewFeedbackLoopStage (self-review)
-      → PrDescriptionStage (Claude CLI generates title + body)
-      → PullRequestStage (commit, rebase CI fixes, push, gh pr create --head --base)
-      → "Closes <issue_url>" prepended to PR body
-      → 🧑‍🍳 branding appended (configurable)
-```
+- Labels use **OR logic** (separate query per label, merged + deduped)
+- Default limit: 100 (effectively unlimited)
+- `Closes <issue_url>` prepended to PR body
+- 🧑‍🍳 branding appended (configurable via `show_branding`)
+- Branch name: `{branch_prefix}{issue_number}` (no redundant "issue-" in template)
+- Workspaces torn down only on success; preserved on failure
+- Smart timeout: if agent committed, 60s grace period; if changes detected after timeout, treat as success
+- Reflexion-style reflection between retries
+- Agent-assisted PR creation fallback when automated flow fails
 
 ### Mode 2: PR reviewer (`github_prs`)
 
-```
-Fetch PRs (3 searches: user-review-requested, assignee, review-requested)
-  → post-fetch filter: individually requested OR assigned
-  → skip already-reviewed (unless new commits or @mention)
-  → for each:
-      checkout PR branch (FETCH_HEAD strategy with fallbacks)
-      → AgentLoopStage (max_retries defaults to 0 for reviews)
-      → PrReviewPosterStage (parse markers or fallback to trajectory)
-      → duplicate check: skip if agent already posted via gh pr review
-```
+- **Three GitHub searches** merged: `user-review-requested:@me`, `assignee:@me`, `review-requested:@me`
+- Post-fetch filter: individually requested OR assigned to user
+- `max_retries` defaults to 0 for PR review (no retries)
+- Reviews posted as **timeline comments only** (NOT formal GitHub reviews — no approval/rejection)
+- Duplicate detection: checks if agent already posted via `gh pr review` (10-min window)
+- Rebase detection: SHA changed but additions/deletions same → skip (not a real code change)
+- PR review prompt has **IMPORTANT CONSTRAINTS** at top: no build/test/install, no `gh pr review`
+- `has_concerns` tracked in `PrReviewRecord` for `[A✓]` vs `[A✗]` status
 
 ### Mode 3: PR comment responder (`github_pr_responses`)
 
-```
-Fetch authored PRs (author:@me)
-  → fetch inline comments + timeline comments + PR review bodies
-  → filter out bots ([bot] suffix)
-  → review bodies filtered by timestamp (not ID — different numbering sequences)
-  → for each PR with new comments:
-      → AgentLoopStage (address comments)
-      → ReviewFeedbackLoopStage
-      → PullRequestStage (push to existing branch)
-      → PrCommentResponderStage (reply + summary)
-      → update PR description if significant changes (2+ files)
-```
+- Fetches **three comment types**: timeline, inline review, PR review bodies
+- PR review bodies filtered by **timestamp** (not ID — different numbering sequences)
+- Bot comments filtered (`[bot]` suffix, `github-actions`)
+- Author's own comments ARE included (can direct the agent)
+- Updates PR description if significant changes (2+ files)
+- Comment count shown in Info pane badge
 
 ### Mode 4: Shell trigger
 
-```
-TriggerStage → ParseStage → AgentLoopStage → ReviewFeedbackLoopStage → PrDescriptionStage → PullRequestStage
-```
+Standard pipeline: Trigger → Parse → Agent → Review → PR Description → Pull Request
 
 ---
 
@@ -226,95 +212,77 @@ TriggerStage → ParseStage → AgentLoopStage → ReviewFeedbackLoopStage → P
 
 ### Claude CLI streaming
 
-`run_external_agent_loop` streams stdout line-by-line via `BufReader::lines()`.
-Each line is parsed in real-time by `stream_parse_claude_line()` and emitted to
-the TUI via `WorkflowLog`. Trajectory is built incrementally.
+Real-time line-by-line parsing via `BufReader::lines()`. Each stream-json line
+parsed by `stream_parse_claude_line()` and emitted to TUI immediately. Trajectory
+built incrementally during streaming.
 
-### Smart timeout
+### Smart timeout with commit detection
 
-When the agent times out:
-1. If a `git commit` was detected in streamed output, grace period drops to 60s
-2. After timeout, check workspace for uncommitted changes or new commits
-3. If changes found → treat as success, continue pipeline
-4. If no changes → return error
+1. If `git commit` detected in streamed output → grace period drops to 60s
+2. After timeout → check workspace for changes
+3. Changes found → treat as success, continue pipeline
+4. No changes → error
 
 ### Reflexion-style retries
 
-Between failed attempts, `generate_reflection()` calls Claude CLI with:
-- The failed attempt's output (truncated)
-- The error message
-- `git diff --stat`
-
-The reflection text replaces the raw error dump in the retry prompt.
-
-Default retries: 0 for PR review, 1 for all others.
-
----
-
-## Issue sources
-
-### GitHub Issues
-```toml
-[workflows.github_issues]
-assignees = ["@me"]
-labels = ["bug", "SubTA/FaaS"]  # OR logic — matches any label
-```
-
-Multiple labels use OR logic (separate `gh issue list` per label, merged + deduped).
-
-### Linear Issues
-```toml
-[workflows.linear_issues]
-team = "ENG"
-states = ["Todo"]
-```
-
-Requires `LINEAR_API_KEY`. Uses the top-level `target_repo` for the git repo.
-
----
-
-## State and stores
-
-| Store | File | Purpose |
-|---|---|---|
-| `RunStore` | `output/runs.json` | Append-only run history |
-| `HandledIssueStore` | `output/handled-issues.json` | Issues with PRs opened |
-| `PrReviewStore` | `output/reviewed-prs.json` | PRs reviewed (tracks head SHA) |
-| `PrResponseStore` | `output/pr-responses.json` | PR comment cursors |
-| `FailureCooldownStore` | `output/failure-cooldowns.json` | Exponential backoff (60min → 24h cap) |
-
-All stores handle missing/empty files gracefully. The `output/` directory is
-recreated on write if deleted.
+Between failures, `generate_reflection()` calls Claude CLI with error context.
+Reflection replaces raw error dump in retry prompt. Default retries: 0 for PR
+review, 1 for all others.
 
 ---
 
 ## Cron runner
 
-- Per-workflow overlap guard (`Arc<Mutex<bool>>`)
-- Disabled workflows checked via shared `Arc<Mutex<HashSet<String>>>`
-- **Lightweight Info pane refresh** runs BEFORE overlap guard (every tick updates the TUI even when agent is busy)
-- **Live rescheduling** via `mpsc` channel — `:c` cron edits take effect immediately
-- Schedule changes also persist to `config.toml`
+- Per-workflow overlap guard
+- **`refresh_info_only()`** runs BEFORE overlap guard every tick → Info pane stays current even when agent is busy
+- `InProgress` status preserved across `ItemsSummary` refreshes
+- Live rescheduling via `mpsc` channel → schedule changes take effect immediately
+- Background startup refresh → TUI renders instantly, GitHub data arrives async
 
 ---
 
-## System prompt
+## State and stores
 
-Injected into every agent invocation:
-- Claude: `--system-prompt` flag (native)
-- Codex/Gemini: prepended as `<system>...</system>` block
-- Default template: `prompts/system.md` with `{{blocked_commands}}` substitution
-- `blocked_commands` config: advisory list (prompt-level, not enforced)
+| Store | File | Key fields |
+|---|---|---|
+| `RunStore` | `output/runs.json` | Append-only history |
+| `HandledIssueStore` | `output/handled-issues.json` | issue_number → record |
+| `PrReviewStore` | `output/reviewed-prs.json` | pr_number → record (has_concerns, additions, deletions, head_sha) |
+| `PrResponseStore` | `output/pr-responses.json` | pr_number → record (responded_at for timestamp filtering) |
+| `FailureCooldownStore` | `output/failure-cooldowns.json` | Exponential backoff: 60min → 24h cap |
+
+All stores handle missing/empty/corrupt files gracefully. Directory recreated on write if deleted.
+
+---
+
+## Theme (all colors in `src/tui/ui.rs`)
+
+```
+BG_LOGS            Rgb(16, 16, 22)     Log pane (darkest)
+BG_INFO            Rgb(20, 20, 28)     Info pane
+BG_SIDEBAR         Rgb(24, 24, 32)     Sidebar
+BG_INFO_EXPANDED   Rgb(28, 28, 38)     Floating panels + command menu
+BG_STATUS_BAR      Rgb(30, 30, 42)     Status bar
+BG_THOUGHT         Rgb(24, 26, 34)     Thinking block background
+BG_ROW_FOCUS       Rgb(40, 40, 54)     Keyboard cursor highlight
+BG_TEXT_SELECTION   Rgb(50, 50, 70)     Mouse drag selection
+ACCENT_BORDER      Rgb(80, 110, 200)   Active panel border (thick ▎)
+ACCENT_THOUGHT     Rgb(80, 160, 200)   Thinking block left border
+ACCENT_TOOL        Rgb(140, 120, 200)  [tool] tag
+ACCENT_INFO_LEVEL  Rgb(70, 110, 190)   Info log level
+ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications
+```
 
 ---
 
 ## Security notes
 
 - All `gh api` calls use direct `Command::new("gh").arg(...)` — no shell injection
-- `safe_truncate()` prevents UTF-8 boundary panics on multi-byte characters
+- `safe_truncate()` in `src/utils/truncate.rs` prevents UTF-8 boundary panics
 - `--dangerously-skip-permissions` grants Claude full system access (by design)
-- `blocked_commands` is prompt-level only — not a technical enforcement
-- Issue bodies are a prompt injection vector — run in sandboxed environments for sensitive repos
+- `blocked_commands` is prompt-level only — not technically enforced
+- Issue bodies are a prompt injection vector
+- PR reviews are posted as timeline comments, never formal GitHub reviews
 
 ---
 
@@ -326,10 +294,10 @@ Injected into every agent invocation:
 | Clippy warnings | 0 |
 | Default agent timeout | 900s (15 min) |
 | Default PR review timeout | 600s (10 min) |
-| Default issue limit | 100 |
+| Default issue/PR limit | 100 (effectively unlimited) |
 | Failure cooldown | 60min → 120min → 240min → ... cap 24h |
 | Log files loaded on startup | Up to 5 per workflow |
-| Background refresh | GitHub data fetched async after TUI renders |
+| Startup time | ~50-100ms (GitHub data fetched in background) |
 
 ---
 
@@ -339,15 +307,19 @@ Injected into every agent invocation:
 2. `cargo clippy` — zero warnings
 3. Every Stage returns `Ok(())` for business failures; only `Err` for unrecoverable errors
 4. `HandledIssueStore.mark_handled()` only when `success && pr_url.is_some()`
-5. PR workspaces (`-pr<N>`) are never torn down
-6. Bug-fix workspaces torn down only after success; preserved on failure
-7. The reviewer approval token is exactly `HARNESS_REVIEW_APPROVED`
-8. The stream-json parser never crashes on malformed input
-9. All string truncation uses `safe_truncate()` (UTF-8 safe)
-10. `config.toml` must always be valid
-11. `reviewer_login` is detected once per executor instance (lazy-cached)
-12. Do not use `process::exit()` outside `main.rs`
-13. Do not hardcode prompts — use `prompts/*.md`
-14. All config fields must be `Option<T>` with documented defaults
-15. Info pane shows ALL open items matching filters; items disappear only when closed
-16. PR review comments (from `/pulls/{pr}/reviews` API) are filtered by timestamp, not ID
+5. PR workspaces (`-pr<N>`) are never torn down; issue workspaces torn down only on success
+6. The reviewer approval token is exactly `HARNESS_REVIEW_APPROVED`
+7. The stream-json parser never crashes on malformed input
+8. All string truncation uses `safe_truncate()` (UTF-8 safe — prevents emoji panics)
+9. `config.toml` must always be valid
+10. `reviewer_login` is detected once per executor instance (lazy-cached)
+11. Do not use `process::exit()` outside `main.rs`
+12. Do not hardcode prompts — use `prompts/*.md`
+13. All config fields must be `Option<T>` with documented defaults
+14. Info pane shows ALL open items matching filters; items disappear only when closed
+15. PR review comments (from `/pulls/{pr}/reviews` API) filtered by timestamp, not ID
+16. `InProgress` status is preserved when `ItemsSummary` refreshes the item list
+17. Reviews are NEVER posted as formal GitHub reviews — only as timeline comments
+18. Multiple labels in issue config use OR logic (separate query per label)
+19. `open_url_in_browser()` is a no-op during `#[cfg(test)]`
+20. Background `refresh_info_from_remote` uses owned types (runs in `tokio::spawn`)

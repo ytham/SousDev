@@ -617,7 +617,7 @@ impl App {
 
             TuiEvent::ItemsSummary {
                 workflow_name,
-                items,
+                mut items,
             } => {
                 // Reset selection when items refresh for the selected workflow.
                 if self
@@ -626,6 +626,17 @@ impl App {
                     .unwrap_or(false)
                 {
                     self.info_expanded_selected = 0;
+                }
+                // Preserve InProgress status from the old list — a running agent
+                // shouldn't have its status overwritten by a refresh.
+                if let Some(old_items) = self.workflow_items.get(&workflow_name) {
+                    for new_item in items.iter_mut() {
+                        if let Some(old_item) = old_items.iter().find(|o| o.id == new_item.id) {
+                            if old_item.status == ItemStatus::InProgress {
+                                new_item.status = ItemStatus::InProgress;
+                            }
+                        }
+                    }
                 }
                 self.workflow_items.insert(workflow_name, items);
             }
