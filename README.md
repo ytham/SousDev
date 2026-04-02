@@ -2,7 +2,7 @@
 
 **Prep, review, and plate your PRs automatically.**
 
-SousDev is a Rust CLI with a built-in TUI that runs autonomous agentic workflows on a cron schedule. It watches your GitHub (or Linear) repos for activity — new issues, pending PR reviews, reviewer comments — and handles them with AI agents that edit code, run tests, open PRs, and post review comments.
+SousDev (like a sous-chef, not a sous-vide) is a Rust CLI with a built-in TUI that runs autonomous agentic workflows on a cron schedule. It watches your GitHub (or Linear) repos for activity — new issues, pending PR reviews, reviewer comments — and handles them with AI agents that edit code, run tests, open PRs, and post review comments.
 
 Run bare `sousdev` to launch the interactive TUI dashboard. All workflows, logs, and status are visible in real-time.
 

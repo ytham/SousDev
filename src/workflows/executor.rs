@@ -712,25 +712,30 @@ impl WorkflowExecutor {
                     .failure_store
                     .clear_failure(&self.config.name, &item_key)
                     .await;
-                if let Some(ref pr_url) = result.pr_url {
-                    self.issue_store
-                        .mark_handled_with_number(
-                            &self.config.name,
-                            item.number,
-                            HandledIssueRecord {
-                                pr_number: None,
-                                issue_url: item.url.clone(),
-                                issue_title: item.title.clone(),
-                                issue_repo: item.repo.clone(),
-                                pr_url: Some(pr_url.clone()),
-                                pr_open: true,
-                                handled_at: Utc::now().to_rfc3339(),
-                                updated_at: Utc::now().to_rfc3339(),
-                                state: None,
-                                branch: None,
-                            },
-                        )
-                        .await?;
+                // In plan-first mode, run_plan_generation() already wrote the
+                // handled-issue record with state="plan_posted".  Do NOT
+                // overwrite it here — that would lose the plan state.
+                if !plan_first {
+                    if let Some(ref pr_url) = result.pr_url {
+                        self.issue_store
+                            .mark_handled_with_number(
+                                &self.config.name,
+                                item.number,
+                                HandledIssueRecord {
+                                    pr_number: None,
+                                    issue_url: item.url.clone(),
+                                    issue_title: item.title.clone(),
+                                    issue_repo: item.repo.clone(),
+                                    pr_url: Some(pr_url.clone()),
+                                    pr_open: true,
+                                    handled_at: Utc::now().to_rfc3339(),
+                                    updated_at: Utc::now().to_rfc3339(),
+                                    state: None,
+                                    branch: None,
+                                },
+                            )
+                            .await?;
+                    }
                 }
             } else {
                 // Record failure — item will be skipped until cooldown expires.
