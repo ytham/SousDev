@@ -238,6 +238,9 @@ fn abbreviate_stage(name: &str) -> String {
         "pr-checkout" => "checkout".into(),
         "pr-review-poster" => "post".into(),
         "pr-comment-responder" => "respond".into(),
+        "plan-generation" => "plan".into(),
+        "plan-approval" => "approval".into(),
+        "pr-update" => "pr-update".into(),
         other => {
             if other.len() > 16 {
                 crate::utils::truncate::safe_truncate(other, 16)
@@ -265,10 +268,7 @@ mod tests {
 
     #[test]
     fn test_abbreviate_long_unknown_stage() {
-        assert_eq!(
-            abbreviate_stage("a-very-long-stage-name"),
-            "a-very-long-s…"
-        );
+        assert_eq!(abbreviate_stage("a-very-long-stage-name"), "a-very-long-s…");
     }
 
     #[test]

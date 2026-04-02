@@ -94,7 +94,16 @@ impl CronRunner {
         } else if config.github_prs.is_some() {
             WorkflowMode::PrReview
         } else if config.github_issues.is_some() || config.linear_issues.is_some() {
-            WorkflowMode::Issues
+            let plan_first = config
+                .github_issues
+                .as_ref()
+                .and_then(|gi| gi.plan_first)
+                .unwrap_or(true);
+            if plan_first {
+                WorkflowMode::PlanFirstIssues
+            } else {
+                WorkflowMode::Issues
+            }
         } else {
             WorkflowMode::Standard
         }

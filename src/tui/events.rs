@@ -133,8 +133,10 @@ pub enum ItemStatus {
 /// Which workflow mode is being executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowMode {
-    /// Bug autofix from GitHub Issues.
+    /// Bug autofix from GitHub Issues (direct-to-code).
     Issues,
+    /// Plan-first bug autofix from GitHub Issues.
+    PlanFirstIssues,
     /// PR review from GitHub PRs.
     PrReview,
     /// PR comment response from GitHub PR comments.
@@ -147,6 +149,7 @@ impl std::fmt::Display for WorkflowMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WorkflowMode::Issues => write!(f, "issues"),
+            WorkflowMode::PlanFirstIssues => write!(f, "issues (plan-first)"),
             WorkflowMode::PrReview => write!(f, "pr-review"),
             WorkflowMode::PrResponse => write!(f, "pr-response"),
             WorkflowMode::Standard => write!(f, "standard"),

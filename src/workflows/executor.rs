@@ -224,10 +224,22 @@ impl WorkflowExecutor {
                     .is_in_cooldown(&self.config.name, &item.number.to_string())
                     .await
                     .unwrap_or(false);
-                let status = if is_handled {
-                    ItemStatus::Success
-                } else if in_cooldown {
+                let status = if in_cooldown {
                     ItemStatus::Cooldown
+                } else if is_handled {
+                    // Check plan-first state for richer status display.
+                    let record = self
+                        .issue_store
+                        .get_record(&self.config.name, item.number)
+                        .await
+                        .ok()
+                        .flatten();
+                    match record.as_ref().and_then(|r| r.state.as_deref()) {
+                        Some(plan_state::PLAN_POSTED) => ItemStatus::PlanPending,
+                        Some(plan_state::PLAN_APPROVED) => ItemStatus::InProgress,
+                        Some(plan_state::CODE_COMPLETE) => ItemStatus::Success,
+                        _ => ItemStatus::Success, // Legacy (no state) = completed
+                    }
                 } else {
                     ItemStatus::None
                 };
@@ -950,7 +962,7 @@ impl WorkflowExecutor {
         self.opts.tui_tx.send(TuiEvent::RunStarted {
             workflow_name: self.config.name.clone(),
             run_id: run_id.clone(),
-            mode: WorkflowMode::Issues,
+            mode: WorkflowMode::PlanFirstIssues,
             item_label: Some(format!("plan {}", issue.display_id)),
         });
 
@@ -969,7 +981,32 @@ impl WorkflowExecutor {
             }
 
             // Run the agent to generate the plan file.
-            self.run_stage(&AgentLoopStage, &mut ctx).await?;
+            // Emit "plan-generation" stage events (not "agent-loop") so the
+            // sidebar shows the correct plan-first stage name.
+            self.opts.tui_tx.send(TuiEvent::StageStarted {
+                workflow_name: self.config.name.clone(),
+                run_id: run_id.clone(),
+                stage_name: "plan-generation".to_string(),
+            });
+            let agent_result = AgentLoopStage.run(&mut ctx).await;
+            match &agent_result {
+                Ok(()) => {
+                    self.opts.tui_tx.send(TuiEvent::StageCompleted {
+                        workflow_name: self.config.name.clone(),
+                        run_id: run_id.clone(),
+                        stage_name: "plan-generation".to_string(),
+                    });
+                }
+                Err(e) => {
+                    self.opts.tui_tx.send(TuiEvent::StageFailed {
+                        workflow_name: self.config.name.clone(),
+                        run_id: run_id.clone(),
+                        stage_name: "plan-generation".to_string(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+            agent_result?;
 
             // Verify the plan file was created.
             let plan_path = ctx
@@ -996,8 +1033,9 @@ impl WorkflowExecutor {
             );
             ctx.pr_generated_body = Some(plan_body);
 
-            // Push and create the PR.
-            self.run_stage(&PullRequestStage, &mut ctx).await?;
+            // Push and create the PR (no stage event — this is part of
+            // plan-generation, not a separate sidebar stage).
+            PullRequestStage.run(&mut ctx).await?;
 
             Ok::<_, anyhow::Error>(())
         }
@@ -1263,6 +1301,13 @@ impl WorkflowExecutor {
             .update_state(&self.config.name, issue_number, plan_state::PLAN_APPROVED)
             .await?;
 
+        // Mark the "plan-approval" stage as done in the sidebar.
+        self.opts.tui_tx.send(TuiEvent::StageCompleted {
+            workflow_name: self.config.name.clone(),
+            run_id: format!("plan-poll-{}", issue_number),
+            stage_name: "plan-approval".to_string(),
+        });
+
         logger.info(&format!(
             "Issue #{}: plan approved — ready for execution",
             issue_number
@@ -1300,7 +1345,7 @@ impl WorkflowExecutor {
         self.opts.tui_tx.send(TuiEvent::RunStarted {
             workflow_name: self.config.name.clone(),
             run_id: run_id.clone(),
-            mode: WorkflowMode::Issues,
+            mode: WorkflowMode::PlanFirstIssues,
             item_label: Some(format!("exec #{}", issue_number)),
         });
 
@@ -1362,6 +1407,13 @@ impl WorkflowExecutor {
 
             // Run the internal review loop.
             self.run_stage(&ReviewFeedbackLoopStage, &mut ctx).await?;
+
+            // ── PR update stage ──────────────────────────────────────────
+            self.opts.tui_tx.send(TuiEvent::StageStarted {
+                workflow_name: self.config.name.clone(),
+                run_id: run_id.clone(),
+                stage_name: "pr-update".to_string(),
+            });
 
             // Post the plan content as a timeline comment.
             let plan_comment = format!(
@@ -1435,6 +1487,12 @@ impl WorkflowExecutor {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 logger.error(&format!("Failed to update PR: {}", stderr));
             }
+
+            self.opts.tui_tx.send(TuiEvent::StageCompleted {
+                workflow_name: self.config.name.clone(),
+                run_id: run_id.clone(),
+                stage_name: "pr-update".to_string(),
+            });
 
             if let Some(ref log) = wf_log {
                 let _ = log.complete("success").await;

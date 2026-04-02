@@ -608,6 +608,16 @@ impl App {
                     } else {
                         match wf_mode {
                             Some(WorkflowMode::PrReview) => ItemStatus::ReviewedApproved,
+                            Some(WorkflowMode::PlanFirstIssues) => {
+                                // Plan generation completes with PlanPending;
+                                // plan execution completes with Success.
+                                // The label is "plan #N" for generation, "exec #N" for execution.
+                                if label.starts_with("plan ") {
+                                    ItemStatus::PlanPending
+                                } else {
+                                    ItemStatus::Success
+                                }
+                            }
                             _ => ItemStatus::Success,
                         }
                     };
@@ -1882,7 +1892,7 @@ async fn load_initial_items(
         let mut items: Vec<ItemSummary> = Vec::new();
 
         match wf_mode {
-            WorkflowMode::Issues => {
+            WorkflowMode::Issues | WorkflowMode::PlanFirstIssues => {
                 if let Ok(records) = issue_store.get_all_records(wf_name).await {
                     for (num_str, rec) in &records {
                         let item_key = num_str.clone();
@@ -1893,7 +1903,13 @@ async fn load_initial_items(
                         let status = if in_cooldown {
                             ItemStatus::Cooldown
                         } else {
-                            ItemStatus::Success
+                            use crate::workflows::stores::plan_state;
+                            match rec.state.as_deref() {
+                                Some(plan_state::PLAN_POSTED) => ItemStatus::PlanPending,
+                                Some(plan_state::PLAN_APPROVED) => ItemStatus::InProgress,
+                                Some(plan_state::CODE_COMPLETE) => ItemStatus::Success,
+                                _ => ItemStatus::Success,
+                            }
                         };
                         items.push(ItemSummary {
                             id: format!("#{}", num_str),
@@ -2081,10 +2097,21 @@ async fn refresh_info_from_remote(
                     .is_in_cooldown(wf_name, &item.number.to_string())
                     .await
                     .unwrap_or(false);
-                let status = if is_handled {
-                    ItemStatus::Success
-                } else if in_cooldown {
+                let status = if in_cooldown {
                     ItemStatus::Cooldown
+                } else if is_handled {
+                    use crate::workflows::stores::plan_state;
+                    let record = issue_store
+                        .get_record(wf_name, item.number)
+                        .await
+                        .ok()
+                        .flatten();
+                    match record.as_ref().and_then(|r| r.state.as_deref()) {
+                        Some(plan_state::PLAN_POSTED) => ItemStatus::PlanPending,
+                        Some(plan_state::PLAN_APPROVED) => ItemStatus::InProgress,
+                        Some(plan_state::CODE_COMPLETE) => ItemStatus::Success,
+                        _ => ItemStatus::Success,
+                    }
                 } else {
                     ItemStatus::None
                 };
@@ -2223,6 +2250,13 @@ fn stages_for_mode(mode: WorkflowMode) -> Vec<String> {
             "review-feedback-loop".into(),
             "pr-description".into(),
             "pull-request".into(),
+        ],
+        WorkflowMode::PlanFirstIssues => vec![
+            "plan-generation".into(),
+            "plan-approval".into(),
+            "agent-loop".into(),
+            "review-feedback-loop".into(),
+            "pr-update".into(),
         ],
         WorkflowMode::PrReview => vec![
             "pr-checkout".into(),
@@ -3024,6 +3058,7 @@ mod tests {
     #[test]
     fn test_stages_for_mode() {
         assert_eq!(stages_for_mode(WorkflowMode::Issues).len(), 4);
+        assert_eq!(stages_for_mode(WorkflowMode::PlanFirstIssues).len(), 5);
         assert_eq!(stages_for_mode(WorkflowMode::PrReview).len(), 3);
         assert_eq!(stages_for_mode(WorkflowMode::PrResponse).len(), 4);
         assert_eq!(stages_for_mode(WorkflowMode::Standard).len(), 4);
@@ -3036,6 +3071,16 @@ mod tests {
         assert_eq!(stages[1], "review-feedback-loop");
         assert_eq!(stages[2], "pr-description");
         assert_eq!(stages[3], "pull-request");
+    }
+
+    #[test]
+    fn test_stages_for_plan_first_issues_are_correct() {
+        let stages = stages_for_mode(WorkflowMode::PlanFirstIssues);
+        assert_eq!(stages[0], "plan-generation");
+        assert_eq!(stages[1], "plan-approval");
+        assert_eq!(stages[2], "agent-loop");
+        assert_eq!(stages[3], "review-feedback-loop");
+        assert_eq!(stages[4], "pr-update");
     }
 
     #[test]
