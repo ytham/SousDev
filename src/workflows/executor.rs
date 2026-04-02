@@ -1715,31 +1715,6 @@ impl WorkflowExecutor {
                 None => {
                     to_review.push(pr);
                 }
-                Some(ref rec) if rec.head_sha != pr.head_ref_oid => {
-                    // SHA changed — but this could be a rebase (same code, new SHA).
-                    // Check if the additions/deletions count changed to distinguish
-                    // real code changes from rebases.
-                    if pr.additions != rec.additions || pr.deletions != rec.deletions {
-                        logger.info(&format!(
-                            "PR #{} has new code changes (additions/deletions changed) — re-reviewing",
-                            pr.number
-                        ));
-                        to_review.push(pr);
-                    } else {
-                        // Same diff size, different SHA — likely a rebase. Skip.
-                        logger.info(&format!(
-                            "PR #{} was rebased (SHA changed but diff unchanged) — skipping",
-                            pr.number
-                        ));
-                        // Update the stored SHA so we don't re-check on every tick.
-                        let mut updated_rec = rec.clone();
-                        updated_rec.head_sha = pr.head_ref_oid.clone();
-                        let _ = self
-                            .pr_review_store
-                            .mark_reviewed(&self.config.name, updated_rec)
-                            .await;
-                    }
-                }
                 Some(ref rec) => {
                     let new_comments =
                         match fetch_pr_comments(&pr.repo, pr.number, Some(rec.last_comment_id)).await {
