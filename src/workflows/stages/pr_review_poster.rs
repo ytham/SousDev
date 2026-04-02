@@ -152,7 +152,9 @@ impl Stage for PrReviewPosterStage {
                 None
             } else {
                 let text = clean_lines.join("\n");
-                Some(crate::utils::truncate::safe_truncate(&text, 4000))
+                // GitHub comment limit is 65,536 chars.  Use 60,000 to leave
+                // room for the header and inline sections appended later.
+                Some(crate::utils::truncate::safe_truncate(&text, 60000))
             }
         });
 
