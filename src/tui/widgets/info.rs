@@ -30,6 +30,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let items = app.selected_items();
     let selected = app.info_selected;
 
+    // Workflow name header.
+    let wf_name = app.selected_workflow_name().unwrap_or("—");
+    let max_name = (INFO_WIDTH as usize).saturating_sub(3);
+    let name_display = if wf_name.len() > max_name {
+        crate::utils::truncate::safe_truncate(wf_name, max_name)
+    } else {
+        wf_name.to_string()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(border_char, border_style),
+        Span::styled(
+            name_display,
+            bg.fg(Color::White)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        ),
+    ]));
+
     // "All logs" row.
     let all_active = app.log_filter.is_none();
     let all_selected = selected == 0;
@@ -55,7 +72,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     ]));
 
     // Items.
-    let visible_height = area.height.saturating_sub(6) as usize; // -1 for All logs, -5 for footer
+    let visible_height = area.height.saturating_sub(7) as usize; // -1 header, -1 All logs, -5 footer
     if items.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(border_char, border_style),
