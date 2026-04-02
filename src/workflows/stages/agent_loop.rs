@@ -74,11 +74,23 @@ impl Stage for AgentLoopStage {
             ctx.logger
                 .info(&format!("Attempt {} / {}", attempt + 1, max_retries + 1));
 
+            // Merge per-run extra_agent_flags (e.g. --disallowedTools for PR
+            // reviewer) with config-level extra_flags.
+            let merged_flags = match (&ext_cfg.extra_flags, &ctx.extra_agent_flags) {
+                (Some(cfg), Some(ctx_flags)) => {
+                    let mut f = cfg.clone();
+                    f.extend(ctx_flags.clone());
+                    Some(f)
+                }
+                (Some(cfg), None) => Some(cfg.clone()),
+                (None, Some(ctx_flags)) => Some(ctx_flags.clone()),
+                (None, None) => None,
+            };
             let opts = ExternalAgentRunOptions {
                 cwd: Some(ctx.workspace_dir.to_string_lossy().to_string()),
                 timeout_secs: ext_cfg.timeout_secs,
                 model: ext_cfg.model.clone(),
-                extra_flags: ext_cfg.extra_flags.clone(),
+                extra_flags: merged_flags,
             };
 
             let sys_prompt = ctx.system_prompt.as_deref();

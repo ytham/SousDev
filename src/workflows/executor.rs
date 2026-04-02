@@ -496,6 +496,7 @@ impl WorkflowExecutor {
             pr_url: None,
             pr_title: None,
             pr_generated_body: None,
+            extra_agent_flags: None,
             reviewing_pr: None,
             pr_review_result: None,
             responding_pr: None,
@@ -1921,22 +1922,20 @@ impl WorkflowExecutor {
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
         ctx.reviewing_pr = Some(pr.clone());
 
-        // Append PR-review-specific blocked commands to the system prompt.
-        // The Claude CLI agent may attempt to run `gh pr review --approve`
-        // or `gh pr comment` directly despite prompt-level prohibitions.
-        // Reinforcing in the system prompt increases compliance.
-        if let Some(ref mut sp) = ctx.system_prompt {
-            sp.push_str(concat!(
-                "\n\nBLOCKED COMMANDS FOR THIS REVIEW SESSION:\n",
-                "- `gh pr review` — do NOT submit formal reviews or approvals\n",
-                "- `gh pr comment` — do NOT post comments to the PR\n",
-                "- `gh pr approve` — do NOT approve the PR\n",
-                "- `gh pr merge` — do NOT merge the PR\n",
-                "- `gh api --method POST` — do NOT make write API calls\n",
-                "- `gh api --method PUT` — do NOT make write API calls\n",
-                "Your output will be posted by the harness. Just write the review text.\n",
-            ));
-        }
+        // Block the agent from posting reviews, comments, or approvals
+        // directly.  --disallowedTools removes these tool patterns from the
+        // model's context entirely — the agent cannot even attempt them.
+        ctx.extra_agent_flags = Some(vec![
+            "--disallowedTools".to_string(),
+            "Bash(gh pr review*)".to_string(),
+            "Bash(gh pr comment*)".to_string(),
+            "Bash(gh pr approve*)".to_string(),
+            "Bash(gh pr merge*)".to_string(),
+            "Bash(gh api --method POST*)".to_string(),
+            "Bash(gh api --method PUT*)".to_string(),
+            "Bash(gh api -X POST*)".to_string(),
+            "Bash(gh api -X PUT*)".to_string(),
+        ]);
 
         self.opts.tui_tx.send(TuiEvent::RunStarted {
             workflow_name: self.config.name.clone(),

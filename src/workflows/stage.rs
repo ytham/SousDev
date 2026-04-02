@@ -101,6 +101,11 @@ pub struct StageContext {
     /// LLM-generated or configured PR body.
     pub pr_generated_body: Option<String>,
 
+    // ── Per-run agent CLI overrides ─────────────────────────────────────────
+    /// Additional CLI flags for the external agent (e.g. `--disallowedTools`).
+    /// Merged into `ExternalAgentRunOptions.extra_flags` by the agent loop.
+    pub extra_agent_flags: Option<Vec<String>>,
+
     // ── PR review mode (githubPRs workflow) ───────────────────────────────────
     /// The pull request being reviewed in the current run.
     pub reviewing_pr: Option<GitHubPR>,

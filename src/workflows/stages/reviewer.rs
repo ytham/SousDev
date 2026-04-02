@@ -70,8 +70,21 @@ async fn run_claude_review(ctx: &mut StageContext) -> Result<()> {
     vars.insert("round_note".to_string(), String::new());
     let review_prompt = loader.load(&ctx.prompts.code_review, &vars).await?;
 
+    // Block the reviewer agent from posting reviews or comments directly.
+    let disallowed = vec![
+        "--disallowedTools".to_string(),
+        "Bash(gh pr review*)".to_string(),
+        "Bash(gh pr comment*)".to_string(),
+        "Bash(gh pr approve*)".to_string(),
+        "Bash(gh pr merge*)".to_string(),
+        "Bash(gh api --method POST*)".to_string(),
+        "Bash(gh api --method PUT*)".to_string(),
+        "Bash(gh api -X POST*)".to_string(),
+        "Bash(gh api -X PUT*)".to_string(),
+    ];
     let opts = ExternalAgentRunOptions {
         cwd: Some(ctx.workspace_dir.to_string_lossy().to_string()),
+        extra_flags: Some(disallowed),
         ..Default::default()
     };
     let adapter = claude_adapter(ExternalAgentRunOptions::default());

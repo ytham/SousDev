@@ -100,6 +100,7 @@ mod tests {
             pr_url: None,
             pr_title: None,
             pr_generated_body: None,
+            extra_agent_flags: None,
             reviewing_pr: None,
             pr_review_result: None,
             responding_pr: None,
