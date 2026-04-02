@@ -9,8 +9,9 @@ use crate::workflows::github_issues::{fetch_github_issues, repo_to_gh_identifier
 use crate::workflows::linear_issues::{fetch_linear_issues, FetchLinearIssuesOptions};
 use crate::workflows::github_prs::{
     detect_github_login, fetch_github_prs, fetch_inline_review_comments, fetch_pr_comments,
-    FetchPRsOptions, GitHubPR, InlineReviewComment, PRComment,
+    fetch_review_inline_comments, FetchPRsOptions, GitHubPR, InlineReviewComment, PRComment,
 };
+use crate::workflows::stores::plan_state;
 use crate::workflows::workflow::{make_skipped_result, ParsedTask};
 
 /// Truncate a string for info panel display.
@@ -610,10 +611,22 @@ impl WorkflowExecutor {
                     .is_in_cooldown(&self.config.name, &item_key)
                     .await
                     .unwrap_or(false);
-                let status = if is_handled {
-                    ItemStatus::Success
-                } else if in_cooldown {
+                let status = if in_cooldown {
                     ItemStatus::Cooldown
+                } else if is_handled {
+                    // Check plan-first state for richer status display.
+                    let record = self
+                        .issue_store
+                        .get_record(&self.config.name, item.number)
+                        .await
+                        .ok()
+                        .flatten();
+                    match record.as_ref().and_then(|r| r.state.as_deref()) {
+                        Some(plan_state::PLAN_POSTED) => ItemStatus::PlanPending,
+                        Some(plan_state::PLAN_APPROVED) => ItemStatus::InProgress,
+                        Some(plan_state::CODE_COMPLETE) => ItemStatus::Success,
+                        _ => ItemStatus::Success, // Legacy (no state) = completed
+                    }
                 } else {
                     ItemStatus::None
                 };
@@ -643,9 +656,21 @@ impl WorkflowExecutor {
             unhandled.len()
         ));
 
+        let plan_first = self
+            .config
+            .github_issues
+            .as_ref()
+            .and_then(|c| c.plan_first)
+            .unwrap_or(true);
+
         let mut last_result: Option<WorkflowResult> = None;
         for item in &unhandled {
-            let result = match self.run_single_issue(item).await {
+            let result = if plan_first {
+                self.run_plan_generation(item).await
+            } else {
+                self.run_single_issue(item).await
+            };
+            let result = match result {
                 Ok(r) => r,
                 Err(e) => {
                     let completed_at = Utc::now().to_rfc3339();
@@ -689,6 +714,8 @@ impl WorkflowExecutor {
                                 pr_open: true,
                                 handled_at: Utc::now().to_rfc3339(),
                                 updated_at: Utc::now().to_rfc3339(),
+                                state: None,
+                                branch: None,
                             },
                         )
                         .await?;
@@ -706,6 +733,40 @@ impl WorkflowExecutor {
             }
 
             last_result = Some(result);
+        }
+
+        // Phase 2: Poll plan PRs for approval (plan_first only).
+        if plan_first {
+            let plan_posted = self
+                .issue_store
+                .get_issues_in_state(&self.config.name, plan_state::PLAN_POSTED)
+                .await
+                .unwrap_or_default();
+            for (number, record) in plan_posted {
+                if let Err(e) = self.poll_plan_approval(number, &record).await {
+                    logger.error(&format!(
+                        "Plan poll for issue #{} failed: {}",
+                        number, e
+                    ));
+                }
+            }
+        }
+
+        // Phase 3: Execute approved plans (plan_first only).
+        if plan_first {
+            let plan_approved = self
+                .issue_store
+                .get_issues_in_state(&self.config.name, plan_state::PLAN_APPROVED)
+                .await
+                .unwrap_or_default();
+            for (number, record) in plan_approved {
+                if let Err(e) = self.run_plan_execution(number, &record).await {
+                    logger.error(&format!(
+                        "Plan execution for issue #{} failed: {}",
+                        number, e
+                    ));
+                }
+            }
         }
 
         Ok(last_result.unwrap_or_else(|| {
@@ -823,6 +884,617 @@ impl WorkflowExecutor {
                 })
             }
         }
+    }
+
+    // ── Plan-first helpers ─────────────────────────────────────────────────────
+
+    /// Load a prompt template from `prompts/{name}.md` and replace
+    /// `{{key}}` placeholders with the provided values.
+    fn load_and_render_prompt(&self, name: &str, vars: &[(&str, &str)]) -> String {
+        let prompts_dir = self
+            .opts
+            .harness_root
+            .as_ref()
+            .map(|r| r.join("prompts"))
+            .unwrap_or_else(|| PathBuf::from("prompts"));
+        let path = prompts_dir.join(format!("{}.md", name));
+        let template = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| format!("(prompt template '{}' not found)", name));
+        let mut result = template;
+        for (key, value) in vars {
+            result = result.replace(&format!("{{{{{}}}}}", key), value);
+        }
+        result
+    }
+
+    /// Plan-first mode: generate a plan file and open a plan PR.
+    ///
+    /// The agent reads the codebase and creates `tmp/plan-issue-{N}.md`,
+    /// then we open a PR with the title `Plan(issue #{N}): {title}`.
+    /// The issue is marked as `plan_posted` in the store.
+    async fn run_plan_generation(&self, issue: &IssueItem) -> Result<WorkflowResult> {
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(format!("{} {}", self.config.name, issue.display_id));
+
+        // Build the plan-generation prompt from the template.
+        let plan_prompt = self.load_and_render_prompt(
+            "plan-generation",
+            &[
+                ("issue_number", &issue.number.to_string()),
+                ("issue_title", &issue.title),
+                ("issue_body", &issue.body),
+            ],
+        );
+
+        let parsed_task = ParsedTask::new(plan_prompt);
+
+        let log_label = format!("plan-issue-{}", issue.number);
+        let wf_log = WorkflowLog::with_tui_sender_and_label(
+            &self
+                .opts
+                .harness_root
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".")),
+            &self.config.name,
+            &run_id,
+            Some(&log_label),
+            self.opts.tui_tx.clone(),
+        )
+        .await
+        .ok();
+        let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+        ctx.issue_url = Some(issue.url.clone());
+        ctx.issue_display_id = Some(issue.display_id.clone());
+
+        self.opts.tui_tx.send(TuiEvent::RunStarted {
+            workflow_name: self.config.name.clone(),
+            run_id: run_id.clone(),
+            mode: WorkflowMode::Issues,
+            item_label: Some(format!("plan {}", issue.display_id)),
+        });
+
+        let result = async {
+            // Set up workspace (clone + branch).
+            if !self.opts.no_workspace {
+                let ws = WorkspaceManager::new(
+                    self.config.workspace.clone().unwrap_or_default(),
+                    logger.clone(),
+                    self.opts.target_repo.clone(),
+                    self.opts.git_method.as_deref().unwrap_or("https"),
+                );
+                let info = ws.setup(&run_id, Some(issue.number)).await?;
+                ctx.workspace_dir = info.dir.clone();
+                ctx.branch = info.branch.clone();
+            }
+
+            // Run the agent to generate the plan file.
+            self.run_stage(&AgentLoopStage, &mut ctx).await?;
+
+            // Verify the plan file was created.
+            let plan_path = ctx
+                .workspace_dir
+                .join(format!("tmp/plan-issue-{}.md", issue.number));
+            if !plan_path.exists() {
+                return Err(anyhow::anyhow!(
+                    "Agent did not create plan file at {}",
+                    plan_path.display()
+                ));
+            }
+
+            // Set PR title and body for the plan PR.
+            let plan_title = format!("Plan(issue #{}): {}", issue.number, issue.title);
+            ctx.pr_title = Some(plan_title);
+
+            // Render the plan PR body from the template.
+            let plan_body = self.load_and_render_prompt(
+                "plan-pr-body",
+                &[
+                    ("issue_url", &issue.url),
+                    ("issue_number", &issue.number.to_string()),
+                ],
+            );
+            ctx.pr_generated_body = Some(plan_body);
+
+            // Push and create the PR.
+            self.run_stage(&PullRequestStage, &mut ctx).await?;
+
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        let completed_at = Utc::now().to_rfc3339();
+
+        match result {
+            Ok(_) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.complete("success").await;
+                }
+
+                // Extract PR number from URL if possible.
+                let pr_number = ctx.pr_url.as_ref().and_then(|url| {
+                    url.split('/').next_back().and_then(|s| s.parse::<u64>().ok())
+                });
+
+                // Mark issue as plan_posted.
+                if ctx.pr_url.is_some() {
+                    self.issue_store
+                        .mark_handled_with_number(
+                            &self.config.name,
+                            issue.number,
+                            HandledIssueRecord {
+                                pr_number,
+                                issue_url: issue.url.clone(),
+                                issue_title: issue.title.clone(),
+                                issue_repo: issue.repo.clone(),
+                                pr_url: ctx.pr_url.clone(),
+                                pr_open: true,
+                                handled_at: Utc::now().to_rfc3339(),
+                                updated_at: Utc::now().to_rfc3339(),
+                                state: Some(plan_state::PLAN_POSTED.to_string()),
+                                branch: Some(ctx.branch.clone()),
+                            },
+                        )
+                        .await?;
+                }
+
+                self.opts.tui_tx.send(TuiEvent::RunCompleted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    success: true,
+                    skipped: false,
+                    error: None,
+                    pr_url: ctx.pr_url.clone(),
+                });
+
+                Ok(WorkflowResult {
+                    workflow_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: true,
+                    skipped: false,
+                    pr_url: ctx.pr_url,
+                    pr_title: ctx.pr_title,
+                    issue_number: Some(issue.number),
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.complete("error").await;
+                }
+                let error = e.to_string();
+                logger.error(&format!("Plan generation failed: {}", error));
+
+                self.opts.tui_tx.send(TuiEvent::RunCompleted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    success: false,
+                    skipped: false,
+                    error: Some(error.clone()),
+                    pr_url: None,
+                });
+
+                Ok(WorkflowResult {
+                    workflow_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: false,
+                    skipped: false,
+                    pr_url: None,
+                    pr_title: None,
+                    issue_number: Some(issue.number),
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    error: Some(error),
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    /// Poll a plan PR for human approval.
+    ///
+    /// Checks both PR review bodies and timeline comments for "approved"
+    /// (case-insensitive).  When approval is found, incorporates any inline
+    /// review comments and addendum text, then transitions the issue to
+    /// `plan_approved`.
+    async fn poll_plan_approval(
+        &self,
+        issue_number: u64,
+        record: &HandledIssueRecord,
+    ) -> Result<()> {
+        let logger = Logger::new(format!("{} #{}", self.config.name, issue_number));
+        let pr_number = record.pr_number.ok_or_else(|| {
+            anyhow::anyhow!("No PR number for plan-posted issue #{}", issue_number)
+        })?;
+        let repo = &record.issue_repo;
+
+        // Check if the PR is still open.
+        let pr_state =
+            crate::workflows::github_prs::fetch_pr_state(repo, pr_number).await;
+        if let Ok(state) = &pr_state {
+            if state != "open" && state != "OPEN" {
+                logger.info(&format!(
+                    "Plan PR #{} is {} — treating as rejected",
+                    pr_number, state
+                ));
+                return Ok(());
+            }
+        }
+
+        // Check PR review bodies for approval.
+        let reviews = crate::workflows::github_prs::fetch_pr_review_comments(
+            repo, pr_number, None,
+        )
+        .await
+        .unwrap_or_default();
+
+        let mut approval_review_id: Option<u64> = None;
+        let mut addendum: Option<String> = None;
+
+        for review in &reviews {
+            if let Some(parsed) = parse_approval(&review.body) {
+                approval_review_id = Some(review.id);
+                addendum = parsed.addendum;
+                logger.info(&format!(
+                    "Plan PR #{}: approval found in review by {}",
+                    pr_number, review.login
+                ));
+                break;
+            }
+        }
+
+        // Fallback: check timeline comments.
+        if approval_review_id.is_none() {
+            let timeline = crate::workflows::github_prs::fetch_pr_comments(
+                repo, pr_number, None,
+            )
+            .await
+            .unwrap_or_default();
+
+            for comment in &timeline {
+                if is_bot(&comment.login) {
+                    continue;
+                }
+                if let Some(parsed) = parse_approval(&comment.body) {
+                    addendum = parsed.addendum;
+                    logger.info(&format!(
+                        "Plan PR #{}: approval found in timeline comment by {}",
+                        pr_number, comment.login
+                    ));
+                    // Sentinel: approved but no review ID.
+                    approval_review_id = Some(0);
+                    break;
+                }
+            }
+        }
+
+        if approval_review_id.is_none() {
+            return Ok(()); // Not yet approved — check next tick.
+        }
+
+        // Fetch inline review comments from the approval review.
+        let inline_comments = if let Some(review_id) = approval_review_id {
+            if review_id > 0 {
+                fetch_review_inline_comments(repo, pr_number, review_id)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                // Timeline-based approval — fetch ALL inline comments.
+                fetch_inline_review_comments(repo, pr_number, None)
+                    .await
+                    .unwrap_or_default()
+            }
+        } else {
+            vec![]
+        };
+
+        // If there are inline comments or an addendum, update the plan file.
+        if !inline_comments.is_empty() || addendum.is_some() {
+            let branch = record.branch.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("No branch for plan-posted issue #{}", issue_number)
+            })?;
+
+            // Set up workspace (re-checkout the existing branch).
+            let ws = WorkspaceManager::new(
+                self.config.workspace.clone().unwrap_or_default(),
+                logger.clone(),
+                self.opts.target_repo.clone(),
+                self.opts.git_method.as_deref().unwrap_or("https"),
+            );
+            let info = ws.setup_existing(branch, Some(issue_number)).await?;
+            let dir = &info.dir;
+
+            let plan_path = dir.join(format!("tmp/plan-issue-{}.md", issue_number));
+            if plan_path.exists() {
+                let mut plan_content = tokio::fs::read_to_string(&plan_path).await?;
+
+                // Append inline review comments as a new section.
+                if !inline_comments.is_empty() {
+                    plan_content.push_str("\n\n## Reviewer feedback\n\n");
+                    for c in &inline_comments {
+                        let line = c.line.unwrap_or(0);
+                        plan_content.push_str(&format!(
+                            "- **{}:{}** ({}): {}\n",
+                            c.path, line, c.login, c.body
+                        ));
+                    }
+                }
+
+                // Append addendum from "approved; also do X".
+                if let Some(ref extra) = addendum {
+                    plan_content.push_str("\n\n## Additional instructions\n\n");
+                    plan_content.push_str(extra);
+                    plan_content.push('\n');
+                }
+
+                tokio::fs::write(&plan_path, &plan_content).await?;
+
+                // Commit and push the updated plan.
+                exec_git(&["add", "tmp/"], dir).await?;
+                let status = exec_git(&["status", "--porcelain"], dir).await?;
+                if !status.trim().is_empty() {
+                    exec_git(
+                        &[
+                            "commit",
+                            "-m",
+                            &format!(
+                                "plan: incorporate review feedback for issue #{}",
+                                issue_number
+                            ),
+                        ],
+                        dir,
+                    )
+                    .await?;
+                    exec_git(&["push", "origin", branch], dir).await?;
+                }
+            }
+        }
+
+        // Transition to plan_approved.
+        self.issue_store
+            .update_state(&self.config.name, issue_number, plan_state::PLAN_APPROVED)
+            .await?;
+
+        logger.info(&format!(
+            "Issue #{}: plan approved — ready for execution",
+            issue_number
+        ));
+
+        Ok(())
+    }
+
+    /// Plan-first mode: execute the approved plan and finalize the PR.
+    ///
+    /// Reads the plan file, runs the agent with the plan-execution prompt,
+    /// runs the internal review loop, posts the plan as a timeline comment,
+    /// deletes the plan file, updates the PR title/body, and transitions
+    /// to `code_complete`.
+    async fn run_plan_execution(
+        &self,
+        issue_number: u64,
+        record: &HandledIssueRecord,
+    ) -> Result<()> {
+        let run_id = Uuid::new_v4().to_string();
+        let logger = Logger::new(format!("{} #{}", self.config.name, issue_number));
+        let branch = record.branch.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("No branch for plan-approved issue #{}", issue_number)
+        })?;
+        let pr_number = record.pr_number.ok_or_else(|| {
+            anyhow::anyhow!("No PR number for plan-approved issue #{}", issue_number)
+        })?;
+        let repo = &record.issue_repo;
+
+        logger.info(&format!(
+            "Executing approved plan for issue #{} on branch {}",
+            issue_number, branch
+        ));
+
+        self.opts.tui_tx.send(TuiEvent::RunStarted {
+            workflow_name: self.config.name.clone(),
+            run_id: run_id.clone(),
+            mode: WorkflowMode::Issues,
+            item_label: Some(format!("exec #{}", issue_number)),
+        });
+
+        let result = async {
+            // Set up workspace (re-checkout the existing branch).
+            let ws = WorkspaceManager::new(
+                self.config.workspace.clone().unwrap_or_default(),
+                logger.clone(),
+                self.opts.target_repo.clone(),
+                self.opts.git_method.as_deref().unwrap_or("https"),
+            );
+            let info = ws.setup_existing(branch, Some(issue_number)).await?;
+
+            // Read the approved plan.
+            let plan_path = info
+                .dir
+                .join(format!("tmp/plan-issue-{}.md", issue_number));
+            let plan_content = tokio::fs::read_to_string(&plan_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to read plan file: {}", e))?;
+
+            // Build the execution prompt.
+            let test_command = "cargo test";
+            let exec_prompt = self.load_and_render_prompt(
+                "plan-execution",
+                &[
+                    ("issue_number", &issue_number.to_string()),
+                    ("issue_title", &record.issue_title),
+                    ("issue_body", ""), // Not stored in record — plan has the context
+                    ("plan", &plan_content),
+                    ("test_command", test_command),
+                ],
+            );
+
+            let parsed_task = ParsedTask::new(exec_prompt);
+
+            let log_label = format!("exec-issue-{}", issue_number);
+            let wf_log = WorkflowLog::with_tui_sender_and_label(
+                &self
+                    .opts
+                    .harness_root
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(".")),
+                &self.config.name,
+                &run_id,
+                Some(&log_label),
+                self.opts.tui_tx.clone(),
+            )
+            .await
+            .ok();
+            let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+            ctx.workspace_dir = info.dir.clone();
+            ctx.branch = branch.to_string();
+            ctx.issue_url = Some(record.issue_url.clone());
+            ctx.issue_display_id = Some(format!("#{}", issue_number));
+
+            // Run the agent to execute the plan.
+            self.run_stage(&AgentLoopStage, &mut ctx).await?;
+
+            // Run the internal review loop.
+            self.run_stage(&ReviewFeedbackLoopStage, &mut ctx).await?;
+
+            // Post the plan content as a timeline comment.
+            let plan_comment = format!(
+                "## Implementation plan\n\n<details>\n<summary>Click to expand</summary>\n\n{}\n\n</details>",
+                plan_content
+            );
+            crate::workflows::github_prs::post_summary_comment(
+                repo, pr_number, &plan_comment,
+            )
+            .await?;
+
+            // Delete the plan file and commit.
+            if plan_path.exists() {
+                tokio::fs::remove_file(&plan_path).await?;
+                exec_git(&["add", "-A"], &info.dir).await?;
+                let status =
+                    exec_git(&["status", "--porcelain"], &info.dir).await?;
+                if !status.trim().is_empty() {
+                    exec_git(
+                        &[
+                            "commit",
+                            "-m",
+                            &format!(
+                                "chore: remove plan file for issue #{}",
+                                issue_number
+                            ),
+                        ],
+                        &info.dir,
+                    )
+                    .await?;
+                }
+            }
+
+            // Push all changes.
+            exec_git(&["push", "origin", branch], &info.dir).await?;
+
+            // Generate new PR title/body.
+            self.run_stage(&PrDescriptionStage, &mut ctx).await?;
+
+            // Update the existing PR title and body.
+            let new_title =
+                ctx.pr_title.as_deref().unwrap_or(&record.issue_title);
+            let mut edit_args = vec![
+                "pr".to_string(),
+                "edit".to_string(),
+                pr_number.to_string(),
+                "--title".to_string(),
+                new_title.to_string(),
+            ];
+            if let Some(ref body) = ctx.pr_generated_body {
+                let body_file = tempfile::NamedTempFile::new()?;
+                std::fs::write(body_file.path(), body)?;
+                edit_args.push("--body-file".to_string());
+                edit_args.push(body_file.path().to_string_lossy().to_string());
+            }
+            // Add --repo if configured.
+            if let Some(repo_id) =
+                crate::workflows::github_issues::repo_to_gh_identifier(
+                    self.opts.target_repo.as_deref(),
+                )
+            {
+                edit_args.push("--repo".to_string());
+                edit_args.push(repo_id);
+            }
+
+            let output = tokio::process::Command::new("gh")
+                .args(&edit_args)
+                .output()
+                .await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                logger.error(&format!("Failed to update PR: {}", stderr));
+            }
+
+            if let Some(ref log) = wf_log {
+                let _ = log.complete("success").await;
+            }
+
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        match result {
+            Ok(_) => {
+                // Transition to code_complete.
+                self.issue_store
+                    .update_state(
+                        &self.config.name,
+                        issue_number,
+                        plan_state::CODE_COMPLETE,
+                    )
+                    .await?;
+
+                logger.info(&format!(
+                    "Issue #{}: plan executed, PR updated — code complete",
+                    issue_number
+                ));
+
+                self.opts.tui_tx.send(TuiEvent::RunCompleted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    success: true,
+                    skipped: false,
+                    error: None,
+                    pr_url: None,
+                });
+            }
+            Err(e) => {
+                let error = e.to_string();
+                logger.error(&format!(
+                    "Plan execution for issue #{} failed: {}",
+                    issue_number, error
+                ));
+
+                // Record failure for cooldown.
+                let item_key = format!("plan-exec-{}", issue_number);
+                self.failure_store
+                    .record_failure(&self.config.name, &item_key)
+                    .await
+                    .ok();
+
+                self.opts.tui_tx.send(TuiEvent::RunCompleted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    success: false,
+                    skipped: false,
+                    error: Some(error),
+                    pr_url: None,
+                });
+            }
+        }
+
+        Ok(())
     }
 
     // ── GitHub PRs (review) mode ───────────────────────────────────────────────
@@ -1302,6 +1974,12 @@ impl WorkflowExecutor {
             }
         };
 
+        // Skip plan PRs — they haven't been converted to code PRs yet.
+        let prs: Vec<_> = prs
+            .into_iter()
+            .filter(|pr| !pr.title.starts_with("Plan("))
+            .collect();
+
         let reviewer_login = match self.get_reviewer_login().await {
             Ok(l) => l,
             Err(e) => {
@@ -1411,9 +2089,6 @@ impl WorkflowExecutor {
 
             // Filter out bot comments — they're automated and shouldn't
             // trigger the agent (CI status, deploy previews, etc.).
-            let is_bot = |login: &str| -> bool {
-                login.ends_with("[bot]") || login == "github-actions"
-            };
 
             // Inline review comments: include all humans (including yourself).
             // You may leave inline comments on your own PR to direct the agent
@@ -1778,6 +2453,72 @@ impl WorkflowExecutor {
 }
 
 // ---------------------------------------------------------------------------
+// Plan-first helpers
+// ---------------------------------------------------------------------------
+
+/// Parsed approval result.
+struct ParsedApproval {
+    /// Extra text after "approved" (e.g., "also do X"), or `None`.
+    addendum: Option<String>,
+}
+
+/// Parse a comment body to check if it contains an approval.
+///
+/// Returns `Some(ParsedApproval)` if the comment starts with "approved"
+/// (case-insensitive), optionally followed by addendum text.
+fn parse_approval(body: &str) -> Option<ParsedApproval> {
+    let trimmed = body.trim();
+    let lower = trimmed.to_lowercase();
+
+    if !lower.starts_with("approved") {
+        return None;
+    }
+
+    let rest = trimmed.get(8..)?.trim_start(); // skip "approved" (8 chars)
+    if rest.is_empty() {
+        return Some(ParsedApproval { addendum: None });
+    }
+
+    // Strip leading punctuation: ";", ",", ".", "!", "—", "-"
+    let rest = rest
+        .trim_start_matches(|c: char| {
+            c == ';' || c == ',' || c == '.' || c == '!' || c == '—' || c == '-'
+        })
+        .trim_start();
+
+    if rest.is_empty() {
+        return Some(ParsedApproval { addendum: None });
+    }
+
+    Some(ParsedApproval {
+        addendum: Some(rest.to_string()),
+    })
+}
+
+/// Check if a login belongs to a bot account.
+fn is_bot(login: &str) -> bool {
+    login.ends_with("[bot]") || login == "github-actions"
+}
+
+/// Run a `git` sub-command in `cwd` and return trimmed stdout.
+async fn exec_git(args: &[&str], cwd: &std::path::Path) -> anyhow::Result<String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "git {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -2081,5 +2822,87 @@ mod tests {
         assert_eq!(item.title, "Fix the bug");
         assert_eq!(item.body, "It's broken");
         assert_eq!(item.repo, "owner/repo");
+    }
+
+    // ── parse_approval tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_approval_exact() {
+        let result = parse_approval("approved");
+        assert!(result.is_some());
+        assert!(result.unwrap().addendum.is_none());
+    }
+
+    #[test]
+    fn test_parse_approval_case_insensitive() {
+        assert!(parse_approval("Approved").is_some());
+        assert!(parse_approval("APPROVED").is_some());
+        assert!(parse_approval("ApPrOvEd").is_some());
+    }
+
+    #[test]
+    fn test_parse_approval_with_whitespace() {
+        let result = parse_approval("  approved  ");
+        assert!(result.is_some());
+        assert!(result.unwrap().addendum.is_none());
+    }
+
+    #[test]
+    fn test_parse_approval_with_semicolon_addendum() {
+        let result = parse_approval("approved; also handle the empty case").unwrap();
+        assert_eq!(result.addendum.as_deref(), Some("also handle the empty case"));
+    }
+
+    #[test]
+    fn test_parse_approval_with_comma_addendum() {
+        let result = parse_approval("approved, but also fix the tests").unwrap();
+        assert_eq!(result.addendum.as_deref(), Some("but also fix the tests"));
+    }
+
+    #[test]
+    fn test_parse_approval_with_period_addendum() {
+        let result = parse_approval("Approved. Also make sure to handle edge case X").unwrap();
+        assert_eq!(
+            result.addendum.as_deref(),
+            Some("Also make sure to handle edge case X")
+        );
+    }
+
+    #[test]
+    fn test_parse_approval_just_punctuation() {
+        let result = parse_approval("approved!").unwrap();
+        assert!(result.addendum.is_none());
+    }
+
+    #[test]
+    fn test_parse_approval_not_approved() {
+        assert!(parse_approval("looks good").is_none());
+        assert!(parse_approval("not approved").is_none());
+        assert!(parse_approval("").is_none());
+        assert!(parse_approval("I think this is approved by someone").is_none());
+    }
+
+    #[test]
+    fn test_parse_approval_multiline() {
+        let body = "Approved; here are some extra notes\n\nAlso check the error handling";
+        let result = parse_approval(body).unwrap();
+        assert!(result.addendum.is_some());
+        assert!(result.addendum.unwrap().starts_with("here are some extra notes"));
+    }
+
+    // ── is_bot tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_bot_detects_bots() {
+        assert!(is_bot("dependabot[bot]"));
+        assert!(is_bot("renovate[bot]"));
+        assert!(is_bot("github-actions"));
+    }
+
+    #[test]
+    fn test_is_bot_allows_humans() {
+        assert!(!is_bot("ytham"));
+        assert!(!is_bot("graemecode"));
+        assert!(!is_bot("tayyabmh"));
     }
 }

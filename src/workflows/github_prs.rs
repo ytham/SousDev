@@ -482,6 +482,52 @@ pub async fn fetch_inline_review_comments(
     }
 }
 
+/// Fetch inline comments from a specific PR review.
+///
+/// This returns only the inline (diff-level) comments that were part of a
+/// particular submitted review, identified by `review_id`.  Useful for
+/// fetching all feedback from an approval review.
+///
+/// Uses `--paginate` to ensure all comments are returned.
+pub async fn fetch_review_inline_comments(
+    repo: &str,
+    pr_number: u64,
+    review_id: u64,
+) -> Result<Vec<InlineReviewComment>> {
+    let endpoint = format!(
+        "/repos/{}/pulls/{}/reviews/{}/comments?per_page=100",
+        repo, pr_number, review_id
+    );
+    let jq = "[.[] | {id: .id, login: .user.login, body: .body, path: .path, line: .line, diffHunk: .diff_hunk, createdAt: .created_at, inReplyToId: .in_reply_to_id}]";
+    let output = Command::new("gh")
+        .arg("api")
+        .arg("--paginate")
+        .arg(&endpoint)
+        .arg("--jq")
+        .arg(jq)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "gh api {} failed: {}",
+            endpoint.split('?').next().unwrap_or(&endpoint),
+            stderr
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() || stdout.trim() == "null" {
+        return Ok(vec![]);
+    }
+
+    let all: Vec<InlineReviewComment> = serde_json::from_str(&stdout)
+        .map_err(|e| anyhow::anyhow!("Failed to parse review inline comments: {}", e))?;
+
+    Ok(all)
+}
+
 /// Post an inline review comment on a specific diff line.
 pub async fn post_inline_comment(
     repo: &str,
@@ -544,6 +590,29 @@ pub async fn reply_to_inline_comment(repo: &str, comment_id: u64, body: &str) ->
         return Err(anyhow::anyhow!("Failed to reply to inline comment: {}", stderr));
     }
     Ok(())
+}
+
+/// Fetch the state of a PR (`"OPEN"`, `"CLOSED"`, or `"MERGED"`).
+pub async fn fetch_pr_state(repo: &str, pr_number: u64) -> Result<String> {
+    let output = Command::new("gh")
+        .arg("pr")
+        .arg("view")
+        .arg(pr_number.to_string())
+        .arg("--repo")
+        .arg(repo)
+        .arg("--json")
+        .arg("state")
+        .arg("--jq")
+        .arg(".state")
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("Failed to fetch PR state: {}", stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Detect the login of the currently authenticated GitHub user.

@@ -235,6 +235,7 @@ fn status_description(status: ItemStatus) -> &'static str {
         ItemStatus::ReviewedApproved => "Agent approved — needs your approval",
         ItemStatus::ReviewedConcerns => "Agent found concerns — needs your review",
         ItemStatus::Approved => "PR approved — ready to merge",
+        ItemStatus::PlanPending => "Plan posted — waiting for human review",
         ItemStatus::NewComments => "Has new reviewer comments",
         ItemStatus::NoNewComments => "No new comments",
     }
@@ -251,6 +252,7 @@ fn status_badge(status: ItemStatus) -> (String, Color) {
         ItemStatus::ReviewedApproved => ("[A✓]".into(), Color::Green),
         ItemStatus::ReviewedConcerns => ("[A✗]".into(), Color::Yellow),
         ItemStatus::Approved => ("[✓✓]".into(), Color::Green),
+        ItemStatus::PlanPending => ("[Pl]".into(), Color::Cyan),
         ItemStatus::NewComments => ("[**]".into(), Color::Cyan),
         ItemStatus::NoNewComments => ("[--]".into(), Color::DarkGray),
     }
@@ -269,6 +271,7 @@ mod tests {
         assert_eq!(status_badge(ItemStatus::ReviewedApproved).0, "[A✓]");
         assert_eq!(status_badge(ItemStatus::ReviewedConcerns).0, "[A✗]");
         assert_eq!(status_badge(ItemStatus::Approved).0, "[✓✓]");
+        assert_eq!(status_badge(ItemStatus::PlanPending).0, "[Pl]");
         assert_eq!(status_badge(ItemStatus::NewComments).0, "[**]");
     }
 }

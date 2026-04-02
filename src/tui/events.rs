@@ -122,6 +122,8 @@ pub enum ItemStatus {
     /// The PR has been approved on GitHub (reviewDecision == APPROVED)
     /// but is still open/unmerged.
     Approved,
+    /// Plan PR has been posted, waiting for human review/approval.
+    PlanPending,
     /// PR has new unaddressed reviewer comments (pr-responder specific).
     NewComments,
     /// PR has been checked and has no new comments (pr-responder specific).

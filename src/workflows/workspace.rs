@@ -299,6 +299,129 @@ impl WorkspaceManager {
         })
     }
 
+    /// Re-checkout an existing workspace branch (for plan-first resumption).
+    ///
+    /// Unlike [`setup()`], this does not create a new branch — it fetches the
+    /// latest changes and checks out the existing branch.  If the workspace
+    /// directory does not exist yet, the repo is cloned fresh and the branch
+    /// is checked out from the remote.
+    pub async fn setup_existing(
+        &self,
+        branch: &str,
+        issue_number: Option<u64>,
+    ) -> Result<WorkspaceInfo> {
+        let repo_url = self.resolve_repo_url().await?;
+        let repo_slug = repo_slug_from_url(&repo_url);
+        let base_branch = self.config.base_branch.as_deref().unwrap_or("main");
+        let workspaces_dir = self.workspaces_dir();
+
+        let dir_name = if let Some(n) = issue_number {
+            format!("{}-issue{}", repo_slug, n)
+        } else {
+            format!("{}-{}", repo_slug, &branch[..branch.len().min(12)])
+        };
+
+        let dir = workspaces_dir.join(&dir_name);
+        fs::create_dir_all(&dir).await?;
+
+        let git_dir = dir.join(".git");
+        if git_dir.exists() {
+            self.logger.info(&format!(
+                "Reusing existing workspace at {} — checking out {}",
+                dir.display(),
+                branch
+            ));
+
+            // Fix workspaces created with --single-branch.
+            let _ = self
+                .exec(
+                    &[
+                        "git",
+                        "config",
+                        "remote.origin.fetch",
+                        "+refs/heads/*:refs/remotes/origin/*",
+                    ],
+                    &dir,
+                )
+                .await;
+
+            // Fetch latest.
+            if let Err(e) = self
+                .exec(&["git", "fetch", "--depth=50", "origin"], &dir)
+                .await
+            {
+                self.logger.info(&format!(
+                    "fetch origin failed (continuing with cached state): {}",
+                    e
+                ));
+            }
+
+            // Checkout the branch.
+            let remote_ref = format!("origin/{}", branch);
+            if self.exec(&["git", "checkout", branch], &dir).await.is_err() {
+                // Branch doesn't exist locally — create from remote.
+                self.exec(&["git", "checkout", "-b", branch, &remote_ref], &dir)
+                    .await?;
+            } else {
+                // Pull latest changes via rebase (best-effort).
+                let _ = self
+                    .exec(&["git", "pull", "--rebase", "origin", branch], &dir)
+                    .await;
+            }
+        } else {
+            // No .git — check for stale non-git dir.
+            let mut read_dir = fs::read_dir(&dir).await?;
+            let is_empty = read_dir.next_entry().await?.is_none();
+            if !is_empty {
+                self.logger.info(
+                    "Workspace directory exists but has no .git — cleaning up before cloning",
+                );
+                fs::remove_dir_all(&dir).await?;
+                fs::create_dir_all(&dir).await?;
+            }
+
+            self.logger.info(&format!(
+                "Cloning {} → {}  (base: {})",
+                repo_url,
+                dir.display(),
+                base_branch
+            ));
+            self.exec(
+                &[
+                    "git",
+                    "clone",
+                    "--depth=50",
+                    "--filter=blob:none",
+                    "--branch",
+                    base_branch,
+                    &repo_url,
+                    ".",
+                ],
+                &dir,
+            )
+            .await?;
+
+            // Fetch and checkout the existing branch from the remote.
+            let _ = self
+                .exec(&["git", "fetch", "origin", branch], &dir)
+                .await;
+            let remote_ref = format!("origin/{}", branch);
+            self.exec(&["git", "checkout", "-b", branch, &remote_ref], &dir)
+                .await?;
+        }
+
+        self.logger.info(&format!(
+            "Workspace ready: {}  branch: {}",
+            dir.display(),
+            branch
+        ));
+        Ok(WorkspaceInfo {
+            dir,
+            branch: branch.to_string(),
+            repo_url,
+        })
+    }
+
     /// Remove the workspace directory from disk.
     pub async fn teardown(&self, info: &WorkspaceInfo) -> Result<()> {
         self.logger
