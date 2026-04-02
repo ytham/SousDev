@@ -156,6 +156,13 @@ impl Stage for PrReviewPosterStage {
                         && !t.starts_with("END_INLINE_COMMENT")
                 })
                 .collect();
+            // Strip agent meta-commentary about permissions or posting.
+            // The agent may prepend lines like "I don't have permission to
+            // submit reviews directly" when --disallowedTools blocks it.
+            // Find the first line that looks like actual review content
+            // (starts with #, *, -, **, or a review heading pattern) and
+            // drop everything before it.
+            let clean_lines = strip_agent_preamble(&clean_lines);
             if clean_lines.is_empty() {
                 None
             } else {
@@ -212,6 +219,34 @@ impl Stage for PrReviewPosterStage {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Strip agent meta-commentary preamble from the review output.
+///
+/// When `--disallowedTools` blocks `gh pr review`, the agent often prepends
+/// lines like "I don't have permission to submit reviews directly. Here's my
+/// review:" before the actual review content.  This function finds the first
+/// line that looks like real review content and drops everything before it.
+fn strip_agent_preamble<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    // Patterns that indicate the start of actual review content.
+    let is_review_content = |line: &str| -> bool {
+        let t = line.trim();
+        t.starts_with('#')          // Markdown heading
+            || t.starts_with("**")  // Bold text (common in structured reviews)
+            || t.starts_with("| ")  // Table row
+            || t.starts_with("- ")  // List item
+            || t.starts_with("* ")  // List item
+            || t.starts_with("1.")  // Numbered list
+            || t.starts_with("---") // Horizontal rule / separator
+            || t.starts_with("```") // Code block
+    };
+
+    if let Some(start) = lines.iter().position(|l| is_review_content(l)) {
+        lines[start..].to_vec()
+    } else {
+        // No clear review content found — return everything as-is.
+        lines.to_vec()
+    }
+}
 
 /// Check if the authenticated user posted a formal review (APPROVED or
 /// CHANGES_REQUESTED) on this PR within the last 15 minutes.  Returns the
@@ -462,5 +497,51 @@ END_INLINE_COMMENT";
         let text = "INLINE_COMMENT src/x.rs:1\n   \nEND_INLINE_COMMENT";
         let comments = parse_inline_comments(text);
         assert!(comments.is_empty());
+    }
+
+    // ── strip_agent_preamble tests ────────────────────────────────────────
+
+    #[test]
+    fn test_strip_preamble_with_permission_message() {
+        let lines = vec![
+            "It seems I don't have permission to submit comments/reviews to GitHub directly.",
+            "Here's my complete review of PR #12347:",
+            "---",
+            "## PR Review: refactor(rollout): simplify ExecuteDeps",
+            "**Verdict: LGTM** ✅",
+        ];
+        let result = strip_agent_preamble(&lines);
+        assert_eq!(result[0], "---");
+        assert_eq!(result[1], "## PR Review: refactor(rollout): simplify ExecuteDeps");
+    }
+
+    #[test]
+    fn test_strip_preamble_no_preamble() {
+        let lines = vec![
+            "## PR Review: clean code",
+            "**Summary**: Looks good.",
+            "- Minor style issue on line 42",
+        ];
+        let result = strip_agent_preamble(&lines);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "## PR Review: clean code");
+    }
+
+    #[test]
+    fn test_strip_preamble_all_plain_text() {
+        let lines = vec![
+            "This is a plain text review.",
+            "Everything looks good to me.",
+        ];
+        let result = strip_agent_preamble(&lines);
+        // No review-content markers found — return as-is.
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_strip_preamble_empty() {
+        let lines: Vec<&str> = vec![];
+        let result = strip_agent_preamble(&lines);
+        assert!(result.is_empty());
     }
 }
