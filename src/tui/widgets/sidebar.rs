@@ -27,10 +27,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Title line.
+    let title_color = if is_active { Color::White } else { Color::Gray };
     lines.push(Line::from(Span::styled(
         " Workflows",
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(title_color)
             .bg(BG_SIDEBAR)
             .add_modifier(Modifier::BOLD),
     )));

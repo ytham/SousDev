@@ -38,11 +38,12 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     } else {
         wf_name.to_string()
     };
+    let title_color = if is_active { Color::White } else { Color::Gray };
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
         Span::styled(
             name_display,
-            bg.fg(Color::White)
+            bg.fg(title_color)
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ]));
