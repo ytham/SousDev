@@ -78,10 +78,18 @@ impl RunStore {
         }
     }
 
-    /// Append a result to the store.
+    /// Maximum number of run records retained on disk.
+    const MAX_RUNS: usize = 500;
+
+    /// Append a result to the store, pruning old entries beyond [`MAX_RUNS`].
     pub async fn append(&self, result: &WorkflowResult) -> Result<()> {
         let mut all = self.read_all().await.unwrap_or_default();
         all.push(result.clone());
+        // Prune oldest entries when the store exceeds the limit.
+        if all.len() > Self::MAX_RUNS {
+            let drain_count = all.len() - Self::MAX_RUNS;
+            all.drain(..drain_count);
+        }
         if let Some(parent) = self.file_path.parent() {
             fs::create_dir_all(parent).await?;
         }

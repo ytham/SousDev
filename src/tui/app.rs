@@ -21,6 +21,10 @@ use tokio::sync::Mutex;
 
 use crate::workflows::cron_runner::{CronRunner, ScheduleUpdate, ScheduleUpdateSender};
 use crate::tui::events::{ItemStatus, ItemSummary, WorkflowMode, TuiEvent, TuiEventSender};
+
+/// Maximum log lines retained per workflow.  Oldest entries are evicted
+/// when the cap is exceeded.
+const MAX_LOG_LINES_PER_WORKFLOW: usize = 10_000;
 use crate::tui::session::{self, SessionConfig};
 use crate::tui::ui;
 use crate::types::config::HarnessConfig;
@@ -540,6 +544,11 @@ impl App {
 
                 let completed_run_id = if run_id.is_empty() { None } else { Some(run_id) };
 
+                // Clean up the run_id → item_label mapping to prevent unbounded growth.
+                if let Some(ref rid) = completed_run_id {
+                    self.run_id_to_item.remove(rid);
+                }
+
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     wf.status = if skipped {
                         WorkflowStatus::Skipped
@@ -656,8 +665,14 @@ impl App {
             }
         }
 
-        // Rebuild structured log entries if any workflow's logs changed.
+        // Trim and rebuild structured log entries if any workflow's logs changed.
         if let Some(name) = dirty_workflow {
+            if let Some(wf) = self.workflows.iter_mut().find(|w| w.name == name) {
+                if wf.logs.len() > MAX_LOG_LINES_PER_WORKFLOW {
+                    let drain_count = wf.logs.len() - MAX_LOG_LINES_PER_WORKFLOW;
+                    wf.logs.drain(..drain_count);
+                }
+            }
             self.rebuild_entries_for(&name);
         }
     }

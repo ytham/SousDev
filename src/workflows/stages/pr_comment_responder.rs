@@ -240,18 +240,26 @@ async fn update_pr_description(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).await?;
     }
 
-    let output = tokio::time::timeout(
+    let output = match tokio::time::timeout(
         std::time::Duration::from_secs(90),
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Claude CLI timed out generating PR description"))??;
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Claude CLI timed out generating PR description after 90s"
+            ));
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

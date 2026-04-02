@@ -344,18 +344,26 @@ Output ONLY the PR URL on the last line of your response."#,
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).await?;
     }
 
-    let output = tokio::time::timeout(
+    let output = match tokio::time::timeout(
         std::time::Duration::from_secs(120),
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Agent-assisted PR creation timed out after 120s"))??;
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Agent-assisted PR creation timed out after 120s"
+            ));
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

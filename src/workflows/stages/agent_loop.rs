@@ -292,15 +292,22 @@ async fn call_claude_for_reflection(prompt: &str, ctx: &StageContext) -> Result<
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).await?;
     }
 
-    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
-        .await
-        .map_err(|_| anyhow::anyhow!("Reflection Claude CLI timed out"))??;
+    let output = match tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()).await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "Reflection Claude CLI timed out after 60s"
+            ));
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
