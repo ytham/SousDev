@@ -124,6 +124,16 @@ impl RunStore {
 
 const HANDLED_ISSUES_FILE: &str = "handled-issues.json";
 
+/// Plan-first workflow states for the issue lifecycle.
+pub mod plan_state {
+    /// Plan PR has been created, waiting for human review/approval.
+    pub const PLAN_POSTED: &str = "plan_posted";
+    /// Human approved the plan, ready for agent to execute.
+    pub const PLAN_APPROVED: &str = "plan_approved";
+    /// Agent has written code, PR is finalized and ready for external review.
+    pub const CODE_COMPLETE: &str = "code_complete";
+}
+
 /// A record written when an issue has been successfully handled by a workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandledIssueRecord {
@@ -135,6 +145,13 @@ pub struct HandledIssueRecord {
     pub pr_open: bool,
     pub handled_at: String,
     pub updated_at: String,
+    /// Plan-first workflow state: "plan_posted", "plan_approved", "code_complete".
+    /// `None` for legacy direct-to-code issues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Branch name for the plan/code PR (needed to resume work across cron ticks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Tracks which issues each workflow has already handled, preventing duplicate
@@ -214,6 +231,60 @@ impl HandledIssueStore {
     ) -> Result<HashMap<String, HandledIssueRecord>> {
         let data = self.read_all().await.unwrap_or_default();
         Ok(data.get(workflow_name).cloned().unwrap_or_default())
+    }
+
+    /// Return a single handled-issue record by workflow name and issue number.
+    pub async fn get_record(
+        &self,
+        workflow_name: &str,
+        issue_number: u64,
+    ) -> Result<Option<HandledIssueRecord>> {
+        let data = self.read_all().await.unwrap_or_default();
+        Ok(data
+            .get(workflow_name)
+            .and_then(|m| m.get(&issue_number.to_string()))
+            .cloned())
+    }
+
+    /// Return all issues in a specific plan-first state for a workflow.
+    ///
+    /// Returns `(issue_number, record)` pairs.
+    pub async fn get_issues_in_state(
+        &self,
+        workflow_name: &str,
+        state: &str,
+    ) -> Result<Vec<(u64, HandledIssueRecord)>> {
+        let data = self.read_all().await.unwrap_or_default();
+        let records = data.get(workflow_name).cloned().unwrap_or_default();
+        Ok(records
+            .into_iter()
+            .filter_map(|(key, rec)| {
+                if rec.state.as_deref() == Some(state) {
+                    key.parse::<u64>().ok().map(|n| (n, rec))
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// Update just the state (and `updated_at`) of an existing record.
+    pub async fn update_state(
+        &self,
+        workflow_name: &str,
+        issue_number: u64,
+        new_state: &str,
+    ) -> Result<()> {
+        let mut data = self.read_all().await.unwrap_or_default();
+        if let Some(rec) = data
+            .entry(workflow_name.to_string())
+            .or_default()
+            .get_mut(&issue_number.to_string())
+        {
+            rec.state = Some(new_state.to_string());
+            rec.updated_at = chrono::Utc::now().to_rfc3339();
+        }
+        self.write_all(&data).await
     }
 
     async fn read_all(
@@ -540,6 +611,8 @@ mod tests {
                     pr_open: true,
                     handled_at: now(),
                     updated_at: now(),
+                    state: None,
+                    branch: None,
                 },
             )
             .await
@@ -564,6 +637,8 @@ mod tests {
                     pr_open: false,
                     handled_at: now(),
                     updated_at: now(),
+                    state: None,
+                    branch: None,
                 },
             )
             .await
@@ -589,6 +664,8 @@ mod tests {
                     pr_open: false,
                     handled_at: now(),
                     updated_at: now(),
+                    state: None,
+                    branch: None,
                 },
             )
             .await
@@ -975,6 +1052,8 @@ mod tests {
                         pr_open: true,
                         handled_at: now(),
                         updated_at: now(),
+                        state: None,
+                        branch: None,
                     },
                 )
                 .await
@@ -1001,6 +1080,8 @@ mod tests {
                     pr_open: true,
                     handled_at: now(),
                     updated_at: now(),
+                    state: None,
+                    branch: None,
                 },
             )
             .await
@@ -1025,6 +1106,8 @@ mod tests {
                     pr_open: false,
                     handled_at: now(),
                     updated_at: now(),
+                    state: None,
+                    branch: None,
                 },
             )
             .await
@@ -1058,6 +1141,8 @@ mod tests {
                         pr_open: false,
                         handled_at: now(),
                         updated_at: now(),
+                        state: None,
+                        branch: None,
                     },
                 )
                 .await
@@ -1086,6 +1171,8 @@ mod tests {
                     pr_open: false,
                     handled_at: now(),
                     updated_at: now(),
+                    state: None,
+                    branch: None,
                 },
             )
             .await
@@ -1103,6 +1190,8 @@ mod tests {
                     pr_open: true,
                     handled_at: now(),
                     updated_at: now(),
+                    state: None,
+                    branch: None,
                 },
             )
             .await
@@ -1128,6 +1217,190 @@ mod tests {
             .unwrap();
         let store = HandledIssueStore::new(dir.path());
         assert!(!store.is_handled("pipe", 1).await.unwrap());
+    }
+
+    // ── Plan-first state machine tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_issues_in_state_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = HandledIssueStore::new(dir.path());
+        let result = store.get_issues_in_state("pipe", "plan_posted").await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_issues_in_state_filters_by_state() {
+        let dir = TempDir::new().unwrap();
+        let store = HandledIssueStore::new(dir.path());
+
+        store
+            .mark_handled_with_number("pipe", 1, HandledIssueRecord {
+                pr_number: Some(10),
+                issue_url: "url1".into(),
+                issue_title: "Issue 1".into(),
+                issue_repo: "repo".into(),
+                pr_url: Some("pr1".into()),
+                pr_open: true,
+                handled_at: now(),
+                updated_at: now(),
+                state: Some("plan_posted".into()),
+                branch: Some("sousdev/1".into()),
+            })
+            .await
+            .unwrap();
+
+        store
+            .mark_handled_with_number("pipe", 2, HandledIssueRecord {
+                pr_number: Some(20),
+                issue_url: "url2".into(),
+                issue_title: "Issue 2".into(),
+                issue_repo: "repo".into(),
+                pr_url: Some("pr2".into()),
+                pr_open: true,
+                handled_at: now(),
+                updated_at: now(),
+                state: Some("plan_approved".into()),
+                branch: Some("sousdev/2".into()),
+            })
+            .await
+            .unwrap();
+
+        store
+            .mark_handled_with_number("pipe", 3, HandledIssueRecord {
+                pr_number: None,
+                issue_url: "url3".into(),
+                issue_title: "Issue 3".into(),
+                issue_repo: "repo".into(),
+                pr_url: None,
+                pr_open: false,
+                handled_at: now(),
+                updated_at: now(),
+                state: None,  // Legacy issue, no state
+                branch: None,
+            })
+            .await
+            .unwrap();
+
+        let posted = store.get_issues_in_state("pipe", "plan_posted").await.unwrap();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].0, 1);
+
+        let approved = store.get_issues_in_state("pipe", "plan_approved").await.unwrap();
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].0, 2);
+
+        let complete = store.get_issues_in_state("pipe", "code_complete").await.unwrap();
+        assert!(complete.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_state_transitions() {
+        let dir = TempDir::new().unwrap();
+        let store = HandledIssueStore::new(dir.path());
+
+        store
+            .mark_handled_with_number("pipe", 42, HandledIssueRecord {
+                pr_number: Some(100),
+                issue_url: "url".into(),
+                issue_title: "Bug".into(),
+                issue_repo: "repo".into(),
+                pr_url: Some("pr".into()),
+                pr_open: true,
+                handled_at: now(),
+                updated_at: now(),
+                state: Some("plan_posted".into()),
+                branch: Some("sousdev/42".into()),
+            })
+            .await
+            .unwrap();
+
+        // Transition plan_posted → plan_approved.
+        store.update_state("pipe", 42, "plan_approved").await.unwrap();
+        let posted = store.get_issues_in_state("pipe", "plan_posted").await.unwrap();
+        assert!(posted.is_empty());
+        let approved = store.get_issues_in_state("pipe", "plan_approved").await.unwrap();
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].0, 42);
+
+        // Transition plan_approved → code_complete.
+        store.update_state("pipe", 42, "code_complete").await.unwrap();
+        let approved = store.get_issues_in_state("pipe", "plan_approved").await.unwrap();
+        assert!(approved.is_empty());
+        let complete = store.get_issues_in_state("pipe", "code_complete").await.unwrap();
+        assert_eq!(complete.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_record_returns_record() {
+        let dir = TempDir::new().unwrap();
+        let store = HandledIssueStore::new(dir.path());
+
+        store
+            .mark_handled_with_number("pipe", 42, HandledIssueRecord {
+                pr_number: Some(100),
+                issue_url: "url".into(),
+                issue_title: "Bug".into(),
+                issue_repo: "repo".into(),
+                pr_url: Some("pr".into()),
+                pr_open: true,
+                handled_at: now(),
+                updated_at: now(),
+                state: Some("plan_posted".into()),
+                branch: Some("sousdev/42".into()),
+            })
+            .await
+            .unwrap();
+
+        let rec = store.get_record("pipe", 42).await.unwrap();
+        assert!(rec.is_some());
+        let rec = rec.unwrap();
+        assert_eq!(rec.state.as_deref(), Some("plan_posted"));
+        assert_eq!(rec.branch.as_deref(), Some("sousdev/42"));
+    }
+
+    #[tokio::test]
+    async fn test_get_record_returns_none_for_missing() {
+        let dir = TempDir::new().unwrap();
+        let store = HandledIssueStore::new(dir.path());
+        let rec = store.get_record("pipe", 999).await.unwrap();
+        assert!(rec.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_backward_compat_state_none() {
+        let dir = TempDir::new().unwrap();
+        // Write a legacy record without state/branch fields.
+        let legacy_json = r#"{
+            "pipe": {
+                "42": {
+                    "pr_number": null,
+                    "issue_url": "url",
+                    "issue_title": "Bug",
+                    "issue_repo": "repo",
+                    "pr_url": null,
+                    "pr_open": true,
+                    "handled_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z"
+                }
+            }
+        }"#;
+        let output_dir = dir.path().join(OUTPUT_DIR);
+        tokio::fs::create_dir_all(&output_dir).await.unwrap();
+        tokio::fs::write(output_dir.join(HANDLED_ISSUES_FILE), legacy_json)
+            .await
+            .unwrap();
+
+        let store = HandledIssueStore::new(dir.path());
+        assert!(store.is_handled("pipe", 42).await.unwrap());
+
+        let rec = store.get_record("pipe", 42).await.unwrap().unwrap();
+        assert!(rec.state.is_none());
+        assert!(rec.branch.is_none());
+
+        // Legacy records should not appear in any state filter.
+        let posted = store.get_issues_in_state("pipe", "plan_posted").await.unwrap();
+        assert!(posted.is_empty());
     }
 
     // ── PrReviewStore additional tests ───────────────────────────────────────

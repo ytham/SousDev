@@ -229,6 +229,10 @@ pub struct GitHubIssuesWorkflowConfig {
     pub labels: Option<Vec<String>>,
     /// Maximum number of issues to process per cron tick.
     pub limit: Option<usize>,
+    /// When true (default), the agent generates a plan PR first and waits for
+    /// human approval before writing code.  When false, the agent writes code
+    /// directly (legacy behaviour).
+    pub plan_first: Option<bool>,
 }
 
 /// Trigger workflow runs from open Linear issues.

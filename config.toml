@@ -95,6 +95,8 @@ schedule = "0 */10 * * * *"   # every 10 minutes (sec min hour day month weekday
 # repo defaults to target_repo — omit unless targeting a different repo
 assignees = ["@me"]
 labels = ["bug"]
+# plan_first = true     # (default) Agent creates a plan PR for human review
+                         # before writing code.  Set to false for direct-to-code.
 
 # ── Option B: Linear Issues (uncomment to use instead of GitHub) ──────
 # Requires LINEAR_API_KEY environment variable.
