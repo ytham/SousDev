@@ -46,6 +46,10 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(ratatui::style::Modifier::BOLD),
         ),
     ]));
+    lines.push(Line::from(vec![
+        Span::styled(border_char, border_style),
+        Span::styled(" ", bg),
+    ]));
 
     // "All logs" row.
     let all_active = app.log_filter.is_none();
@@ -72,7 +76,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     ]));
 
     // Items.
-    let visible_height = area.height.saturating_sub(7) as usize; // -1 header, -1 All logs, -5 footer
+    let visible_height = area.height.saturating_sub(8) as usize; // -1 header, -1 spacer, -1 All logs, -5 footer
     if items.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(border_char, border_style),
