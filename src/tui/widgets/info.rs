@@ -13,7 +13,7 @@ use crate::tui::events::ItemStatus;
 use crate::tui::ui::{ACCENT_BORDER, BG_INFO, BG_ROW_FOCUS};
 
 /// Info pane width in characters.
-pub const INFO_WIDTH: u16 = 24;
+pub const INFO_WIDTH: u16 = 34;
 
 /// Draw the Glance pane.
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
@@ -55,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     ]));
 
     // Items.
-    let visible_height = area.height.saturating_sub(3) as usize; // -1 for All logs, -2 for footer
+    let visible_height = area.height.saturating_sub(6) as usize; // -1 for All logs, -5 for footer
     if items.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(border_char, border_style),
@@ -116,7 +116,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Pad to footer.
-    let footer_lines = 3;
+    let footer_lines = 5;
     let footer_row = area.height.saturating_sub(footer_lines) as usize;
     while lines.len() < footer_row {
         lines.push(Line::from(vec![
@@ -125,7 +125,50 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Footer hints.
+    // ── Selected item detail (2 lines above hints) ───────────────────
+    let max_detail_width = (INFO_WIDTH as usize).saturating_sub(3); // border + space
+    if selected > 0 && selected <= items.len() {
+        let item = &items[selected - 1];
+
+        // Line 1: Status in human-readable words.
+        let description = status_description(item.status);
+        let desc_truncated = if description.len() > max_detail_width {
+            crate::utils::truncate::safe_truncate(description, max_detail_width)
+        } else {
+            description.to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(border_char, border_style),
+            Span::styled(desc_truncated, bg.fg(Color::DarkGray)),
+        ]));
+
+        // Line 2: Issue/PR number (teal) + name.
+        // Strip leading "#" or "PR #" to save space.
+        let num_display = item.id.trim_start_matches("PR ").trim_start_matches('#');
+        let name_budget = max_detail_width.saturating_sub(num_display.len() + 1);
+        let name = if item.title.len() > name_budget && name_budget > 1 {
+            crate::utils::truncate::safe_truncate(&item.title, name_budget)
+        } else if name_budget == 0 {
+            String::new()
+        } else {
+            item.title.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(border_char, border_style),
+            Span::styled(format!("{} ", num_display), bg.fg(Color::Cyan)),
+            Span::styled(name, bg.fg(Color::Gray)),
+        ]));
+    } else {
+        // No item selected — show blank lines.
+        for _ in 0..2 {
+            lines.push(Line::from(vec![
+                Span::styled(border_char, border_style),
+                Span::styled(" ", bg),
+            ]));
+        }
+    }
+
+    // ── Footer hints ─────────────────────────────────────────────────
     lines.push(Line::from(vec![
         Span::styled(border_char, border_style),
         Span::styled("─".repeat(INFO_WIDTH as usize - 3), bg.fg(Color::DarkGray)),
@@ -148,6 +191,23 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default().style(bg);
     let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
+}
+
+/// Return a short human-readable description of an item status.
+fn status_description(status: ItemStatus) -> &'static str {
+    match status {
+        ItemStatus::None => "Not yet processed",
+        ItemStatus::InProgress => "In progress",
+        ItemStatus::Success => "PR opened / completed",
+        ItemStatus::Error => "Failed (will retry after cooldown)",
+        ItemStatus::Cooldown => "In cooldown (will retry later)",
+        ItemStatus::ReviewedApproved => "Agent approved",
+        ItemStatus::ReviewedConcerns => "Agent found concerns",
+        ItemStatus::Approved => "PR approved -- ready to merge",
+        ItemStatus::PlanPending => "Plan waiting for review",
+        ItemStatus::NewComments => "Has new reviewer comments",
+        ItemStatus::NoNewComments => "No new comments",
+    }
 }
 
 /// Return the display badge and color for an item status.
