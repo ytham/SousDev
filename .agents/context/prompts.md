@@ -81,3 +81,18 @@ prompts.
 - **Use GitHub's Submit Review flow.** Instruct humans to use "Start a review"
   for inline comments so all feedback arrives at once, not as separate
   notifications.
+
+## Agent containment (PR reviewer)
+
+- **Agents ignore prompt prohibitions.** The Claude CLI with
+  `--dangerously-skip-permissions` can run any command. Telling the agent
+  "do NOT run `gh pr review`" in the prompt is not sufficient — the agent
+  may still do it. Defence-in-depth is required.
+- **Use multiple layers.** Prohibit the commands in: (1) the task prompt
+  (`pr-review.md`), (2) the system prompt (appended blocked commands), and
+  (3) a post-hoc cleanup step in the harness that detects and undoes
+  unauthorized actions (e.g., dismiss formal reviews the agent posted).
+- **PR reviews must be comments, not formal reviews.** The harness posts
+  reviews as timeline comments so they don't count as approvals or
+  "changes requested." If the agent posts a formal APPROVED review, the
+  `PrReviewPosterStage` dismisses it automatically.

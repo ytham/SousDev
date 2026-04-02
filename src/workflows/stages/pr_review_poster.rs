@@ -98,20 +98,17 @@ impl Stage for PrReviewPosterStage {
             .unwrap_or_default();
         let agent_output = agent_output.as_str();
 
-        // Check if the agent already posted a review directly (via `gh pr review`).
-        // If so, skip posting to avoid duplicates.
-        let already_posted = check_agent_already_posted(&pr.repo, pr.number).await;
-        if already_posted {
-            ctx.logger.info(
-                "PrReviewPosterStage: agent already posted a review — skipping duplicate",
-            );
-            ctx.pr_review_result = Some(PrReviewResult {
-                inline_comment_count: 0,
-                summary_posted: true,
-                head_sha: resolve_head_sha(&ctx.workspace_dir).await,
-                errors: vec![],
-            });
-            return Ok(());
+        // Check if the agent posted a formal review directly (via `gh pr review`).
+        // This is explicitly prohibited in the prompt, but the agent may ignore
+        // the instruction.  If it happened, dismiss the formal review to avoid
+        // leaving an unintended approval, and continue to post our own comment.
+        let agent_review_id = find_agent_formal_review(&pr.repo, pr.number).await;
+        if let Some(review_id) = agent_review_id {
+            ctx.logger.info(&format!(
+                "PrReviewPosterStage: agent posted a formal review (id={}) — dismissing it",
+                review_id
+            ));
+            dismiss_review(&pr.repo, pr.number, review_id).await;
         }
 
         // Resolve the HEAD SHA of the PR branch.
@@ -206,34 +203,95 @@ impl Stage for PrReviewPosterStage {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Check if a review comment was already posted on this PR by the
-/// authenticated user within the last few minutes (indicating the agent
-/// posted it directly via `gh pr review`).
-async fn check_agent_already_posted(repo: &str, pr_number: u64) -> bool {
-    // Get the authenticated user's login.
+/// Check if the authenticated user posted a formal review (APPROVED or
+/// CHANGES_REQUESTED) on this PR within the last 15 minutes.  Returns the
+/// review ID if found, so the caller can dismiss it.
+async fn find_agent_formal_review(repo: &str, pr_number: u64) -> Option<u64> {
     let login = crate::workflows::github_prs::detect_github_login()
         .await
         .unwrap_or_default();
     if login.is_empty() {
-        return false;
+        return None;
     }
 
-    // Fetch recent reviews on this PR.
-    let reviews = crate::workflows::github_prs::fetch_pr_review_comments(
-        repo, pr_number, None,
-    )
-    .await
-    .unwrap_or_default();
+    // Fetch ALL reviews (not just those with a body — we need to find
+    // APPROVED reviews which may have empty bodies).
+    let endpoint = format!("/repos/{}/pulls/{}/reviews?per_page=100", repo, pr_number);
+    let output = Command::new("gh")
+        .arg("api")
+        .arg("--paginate")
+        .arg(&endpoint)
+        .output()
+        .await
+        .ok()?;
 
-    // Check if any review from the authenticated user was posted recently
-    // (within the last 10 minutes).
-    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(10);
-    reviews.iter().any(|r| {
-        r.login == login
-            && chrono::DateTime::parse_from_rfc3339(&r.created_at)
-                .map(|dt| dt > cutoff)
-                .unwrap_or(false)
-    })
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let reviews: Vec<serde_json::Value> = serde_json::from_str(&stdout).ok()?;
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(15);
+
+    for review in reviews.iter().rev() {
+        let review_login = review["user"]["login"].as_str().unwrap_or("");
+        let state = review["state"].as_str().unwrap_or("");
+        let submitted_at = review["submitted_at"].as_str().unwrap_or("");
+
+        if review_login != login {
+            continue;
+        }
+
+        // Only care about formal approvals or changes_requested — not COMMENTED.
+        if state != "APPROVED" && state != "CHANGES_REQUESTED" {
+            continue;
+        }
+
+        // Only recent reviews (within the current run window).
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(submitted_at) {
+            if dt > cutoff {
+                return review["id"].as_u64();
+            }
+        }
+    }
+
+    None
+}
+
+/// Dismiss a formal review by ID so it no longer counts as an approval.
+async fn dismiss_review(repo: &str, pr_number: u64, review_id: u64) {
+    let endpoint = format!(
+        "/repos/{}/pulls/{}/reviews/{}/dismissals",
+        repo, pr_number, review_id
+    );
+    let result = Command::new("gh")
+        .arg("api")
+        .arg("--method")
+        .arg("PUT")
+        .arg(&endpoint)
+        .arg("-f")
+        .arg("message=Automated review dismissed — the harness posts reviews as comments, not formal approvals.")
+        .output()
+        .await;
+
+    match result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Dismissal may fail if the repo doesn't allow it — that's OK.
+            eprintln!(
+                "Warning: failed to dismiss review {} on PR #{}: {}",
+                review_id, pr_number, stderr.trim()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to dismiss review {} on PR #{}: {}",
+                review_id, pr_number, e
+            );
+        }
+    }
 }
 
 /// Resolve the current HEAD SHA in the workspace (short 7-char).

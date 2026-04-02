@@ -1921,6 +1921,23 @@ impl WorkflowExecutor {
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
         ctx.reviewing_pr = Some(pr.clone());
 
+        // Append PR-review-specific blocked commands to the system prompt.
+        // The Claude CLI agent may attempt to run `gh pr review --approve`
+        // or `gh pr comment` directly despite prompt-level prohibitions.
+        // Reinforcing in the system prompt increases compliance.
+        if let Some(ref mut sp) = ctx.system_prompt {
+            sp.push_str(concat!(
+                "\n\nBLOCKED COMMANDS FOR THIS REVIEW SESSION:\n",
+                "- `gh pr review` — do NOT submit formal reviews or approvals\n",
+                "- `gh pr comment` — do NOT post comments to the PR\n",
+                "- `gh pr approve` — do NOT approve the PR\n",
+                "- `gh pr merge` — do NOT merge the PR\n",
+                "- `gh api --method POST` — do NOT make write API calls\n",
+                "- `gh api --method PUT` — do NOT make write API calls\n",
+                "Your output will be posted by the harness. Just write the review text.\n",
+            ));
+        }
+
         self.opts.tui_tx.send(TuiEvent::RunStarted {
             workflow_name: self.config.name.clone(),
             run_id: run_id.clone(),
