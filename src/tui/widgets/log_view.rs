@@ -15,6 +15,29 @@ use crate::tui::ui::{
     BG_THOUGHT,
 };
 
+/// Color palette for distinguishing concurrent items (PRs, issues) in logs.
+/// 10 visually distinct colors that avoid clashing with the existing theme.
+const ITEM_COLORS: [Color; 10] = [
+    Color::Rgb(220, 160, 60),  // warm amber
+    Color::Rgb(100, 200, 130), // soft mint
+    Color::Rgb(200, 100, 160), // rose
+    Color::Rgb(100, 180, 220), // sky blue
+    Color::Rgb(180, 140, 100), // warm tan
+    Color::Rgb(160, 200, 80),  // lime
+    Color::Rgb(200, 130, 100), // salmon
+    Color::Rgb(130, 160, 220), // periwinkle
+    Color::Rgb(220, 120, 200), // orchid
+    Color::Rgb(120, 200, 190), // teal
+];
+
+/// Map an item label to a consistent color from the palette.
+fn item_color(label: &str) -> Color {
+    let hash = label
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    ITEM_COLORS[(hash as usize) % ITEM_COLORS.len()]
+}
+
 /// Draw the status bar showing the selected workflow name, repo, status, and key hints.
 pub fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let bg = Style::default().bg(BG_STATUS_BAR);
@@ -243,13 +266,26 @@ fn truncate_msg(msg: &str, max: usize) -> String {
     crate::utils::truncate::safe_truncate(msg, max)
 }
 
+/// Resolve the border/accent color for a log entry.  If the entry has an
+/// item label, use the per-item color; otherwise use the default accent.
+fn entry_accent(entry: &crate::tui::app::LogEntry, default: Color) -> Color {
+    entry
+        .lines
+        .first()
+        .and_then(|l| l.item_label.as_deref())
+        .map(item_color)
+        .unwrap_or(default)
+}
+
 fn render_thought(
     entry: &crate::tui::app::LogEntry,
     lines: &mut Vec<Line>,
     ctx: &RenderCtx,
     screen_y_base: usize,
 ) {
-    // Thought-specific style: subtle background + cyan left border.
+    let accent = entry_accent(entry, ACCENT_THOUGHT);
+
+    // Thought-specific style: subtle background + colored left border.
     let thought_style = |screen_row: usize| -> Style {
         let base = ctx.row_style(screen_row);
         // Use thought background unless the row is text-selected.
@@ -276,7 +312,7 @@ fn render_thought(
                 ctx.max_width.saturating_sub(4),
             );
             lines.push(Line::from(vec![
-                Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
+                Span::styled(" ▎", ts.fg(accent)),
                 Span::styled(format!(" {}", msg), ts.fg(Color::White)),
             ]));
         }
@@ -292,7 +328,7 @@ fn render_thought(
                 let ts = thought_style(screen_row);
                 let msg = truncate_msg(sub_line, ctx.max_width.saturating_sub(4));
                 lines.push(Line::from(vec![
-                    Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
+                    Span::styled(" ▎", ts.fg(accent)),
                     Span::styled(format!(" {}", msg), ts.fg(Color::White)),
                 ]));
                 row_offset += 1;
@@ -307,7 +343,7 @@ fn render_thought(
                 ctx.max_width.saturating_sub(4),
             );
             lines.push(Line::from(vec![
-                Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
+                Span::styled(" ▎", ts.fg(accent)),
                 Span::styled(format!(" {}", msg), ts.fg(Color::White)),
             ]));
         }
@@ -316,7 +352,7 @@ fn render_thought(
         if screen_row < ctx.area.y as usize + ctx.area.height as usize {
             let ts = thought_style(screen_row);
             lines.push(Line::from(vec![
-                Span::styled(" ▎", ts.fg(ACCENT_THOUGHT)),
+                Span::styled(" ▎", ts.fg(accent)),
                 Span::styled(
                     format!(
                         " […] {} more line{}",
@@ -336,12 +372,14 @@ fn render_tool_call(
     ctx: &RenderCtx,
     screen_y_base: usize,
 ) {
+    let accent = entry_accent(entry, ACCENT_TOOL);
+
     if let Some(tool_line) = entry.lines.first() {
         let rs = ctx.row_style(screen_y_base);
         let msg = truncate_msg(&tool_line.message, ctx.max_width.saturating_sub(8));
         lines.push(Line::from(vec![
             Span::styled(" ", rs),
-            Span::styled("[tool] ", rs.fg(ACCENT_TOOL)),
+            Span::styled("[tool] ", rs.fg(accent)),
             Span::styled(msg, rs.fg(Color::Gray)),
         ]));
     }
@@ -368,6 +406,7 @@ fn render_consolidated(
     ctx: &RenderCtx,
     screen_y_base: usize,
 ) {
+    let accent = entry_accent(entry, ACCENT_TOOL);
     let tool_lines: Vec<&crate::tui::app::LogLine> =
         entry.lines.iter().filter(|l| l.stage == "tool").collect();
 
@@ -381,7 +420,7 @@ fn render_consolidated(
             let msg = truncate_msg(&tool_line.message, ctx.max_width.saturating_sub(8));
             lines.push(Line::from(vec![
                 Span::styled(" ", rs),
-                Span::styled("[tool] ", rs.fg(ACCENT_TOOL)),
+                Span::styled("[tool] ", rs.fg(accent)),
                 Span::styled(msg, rs.fg(Color::Gray)),
             ]));
         }
@@ -391,7 +430,7 @@ fn render_consolidated(
             let msg = truncate_msg(&last_tool.message, ctx.max_width.saturating_sub(8));
             lines.push(Line::from(vec![
                 Span::styled(" ", rs),
-                Span::styled("[tool] ", rs.fg(ACCENT_TOOL)),
+                Span::styled("[tool] ", rs.fg(accent)),
                 Span::styled(msg, rs.fg(Color::Gray)),
             ]));
         }
@@ -431,12 +470,20 @@ fn render_system(
             "debug" => Color::DarkGray,
             _ => ACCENT_INFO_LEVEL,
         };
-        let prefix = format!("{:<5} [{}] ", log.level.to_uppercase(), log.stage);
-        let available = ctx.max_width.saturating_sub(prefix.len());
+
+        // Colored dot prefix for item-labeled system entries.
+        let dot = if let Some(ref label) = log.item_label {
+            Span::styled("● ", rs.fg(item_color(label)))
+        } else {
+            Span::styled("  ", rs)
+        };
+
+        let prefix_len = 2 + 6 + log.stage.len() + 3; // dot + level + [stage] + spaces
+        let available = ctx.max_width.saturating_sub(prefix_len);
         let msg = truncate_msg(&log.message, available);
 
         lines.push(Line::from(vec![
-            Span::styled(" ", rs),
+            dot,
             Span::styled(
                 format!("{:<5} ", log.level.to_uppercase()),
                 rs.fg(level_color),
@@ -489,12 +536,19 @@ fn draw_logs_flat(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowState,
                 _ => ACCENT_INFO_LEVEL,
             };
 
-            let prefix = format!("{:<5} [{}] ", log.level.to_uppercase(), log.stage);
-            let available = max_width.saturating_sub(prefix.len());
+            // Colored dot prefix for item-labeled log lines.
+            let dot = if let Some(ref label) = log.item_label {
+                Span::styled("● ", row_bg.fg(item_color(label)))
+            } else {
+                Span::styled("  ", row_bg)
+            };
+
+            let prefix_len = 2 + 6 + log.stage.len() + 3; // dot + level + [stage] + spaces
+            let available = max_width.saturating_sub(prefix_len);
             let msg = truncate_msg(&log.message, available);
 
             Line::from(vec![
-                Span::styled(" ", row_bg),
+                dot,
                 Span::styled(
                     format!("{:<5} ", log.level.to_uppercase()),
                     row_bg.fg(level_color),

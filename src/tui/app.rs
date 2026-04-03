@@ -57,6 +57,10 @@ pub struct LogLine {
     pub message: String,
     /// The run ID this log line belongs to (for filtering by item).
     pub run_id: Option<String>,
+    /// Item label (e.g. `"PR #12050"`, `"issue #42"`) stamped at creation
+    /// time for color-coding concurrent runs.  `None` for log lines not
+    /// tied to a specific item.
+    pub item_label: Option<String>,
 }
 
 /// Stage status within a workflow flowchart.
@@ -434,6 +438,7 @@ impl App {
                     self.update_item_status(&workflow_name, label, ItemStatus::InProgress);
                 }
 
+                let log_item_label = self.run_id_to_item.get(&run_id).cloned();
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     wf.status = WorkflowStatus::Running;
                     wf.run_id = Some(run_id.clone());
@@ -449,6 +454,7 @@ impl App {
                         stage: "executor".into(),
                         message: label,
                         run_id: Some(run_id),
+                        item_label: log_item_label,
                     });
                 }
 
@@ -463,6 +469,7 @@ impl App {
                 run_id,
                 stage_name,
             } => {
+                let log_item_label = self.run_id_to_item.get(&run_id).cloned();
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     if let Some(idx) = wf.stages.iter().position(|s| *s == stage_name) {
                         wf.stage_statuses[idx] = StageStatus::Running;
@@ -472,6 +479,7 @@ impl App {
                         stage: stage_name.clone(),
                         message: format!("Stage started: {}", stage_name),
                         run_id: Some(run_id),
+                        item_label: log_item_label,
                     });
                 }
                 dirty_workflow = Some(workflow_name);
@@ -495,6 +503,7 @@ impl App {
                 stage_name,
                 error,
             } => {
+                let log_item_label = self.run_id_to_item.get(&run_id).cloned();
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     if let Some(idx) = wf.stages.iter().position(|s| *s == stage_name) {
                         wf.stage_statuses[idx] = StageStatus::Failed;
@@ -504,6 +513,7 @@ impl App {
                         stage: stage_name,
                         message: error,
                         run_id: Some(run_id),
+                        item_label: log_item_label,
                     });
                 }
                 dirty_workflow = Some(workflow_name);
@@ -516,6 +526,11 @@ impl App {
                 stage,
                 message,
             } => {
+                let log_item_label = if run_id.is_empty() {
+                    None
+                } else {
+                    self.run_id_to_item.get(&run_id).cloned()
+                };
                 if let Some(wf) = self.find_workflow_mut(&workflow_name) {
                     let rid = if run_id.is_empty() { None } else { Some(run_id) };
                     wf.logs.push(LogLine {
@@ -523,6 +538,7 @@ impl App {
                         stage,
                         message,
                         run_id: rid,
+                        item_label: log_item_label,
                     });
                 }
                 dirty_workflow = Some(workflow_name);
@@ -543,6 +559,12 @@ impl App {
                     .and_then(|w| w.current_item_label.clone());
 
                 let completed_run_id = if run_id.is_empty() { None } else { Some(run_id) };
+
+                // Resolve item label BEFORE removing from map.
+                let log_item_label = completed_run_id
+                    .as_ref()
+                    .and_then(|rid| self.run_id_to_item.get(rid))
+                    .cloned();
 
                 // Clean up the run_id → item_label mapping to prevent unbounded growth.
                 if let Some(ref rid) = completed_run_id {
@@ -584,6 +606,7 @@ impl App {
                                 stage: "executor".into(),
                                 message: msg,
                                 run_id: completed_run_id.clone(),
+                                item_label: log_item_label.clone(),
                             });
                         }
                     } else {
@@ -599,6 +622,7 @@ impl App {
                             stage: "executor".into(),
                             message: msg,
                             run_id: completed_run_id.clone(),
+                            item_label: log_item_label.clone(),
                         });
                     }
                 }
@@ -906,6 +930,7 @@ impl App {
                     stage: "session".into(),
                     message: "Workflow enabled".into(),
                     run_id: None,
+                    item_label: None,
                 });
             } else {
                 wf.status = WorkflowStatus::Disabled;
@@ -914,6 +939,7 @@ impl App {
                     stage: "session".into(),
                     message: "Workflow disabled".into(),
                     run_id: None,
+                    item_label: None,
                 });
             }
             self.session_dirty = true;
@@ -1376,6 +1402,7 @@ impl App {
                 stage: "config".into(),
                 message: format!("Schedule updated to: {}", cron_expr),
                 run_id: None,
+                item_label: None,
             });
 
             // Persist to config.toml.
@@ -1497,33 +1524,21 @@ impl App {
 
     /// Return the filtered logs for the selected workflow based on the
     /// current `log_filter`.  When `None`, returns all logs.
+    ///
+    /// Matching uses `LogLine.item_label` directly, so it works for both
+    /// in-progress and completed runs (no dependency on `run_id_to_item`).
     pub fn filtered_logs_for(&self, wf: &WorkflowState) -> Vec<LogLine> {
         match &self.log_filter {
             None => wf.logs.clone(),
             Some(item_id) => {
-                // Find all run_ids that match this item_label.
-                let matching_run_ids: HashSet<String> = self
-                    .run_id_to_item
-                    .iter()
-                    .filter(|(_, label)| {
-                        // Exact match on the item ID within the label.
-                        // Label is e.g. "issue #12073" or "PR #12073".
-                        // item_id is e.g. "#12073" or "PR #12073".
-                        label.as_str() == item_id || label.ends_with(item_id.as_str())
-                    })
-                    .map(|(rid, _)| rid.clone())
-                    .collect();
-
-                if matching_run_ids.is_empty() {
-                    return Vec::new();
-                }
-
                 wf.logs
                     .iter()
                     .filter(|log| {
-                        log.run_id
+                        log.item_label
                             .as_ref()
-                            .map(|rid| matching_run_ids.contains(rid))
+                            .map(|label| {
+                                label == item_id || label.ends_with(item_id.as_str())
+                            })
                             .unwrap_or(false)
                     })
                     .cloned()
@@ -2038,6 +2053,7 @@ async fn load_previous_logs(
                         stage: "history".into(),
                         message: format!("── {} ({}) ──", filename, log_file.header.status),
                         run_id: Some(run_id.clone()),
+                        item_label: None,
                     });
 
                     // Add each log entry.
@@ -2047,6 +2063,7 @@ async fn load_previous_logs(
                             stage: entry.stage.clone(),
                             message: entry.message.clone(),
                             run_id: Some(run_id.clone()),
+                            item_label: None,
                         });
                     }
                 }
@@ -2975,6 +2992,7 @@ mod tests {
                 stage: "x".into(),
                 message: format!("line {}", i),
                 run_id: None,
+                item_label: None,
             });
         }
         app.handle_key(KeyCode::Char('B'), KeyModifiers::empty());
@@ -3974,6 +3992,7 @@ mod tests {
             stage: stage.into(),
             message: msg.into(),
             run_id: None,
+            item_label: None,
         }
     }
 
