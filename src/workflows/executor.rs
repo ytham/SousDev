@@ -1727,11 +1727,16 @@ impl WorkflowExecutor {
                                 vec![]
                             }
                         };
-                    let trigger = format!("@{}", reviewer_login);
-                    if new_comments.iter().any(|c| c.body.contains(&trigger)) {
+                    // Re-review if any new non-bot, non-self comment exists.
+                    // This catches PR authors responding to review feedback
+                    // without requiring an explicit @mention.
+                    let has_new_human_comment = new_comments.iter().any(|c| {
+                        !is_bot(&c.login) && c.login != reviewer_login
+                    });
+                    if has_new_human_comment {
                         logger.info(&format!(
-                            "PR #{} has a \"{}\" mention — re-reviewing",
-                            pr.number, trigger
+                            "PR #{} has new human comments — re-reviewing",
+                            pr.number
                         ));
                         to_review.push(pr);
                     } else {
