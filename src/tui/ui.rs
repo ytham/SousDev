@@ -6,7 +6,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::App;
@@ -44,8 +44,10 @@ pub const BG_THOUGHT: Color = Color::Rgb(24, 26, 34);
 pub const ACCENT_TOOL: Color = Color::Rgb(140, 120, 200);
 /// Muted blue — "info" log level (replaces raw Color::Blue).
 pub const ACCENT_INFO_LEVEL: Color = Color::Rgb(70, 110, 190);
-/// Muted green — toast notifications.
+/// Lighter green — toast message area.
 pub const ACCENT_TOAST: Color = Color::Rgb(40, 130, 70);
+/// Darker green — toast full-width background bar.
+pub const BG_TOAST: Color = Color::Rgb(20, 70, 40);
 
 /// Draw the full TUI layout.
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -140,7 +142,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_toast(f, app);
 }
 
-/// Draw a toast notification centered horizontally with padding.
+/// Draw a toast notification as a full-width bar on the 3rd line from
+/// the bottom.  The bar has a dark green background, and the message
+/// is centered in a lighter green area with 2-space padding on each side.
 fn draw_toast(f: &mut Frame, app: &App) {
     let toast = match &app.toast {
         Some(t) => t,
@@ -148,34 +152,51 @@ fn draw_toast(f: &mut Frame, app: &App) {
     };
 
     let area = f.area();
-    let msg = &toast.message;
-    let pad_x: u16 = 2;
-    let pad_y: u16 = 1;
-    let content_width = msg.len() as u16 + pad_x * 2;
-    let content_height = 1 + pad_y * 2;
-
-    if area.width < content_width + 2 || area.height < content_height + 2 {
+    if area.height < 4 {
         return;
     }
 
-    let toast_area = Rect {
-        x: area.x + (area.width.saturating_sub(content_width)) / 2,
-        y: area.y + area.height - content_height - 1,
-        width: content_width,
-        height: content_height,
+    let msg = &toast.message;
+    let pad_x: usize = 2;
+
+    // Full-width bar, 1 line tall, 3rd from bottom.
+    let bar = Rect {
+        x: area.x,
+        y: area.y + area.height - 3,
+        width: area.width,
+        height: 1,
     };
 
-    f.render_widget(Clear, toast_area);
+    f.render_widget(Clear, bar);
 
-    let bg = Style::default().bg(ACCENT_TOAST).fg(Color::White);
-    let lines = vec![
-        Line::from(Span::styled(" ".repeat(content_width as usize), bg)),
-        Line::from(Span::styled(
-            format!("{:^width$}", msg, width = content_width as usize),
-            bg,
-        )),
-        Line::from(Span::styled(" ".repeat(content_width as usize), bg)),
-    ];
-    let paragraph = Paragraph::new(lines).block(Block::default().style(bg));
-    f.render_widget(paragraph, toast_area);
+    // Build a single line: dark-green fill | lighter-green padded message | dark-green fill.
+    let msg_area_width = msg.len() + pad_x * 2;
+    let total_width = area.width as usize;
+
+    let dark_style = Style::default().bg(BG_TOAST).fg(Color::White);
+    let light_style = Style::default().bg(ACCENT_TOAST).fg(Color::White);
+
+    if msg_area_width >= total_width {
+        // Message wider than screen — just render it all in the lighter green.
+        let truncated =
+            crate::utils::truncate::safe_truncate(msg, total_width.saturating_sub(pad_x * 2));
+        let padded = format!("{:^width$}", truncated, width = total_width);
+        let line = Line::from(Span::styled(padded, light_style));
+        let paragraph = Paragraph::new(vec![line]);
+        f.render_widget(paragraph, bar);
+    } else {
+        let left_fill = (total_width - msg_area_width) / 2;
+        let right_fill = total_width - msg_area_width - left_fill;
+
+        let line = Line::from(vec![
+            Span::styled(" ".repeat(left_fill), dark_style),
+            Span::styled(
+                format!("{pad}{msg}{pad}", pad = " ".repeat(pad_x), msg = msg),
+                light_style,
+            ),
+            Span::styled(" ".repeat(right_fill), dark_style),
+        ]);
+        let paragraph = Paragraph::new(vec![line]);
+        f.render_widget(paragraph, bar);
+    }
 }
