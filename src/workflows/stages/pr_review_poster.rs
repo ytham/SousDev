@@ -149,8 +149,12 @@ impl Stage for PrReviewPosterStage {
                 .lines()
                 .filter(|l| {
                     let t = l.trim();
-                    !t.is_empty()
-                        && !t.starts_with('{')
+                    // Keep blank lines — they are critical for Markdown
+                    // spacing (paragraph breaks, horizontal rules, etc.).
+                    if t.is_empty() {
+                        return true;
+                    }
+                    !t.starts_with('{')
                         && !t.starts_with('[')
                         && !t.starts_with("INLINE_COMMENT")
                         && !t.starts_with("END_INLINE_COMMENT")
@@ -167,6 +171,11 @@ impl Stage for PrReviewPosterStage {
                 None
             } else {
                 let text = clean_lines.join("\n");
+                // Fix Markdown spacing: ensure blank lines around horizontal
+                // rules, headings, and code blocks so GitHub renders correctly.
+                let text = fix_markdown_spacing(&text);
+                // Collapse runs of 3+ blank lines to 2.
+                let text = collapse_excess_blank_lines(&text);
                 // GitHub comment limit is 65,536 chars.  Use 60,000 to leave
                 // room for the header and inline sections appended later.
                 Some(crate::utils::truncate::safe_truncate(&text, 60000))
@@ -226,6 +235,68 @@ impl Stage for PrReviewPosterStage {
 /// lines like "I don't have permission to submit reviews directly. Here's my
 /// review:" before the actual review content.  This function finds the first
 /// line that looks like real review content and drops everything before it.
+/// Fix Markdown spacing issues that cause incorrect rendering on GitHub.
+///
+/// - Ensures `---` / `***` / `___` horizontal rules have blank lines before
+///   and after (otherwise GitHub may interpret them as setext heading underlines).
+/// - Ensures `#` headings have a blank line before them (except at the start).
+/// - Ensures code fences (```) have blank lines around them.
+fn fix_markdown_spacing(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut result: Vec<String> = Vec::with_capacity(lines.len() + 20);
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let prev_blank = i == 0 || lines[i - 1].trim().is_empty();
+
+        // Horizontal rules: ---, ***, ___  (possibly with spaces between)
+        let is_hr = !trimmed.is_empty()
+            && (trimmed.starts_with("---") || trimmed.starts_with("***") || trimmed.starts_with("___"))
+            && trimmed.chars().all(|c| c == '-' || c == '*' || c == '_' || c == ' ');
+
+        // Headings: # ...
+        let is_heading = trimmed.starts_with('#');
+
+        // Code fences: ``` or ~~~
+        let is_fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+
+        // Insert blank line before if needed.
+        if (is_hr || is_heading || is_fence) && !prev_blank && i > 0 {
+            result.push(String::new());
+        }
+
+        result.push(line.to_string());
+
+        // Insert blank line after horizontal rules and code fences if needed.
+        if (is_hr || is_fence) && i + 1 < lines.len() && !lines[i + 1].trim().is_empty() {
+            result.push(String::new());
+        }
+    }
+
+    result.join("\n")
+}
+
+/// Collapse runs of 3+ consecutive blank lines to exactly 2.
+fn collapse_excess_blank_lines(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut consecutive_blanks = 0u32;
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            consecutive_blanks += 1;
+            if consecutive_blanks <= 2 {
+                result.push('\n');
+            }
+        } else {
+            consecutive_blanks = 0;
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result.trim_end_matches('\n').to_string()
+}
+
 fn strip_agent_preamble<'a>(lines: &[&'a str]) -> Vec<&'a str> {
     // Patterns that indicate the start of actual review content.
     let is_review_content = |line: &str| -> bool {
@@ -543,5 +614,57 @@ END_INLINE_COMMENT";
         let lines: Vec<&str> = vec![];
         let result = strip_agent_preamble(&lines);
         assert!(result.is_empty());
+    }
+
+    // ── fix_markdown_spacing tests ────────────────────────────────────────
+
+    #[test]
+    fn test_fix_markdown_spacing_hr_needs_blank_lines() {
+        let input = "Some text\n---\nMore text";
+        let result = fix_markdown_spacing(input);
+        assert!(result.contains("Some text\n\n---\n\nMore text"));
+    }
+
+    #[test]
+    fn test_fix_markdown_spacing_hr_already_spaced() {
+        let input = "Some text\n\n---\n\nMore text";
+        let result = fix_markdown_spacing(input);
+        // Should not double the blank lines.
+        assert_eq!(result, "Some text\n\n---\n\nMore text");
+    }
+
+    #[test]
+    fn test_fix_markdown_spacing_heading_needs_blank_line_before() {
+        let input = "Some text\n### Heading\nBody";
+        let result = fix_markdown_spacing(input);
+        assert!(result.contains("Some text\n\n### Heading"));
+    }
+
+    #[test]
+    fn test_fix_markdown_spacing_code_fence() {
+        let input = "Text\n```\ncode\n```\nMore text";
+        let result = fix_markdown_spacing(input);
+        assert!(result.contains("Text\n\n```\n\ncode\n\n```\n\nMore text"));
+    }
+
+    #[test]
+    fn test_fix_markdown_spacing_preserves_normal_text() {
+        let input = "Line one\nLine two\nLine three";
+        let result = fix_markdown_spacing(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_collapse_excess_blank_lines() {
+        let input = "A\n\n\n\n\nB";
+        let result = collapse_excess_blank_lines(input);
+        assert_eq!(result, "A\n\n\nB");
+    }
+
+    #[test]
+    fn test_collapse_preserves_double_blanks() {
+        let input = "A\n\nB";
+        let result = collapse_excess_blank_lines(input);
+        assert_eq!(result, "A\n\nB");
     }
 }
