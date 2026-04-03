@@ -100,23 +100,17 @@ impl Stage for PrReviewPosterStage {
 
         // Check if the agent posted a formal review directly (via `gh pr review`).
         // This is explicitly prohibited in the prompt, but the agent may ignore
-        // the instruction.  If it happened, dismiss the formal review and skip
-        // posting our own comment to avoid duplicates (the dismissed review's
-        // body is still visible on the PR timeline).
+        // the instruction.  If it happened, dismiss the formal review so it
+        // doesn't count as an approval, then continue to post our own timeline
+        // comment with the review content (dismissed reviews are collapsed and
+        // harder to read).
         let agent_review_id = find_agent_formal_review(&pr.repo, pr.number).await;
         if let Some(review_id) = agent_review_id {
             ctx.logger.info(&format!(
-                "PrReviewPosterStage: agent posted a formal review (id={}) — dismissing and skipping harness comment",
+                "PrReviewPosterStage: agent posted a formal review (id={}) — dismissing it",
                 review_id
             ));
             dismiss_review(&pr.repo, pr.number, review_id).await;
-            ctx.pr_review_result = Some(PrReviewResult {
-                inline_comment_count: 0,
-                summary_posted: true,
-                head_sha: resolve_head_sha(&ctx.workspace_dir).await,
-                errors: vec![],
-            });
-            return Ok(());
         }
 
         // Resolve the HEAD SHA of the PR branch.

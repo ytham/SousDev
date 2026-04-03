@@ -976,14 +976,20 @@ impl App {
                 }
 
                 // Click in Info pane: select item, activate pane, and show logs.
+                // The first 2 rows are the workflow name header + spacer,
+                // so clickable items start at row offset 2.
                 if panel == Panel::Info {
                     self.active_left_pane = LeftPane::Info;
                     let info_rect = &self.layout.info;
-                    let item_row = event.row.saturating_sub(info_rect.y) as usize;
-                    let item_count = self.selected_items().len() + 1; // +1 for "All logs"
-                    if item_row < item_count {
-                        self.info_selected = item_row;
-                        self.set_log_filter_from_info();
+                    let header_lines: u16 = 2; // workflow name + spacer
+                    let raw_row = event.row.saturating_sub(info_rect.y);
+                    if raw_row >= header_lines {
+                        let item_row = (raw_row - header_lines) as usize;
+                        let item_count = self.selected_items().len() + 1; // +1 for "All logs"
+                        if item_row < item_count {
+                            self.info_selected = item_row;
+                            self.set_log_filter_from_info();
+                        }
                     }
                 }
 
@@ -4510,12 +4516,14 @@ mod tests {
         let mut app = app_with_info_expanded();
         app.info_expanded_open = false;
         app.active_left_pane = LeftPane::Workflows;
-        app.layout.info = ratatui::layout::Rect::new(27, 0, 24, 30);
-        // Click row 2 (item index 2 = second real item after "All logs")
+        app.layout.info = ratatui::layout::Rect::new(27, 0, 34, 30);
+        // Row 0 = workflow name header, row 1 = spacer, row 2 = "All logs",
+        // row 3 = first item, row 4 = second item.
+        // Click row 4 (info_selected = 2 = second real item)
         app.handle_mouse(make_mouse_event(
             MouseEventKind::Down(MouseButton::Left),
             30,
-            2,
+            4,
         ));
         assert_eq!(app.active_left_pane, LeftPane::Info);
         assert_eq!(app.info_selected, 2);
@@ -4526,12 +4534,12 @@ mod tests {
         let mut app = app_with_info_expanded();
         app.info_expanded_open = false;
         app.active_left_pane = LeftPane::Workflows;
-        app.layout.info = ratatui::layout::Rect::new(27, 0, 24, 30);
-        // Click row 1 (item index 1 = first real item "#1")
+        app.layout.info = ratatui::layout::Rect::new(27, 0, 34, 30);
+        // Click row 3 (info_selected = 1 = first real item "#1")
         app.handle_mouse(make_mouse_event(
             MouseEventKind::Down(MouseButton::Left),
             30,
-            1,
+            3,
         ));
         assert_eq!(app.info_selected, 1);
         assert_eq!(app.log_filter, Some("#1".into()));
@@ -4543,12 +4551,12 @@ mod tests {
         app.info_expanded_open = false;
         app.log_filter = Some("#1".into());
         app.active_left_pane = LeftPane::Workflows;
-        app.layout.info = ratatui::layout::Rect::new(27, 0, 24, 30);
-        // Click row 0 ("All logs")
+        app.layout.info = ratatui::layout::Rect::new(27, 0, 34, 30);
+        // Click row 2 ("All logs") — rows 0-1 are header+spacer.
         app.handle_mouse(make_mouse_event(
             MouseEventKind::Down(MouseButton::Left),
             30,
-            0,
+            2,
         ));
         assert!(app.log_filter.is_none());
     }
