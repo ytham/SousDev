@@ -270,6 +270,11 @@ pub struct GitHubPRsWorkflowConfig {
     /// authenticated user.  When set, PRs not assigned to any of these
     /// users are skipped regardless of review requests.
     pub assignees: Option<Vec<String>>,
+    /// Enable multi-model PR review.  When `true` (default), automatically
+    /// uses all available model CLIs (claude, codex, gemini) to review in
+    /// parallel with a consolidated output.  Requires Claude + at least one
+    /// other model CLI.  Set to `false` to force single-model review.
+    pub multi_model_review: Option<bool>,
 }
 
 /// Trigger workflow runs from review comments on GitHub Pull Requests.

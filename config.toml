@@ -150,6 +150,10 @@ schedule = "0 */5 * * * *"
 # require_individual_request = true
 # Only review PRs assigned to you (filters out team auto-assignments).
 assignees = ["@me"]
+# multi_model_review = true  # (default) Auto-enabled when 2+ model CLIs
+                              # (claude + codex/gemini) are detected.
+                              # Each model reviews independently, then
+                              # Claude consolidates into a single comment.
 
 [workflows.agent_loop]
 technique = "claude-loop"        # required for PR review

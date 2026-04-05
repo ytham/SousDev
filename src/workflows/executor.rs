@@ -19,7 +19,15 @@ fn truncate_title(s: &str, max: usize) -> String {
     crate::utils::truncate::safe_truncate(s, max)
 }
 use crate::workflows::stage::{ResolvedPrompts, Stage, StageContext, UnaddressedComments};
+use crate::workflows::multi_review::{
+    self, ReviewerModel, disallowed_tools_for, format_reviews_for_consolidation,
+    load_workspace_conventions,
+};
 use crate::workflows::stages::agent_loop::AgentLoopStage;
+use crate::workflows::stages::external_agent_loop::{
+    claude_adapter, codex_adapter, gemini_adapter, run_external_agent_loop,
+    ExternalAgentRunOptions,
+};
 use crate::workflows::stages::pr_checkout::PrCheckoutStage;
 use crate::workflows::stages::pr_comment_responder::PrCommentResponderStage;
 use crate::workflows::stages::pr_description::PrDescriptionStage;
@@ -37,6 +45,7 @@ use crate::providers::provider::LLMProvider;
 use crate::tools::registry::ToolRegistry;
 use crate::types::config::{WorkflowConfig, PromptConfig};
 use crate::tui::events::{ItemStatus, ItemSummary, WorkflowMode, TuiEvent, TuiEventSender};
+use crate::types::technique::RunResult;
 use crate::utils::logger::Logger;
 use crate::utils::prompt_loader::PromptLoader;
 
@@ -1860,8 +1869,18 @@ impl WorkflowExecutor {
         pr: &GitHubPR,
         _reviewer_login: &str,
     ) -> Result<WorkflowResult> {
-        // Runtime enforcement: must be claude-loop
-        if self.config.agent_loop.technique != "claude-loop" {
+        // Check for multi-model review.  When enabled and multiple CLIs are
+        // available, route to the parallel multi-model path instead.
+        let multi_model_override = self.config.github_prs.as_ref()
+            .and_then(|c| c.multi_model_review);
+        if let Some(models) = multi_review::resolve_multi_model(multi_model_override).await {
+            return self.run_multi_model_review(pr, _reviewer_login, &models).await;
+        }
+
+        // Runtime enforcement: must be a CLI-based technique
+        let technique = &self.config.agent_loop.technique;
+        let is_cli_technique = matches!(technique.as_str(), "claude-loop" | "codex-loop" | "gemini-loop");
+        if !is_cli_technique {
             return Ok(WorkflowResult {
                 workflow_name: self.config.name.clone(),
                 run_id: Uuid::new_v4().to_string(),
@@ -1870,12 +1889,13 @@ impl WorkflowExecutor {
                 success: false,
                 skipped: false,
                 error: Some(format!(
-                    "githubPRs workflows require agentLoop.technique: \"claude-loop\".\n\n\
+                    "githubPRs workflows require a CLI-based technique \
+                     (claude-loop, codex-loop, or gemini-loop).\n\n\
                      The PR review agent must be able to run shell commands (git diff, file reads) \
                      to inspect the PR changes in the workspace. Harness-native techniques (\"{}\") \
                      receive only text and cannot access the workspace filesystem.\n\n\
-                     Fix: set agent_loop.technique to \"claude-loop\" in your githubPRs workflow config.",
-                    self.config.agent_loop.technique
+                     Fix: set agent_loop.technique to a CLI-based technique in your githubPRs workflow config.",
+                    technique
                 )),
                 pr_number: Some(pr.number),
                 retry_count: 0,
@@ -1889,8 +1909,20 @@ impl WorkflowExecutor {
         let started_at = Utc::now().to_rfc3339();
         let logger = Logger::new(format!("{}#{}", self.config.name, pr.number));
 
-        let parsed_task =
-            ParsedTask::new(format!("Review PR #{}: {}", pr.number, pr.title));
+        // Load the pr-review.md prompt with variable substitution so all
+        // models get structured output format instructions and review guidelines.
+        let review_prompt = self.load_and_render_prompt(
+            "pr-review",
+            &[
+                ("pr_title", &pr.title),
+                ("pr_number", &pr.number.to_string()),
+                ("pr_author", &pr.author.login),
+                ("pr_head_ref", &pr.head_ref_name),
+                ("pr_base_ref", &pr.base_ref_name),
+                ("pr_body", pr.body.as_deref().unwrap_or("")),
+            ],
+        );
+        let parsed_task = ParsedTask::new(review_prompt);
         let log_label = format!("pr-{}", pr.number);
         let wf_log = WorkflowLog::with_tui_sender_and_label(
             &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
@@ -1938,6 +1970,317 @@ impl WorkflowExecutor {
             }
             self.run_stage(&PrCheckoutStage, &mut ctx).await?;
             self.run_stage(&AgentLoopStage, &mut ctx).await?;
+            self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+
+        let completed_at = Utc::now().to_rfc3339();
+
+        match result {
+            Ok(_) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.complete("success").await;
+                }
+                let trajectory = ctx.agent_result.as_ref()
+                    .map(|r| r.trajectory.clone())
+                    .unwrap_or_default();
+                Ok(WorkflowResult {
+                    workflow_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: true,
+                    skipped: false,
+                    pr_number: Some(pr.number),
+                    pr_review_result: ctx.pr_review_result,
+                    agent_result: ctx.agent_result,
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory,
+                    ..Default::default()
+                })
+            }
+            Err(e) => {
+                if let Some(ref log) = wf_log {
+                    let _ = log.error("executor", &e.to_string()).await;
+                    let _ = log.complete("failed").await;
+                }
+                Ok(WorkflowResult {
+                    workflow_name: self.config.name.clone(),
+                    run_id,
+                    started_at,
+                    completed_at,
+                    success: false,
+                    skipped: false,
+                    error: Some(e.to_string()),
+                    pr_number: Some(pr.number),
+                    retry_count: 0,
+                    review_rounds: 0,
+                    trajectory: vec![],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    // ── Multi-model PR review ──────────────────────────────────────────────
+
+    /// Run multiple AI model CLIs in parallel to review a PR, then
+    /// consolidate their outputs into a single timeline comment.
+    async fn run_multi_model_review(
+        &self,
+        pr: &GitHubPR,
+        _reviewer_login: &str,
+        models: &[ReviewerModel],
+    ) -> Result<WorkflowResult> {
+        let run_id = Uuid::new_v4().to_string();
+        let started_at = Utc::now().to_rfc3339();
+        let logger = Logger::new(format!("{}#{}-multi", self.config.name, pr.number));
+
+        logger.info(&format!(
+            "Multi-model PR review for #{} with models: {}",
+            pr.number,
+            models.iter().map(|m| m.name()).collect::<Vec<_>>().join(", ")
+        ));
+
+        // Load the pr-review.md prompt with PR variable substitution.
+        let review_prompt = self.load_and_render_prompt(
+            "pr-review",
+            &[
+                ("pr_title", &pr.title),
+                ("pr_number", &pr.number.to_string()),
+                ("pr_author", &pr.author.login),
+                ("pr_head_ref", &pr.head_ref_name),
+                ("pr_base_ref", &pr.base_ref_name),
+                ("pr_body", pr.body.as_deref().unwrap_or("")),
+            ],
+        );
+
+        let parsed_task = ParsedTask::new(review_prompt.clone());
+        let log_label = format!("pr-{}-multi", pr.number);
+        let wf_log = WorkflowLog::with_tui_sender_and_label(
+            &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+            &self.config.name,
+            &run_id,
+            Some(&log_label),
+            self.opts.tui_tx.clone(),
+        ).await.ok();
+        let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+        ctx.reviewing_pr = Some(pr.clone());
+
+        self.opts.tui_tx.send(TuiEvent::RunStarted {
+            workflow_name: self.config.name.clone(),
+            run_id: run_id.clone(),
+            mode: WorkflowMode::PrReview,
+            item_label: Some(format!("PR #{} (multi-model)", pr.number)),
+        });
+
+        let result = async {
+            // ── Workspace setup & PR checkout ────────────────────────────
+            if !self.opts.no_workspace {
+                let ws = WorkspaceManager::new(
+                    self.config.workspace.clone().unwrap_or_default(),
+                    logger.clone(),
+                    self.opts.target_repo.clone(),
+                    self.opts.git_method.as_deref().unwrap_or("https"),
+                );
+                let info = ws.setup_for_pr_review(pr, &run_id).await?;
+                ctx.workspace_dir = info.dir;
+                ctx.branch = info.branch;
+            }
+            self.run_stage(&PrCheckoutStage, &mut ctx).await?;
+
+            // ── Load workspace conventions for non-Claude models ─────────
+            let conventions = load_workspace_conventions(&ctx.workspace_dir).await;
+            let system_prompt = ctx.system_prompt.clone().unwrap_or_default();
+
+            let ext_cfg = self.config.agent_loop.external_agent.clone().unwrap_or_default();
+            let workspace_cwd = ctx.workspace_dir.to_string_lossy().to_string();
+
+            // ── Build per-model adapters and options ──────────────────────
+            struct ModelRun {
+                model: ReviewerModel,
+                adapter: crate::workflows::stages::external_agent_loop::ExternalAgentAdapter,
+                opts: ExternalAgentRunOptions,
+                system_prompt: Option<String>,
+            }
+
+            let mut runs: Vec<ModelRun> = Vec::new();
+            for &model in models {
+                let adapter = match model {
+                    ReviewerModel::Claude => claude_adapter(ExternalAgentRunOptions::default()),
+                    ReviewerModel::Codex => codex_adapter(ExternalAgentRunOptions::default()),
+                    ReviewerModel::Gemini => gemini_adapter(ExternalAgentRunOptions::default()),
+                };
+
+                let opts = ExternalAgentRunOptions {
+                    cwd: Some(workspace_cwd.clone()),
+                    timeout_secs: ext_cfg.timeout_secs,
+                    model: None,
+                    extra_flags: Some(disallowed_tools_for(model)),
+                };
+
+                // Claude reads CLAUDE.md natively; non-Claude models need
+                // the workspace conventions prepended to the system prompt.
+                let model_system_prompt = if model == ReviewerModel::Claude {
+                    if system_prompt.is_empty() { None } else { Some(system_prompt.clone()) }
+                } else {
+                    let combined = format!("{}{}", conventions, system_prompt);
+                    if combined.is_empty() { None } else { Some(combined) }
+                };
+
+                // Emit stage-started event.
+                self.opts.tui_tx.send(TuiEvent::StageStarted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    stage_name: format!("review-{}", model.name()),
+                });
+
+                runs.push(ModelRun { model, adapter, opts, system_prompt: model_system_prompt });
+            }
+
+            // ── Run all model agents concurrently ────────────────────────
+            // Each future borrows `&ctx` (immutable) and its own `ModelRun`.
+            // `futures::future::join_all` runs on the same task — no `Send`
+            // bound is needed.
+            let review_futures: Vec<_> = runs.iter().map(|run| {
+                async {
+                    let result = run_external_agent_loop(
+                        &review_prompt,
+                        &ctx,
+                        &run.adapter,
+                        &run.opts,
+                        run.system_prompt.as_deref(),
+                    ).await;
+                    (run.model, result)
+                }
+            }).collect();
+
+            let model_results = futures::future::join_all(review_futures).await;
+
+            // Emit completion events and collect successful reviews.
+            let mut reviews: Vec<(ReviewerModel, String)> = Vec::new();
+            for (model, result) in &model_results {
+                match result {
+                    Ok(run_result) => {
+                        self.opts.tui_tx.send(TuiEvent::StageCompleted {
+                            workflow_name: self.config.name.clone(),
+                            run_id: run_id.clone(),
+                            stage_name: format!("review-{}", model.name()),
+                        });
+                        if run_result.success {
+                            reviews.push((*model, run_result.answer.clone()));
+                        } else {
+                            logger.error(&format!(
+                                "{} review returned failure: {}",
+                                model.name(),
+                                run_result.error.as_deref().unwrap_or("unknown")
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        self.opts.tui_tx.send(TuiEvent::StageFailed {
+                            workflow_name: self.config.name.clone(),
+                            run_id: run_id.clone(),
+                            stage_name: format!("review-{}", model.name()),
+                            error: e.to_string(),
+                        });
+                        logger.error(&format!("{} review failed: {}", model.name(), e));
+                    }
+                }
+            }
+
+            if reviews.is_empty() {
+                return Err(anyhow::anyhow!("All review models failed"));
+            }
+
+            // ── Consolidate reviews ──────────────────────────────────────
+            let consolidated = if reviews.len() >= 2 {
+                let consolidation_prompt = self.load_and_render_prompt(
+                    "review-consolidation",
+                    &[
+                        ("review_count", &reviews.len().to_string()),
+                        ("pr_title", &pr.title),
+                        ("pr_number", &pr.number.to_string()),
+                        ("reviews", &format_reviews_for_consolidation(&reviews)),
+                        ("model_names", &reviews.iter().map(|(m, _)| m.name()).collect::<Vec<_>>().join(", ")),
+                    ],
+                );
+
+                self.opts.tui_tx.send(TuiEvent::StageStarted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    stage_name: "review-consolidation".to_string(),
+                });
+
+                // Try Anthropic API first; fall back to Claude CLI.
+                let consolidation_result = if std::env::var("ANTHROPIC_API_KEY").map(|k| !k.is_empty()).unwrap_or(false) {
+                    let provider = crate::providers::anthropic::AnthropicProvider::new("claude-sonnet-4-20250514");
+                    use crate::providers::provider::{LLMProvider as _, Message as LLMMessage, MessageRole as LLMRole};
+                    match provider.complete(
+                        &[LLMMessage { role: LLMRole::User, content: consolidation_prompt.clone() }],
+                        None,
+                    ).await {
+                        Ok(result) => Ok(result.content),
+                        Err(e) => {
+                            logger.error(&format!("Consolidation via API failed: {}", e));
+                            Err(e)
+                        }
+                    }
+                } else {
+                    Err(anyhow::anyhow!("ANTHROPIC_API_KEY not set"))
+                };
+
+                let consolidated_text = match consolidation_result {
+                    Ok(text) => text,
+                    Err(_) => {
+                        // Fallback: use Claude CLI for consolidation.
+                        let adapter = claude_adapter(ExternalAgentRunOptions::default());
+                        let opts = ExternalAgentRunOptions {
+                            cwd: Some(ctx.workspace_dir.to_string_lossy().to_string()),
+                            timeout_secs: Some(120),
+                            model: None,
+                            extra_flags: Some(disallowed_tools_for(ReviewerModel::Claude)),
+                        };
+                        match run_external_agent_loop(&consolidation_prompt, &ctx, &adapter, &opts, None).await {
+                            Ok(result) if result.success => result.answer,
+                            Ok(result) => {
+                                logger.error(&format!(
+                                    "Consolidation via CLI returned failure: {}",
+                                    result.error.as_deref().unwrap_or("unknown")
+                                ));
+                                format_reviews_for_consolidation(&reviews)
+                            }
+                            Err(e) => {
+                                logger.error(&format!("Consolidation via CLI failed: {}", e));
+                                format_reviews_for_consolidation(&reviews)
+                            }
+                        }
+                    }
+                };
+
+                self.opts.tui_tx.send(TuiEvent::StageCompleted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    stage_name: "review-consolidation".to_string(),
+                });
+
+                consolidated_text
+            } else {
+                // Only one model succeeded — use its review directly.
+                reviews[0].1.clone()
+            };
+
+            // ── Set agent result and post the review ─────────────────────
+            ctx.agent_result = Some(RunResult::success(
+                "multi-model-review",
+                consolidated,
+                vec![],
+                models.len(),
+                0,
+            ));
+
             self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
             Ok::<_, anyhow::Error>(())
         }

@@ -1,6 +1,7 @@
 pub mod github_issues;
 pub mod github_prs;
 pub mod linear_issues;
+pub mod multi_review;
 pub mod stores;
 pub mod workspace;
 pub mod workflow;

@@ -242,6 +242,11 @@ fn abbreviate_stage(name: &str) -> String {
         "plan-generation" => "plan".into(),
         "plan-approval" => "approval".into(),
         "pr-update" => "pr-update".into(),
+        "review-claude" => "rev:claude".into(),
+        "review-codex" => "rev:codex".into(),
+        "review-gemini" => "rev:gemini".into(),
+        "consolidate" => "consolidate".into(),
+        "post-review" => "post".into(),
         other => {
             if other.len() > 16 {
                 crate::utils::truncate::safe_truncate(other, 16)
