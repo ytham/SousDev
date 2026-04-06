@@ -1540,11 +1540,17 @@ impl WorkflowExecutor {
             exec_git(&["push", "origin", branch], &info.dir).await?;
 
             // Generate new PR title/body.
-            self.run_stage(&PrDescriptionStage, &mut ctx).await?;
+            logger.info("Generating PR title/body via PrDescriptionStage");
+            if let Err(e) = self.run_stage(&PrDescriptionStage, &mut ctx).await {
+                logger.error(&format!("PrDescriptionStage failed: {}", e));
+                // Continue anyway — we'll use the issue title as fallback.
+            }
 
             // Update the existing PR title and body.
             let new_title =
                 ctx.pr_title.as_deref().unwrap_or(&record.issue_title);
+            logger.info(&format!("Updating PR #{} title to: {}", pr_number, new_title));
+
             let mut edit_args = vec![
                 "pr".to_string(),
                 "edit".to_string(),
@@ -1557,8 +1563,11 @@ impl WorkflowExecutor {
                 std::fs::write(body_file.path(), body)?;
                 edit_args.push("--body-file".to_string());
                 edit_args.push(body_file.path().to_string_lossy().to_string());
+                logger.info(&format!("PR body: {} chars", body.len()));
+            } else {
+                logger.info("No PR body generated — only updating title");
             }
-            // Add --repo if configured.
+            // Add --repo flag.
             if let Some(repo_id) =
                 crate::workflows::github_issues::repo_to_gh_identifier(
                     self.opts.target_repo.as_deref(),
@@ -1568,13 +1577,34 @@ impl WorkflowExecutor {
                 edit_args.push(repo_id);
             }
 
+            logger.info(&format!("Running: gh {}", edit_args.join(" ")));
             let output = tokio::process::Command::new("gh")
                 .args(&edit_args)
+                .current_dir(&info.dir)
                 .output()
                 .await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                logger.error(&format!("Failed to update PR: {}", stderr));
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                logger.error(&format!(
+                    "Failed to update PR #{}: stderr={}, stdout={}",
+                    pr_number,
+                    stderr.trim(),
+                    stdout.trim()
+                ));
+                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                    workflow_name: self.config.name.clone(),
+                    level: "error".to_string(),
+                    stage: "pr-update".to_string(),
+                    message: format!(
+                        "Failed to update PR #{} title/body: {}",
+                        pr_number,
+                        stderr.trim()
+                    ),
+                    run_id: run_id.clone(),
+                });
+            } else {
+                logger.info(&format!("PR #{} title/body updated successfully", pr_number));
             }
 
             self.opts.tui_tx.send(TuiEvent::StageCompleted {
