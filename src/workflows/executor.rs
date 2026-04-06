@@ -2587,6 +2587,40 @@ impl WorkflowExecutor {
             ));
 
             self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
+
+            // Log per-model verdicts and consolidated verdict for the TUI.
+            for (name, review_text) in &reviews {
+                let v = crate::workflows::stages::pr_review_poster::parse_verdict_from_text(review_text);
+                let emoji = if v == "approved" { "✅" } else { "🔴" };
+                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                    workflow_name: self.config.name.clone(),
+                    level: "info".to_string(),
+                    stage: "verdict".to_string(),
+                    message: format!("{} {} {}", emoji, name, if v == "approved" { "Approved" } else { "Not Approved" }),
+                    run_id: run_id.clone(),
+                });
+            }
+            for (name, _err) in &failed_models {
+                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                    workflow_name: self.config.name.clone(),
+                    level: "error".to_string(),
+                    stage: "verdict".to_string(),
+                    message: format!("🔴 {} Failed", name),
+                    run_id: run_id.clone(),
+                });
+            }
+            let final_verdict = ctx.pr_review_result.as_ref()
+                .map(|r| r.verdict.as_str())
+                .unwrap_or("unknown");
+            let final_emoji = if final_verdict == "approved" { "✅" } else { "🔴" };
+            self.opts.tui_tx.send(TuiEvent::LogMessage {
+                workflow_name: self.config.name.clone(),
+                level: "info".to_string(),
+                stage: "verdict".to_string(),
+                message: format!("{} Consolidated: {}", final_emoji, if final_verdict == "approved" { "Approved" } else { "Not Approved" }),
+                run_id: run_id.clone(),
+            });
+
             Ok::<_, anyhow::Error>(())
         }
         .await;

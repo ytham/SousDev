@@ -228,6 +228,11 @@ impl Stage for PrReviewPosterStage {
 ///
 /// Looks for a line matching `Verdict: Approved` or `Verdict: Not Approved`
 /// (case-insensitive).  Returns `"approved"`, `"not_approved"`, or `"unknown"`.
+/// Parse the verdict from review text. Public alias for use by the executor.
+pub fn parse_verdict_from_text(text: &str) -> String {
+    parse_verdict(text)
+}
+
 fn parse_verdict(text: &str) -> String {
     for line in text.lines().rev() {
         let trimmed = line.trim().to_lowercase();

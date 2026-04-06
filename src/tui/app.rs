@@ -455,6 +455,16 @@ impl App {
                     for s in &mut wf.stage_statuses {
                         *s = StageStatus::Pending;
                     }
+                    // Insert a blank separator line before each new run for readability.
+                    if !wf.logs.is_empty() {
+                        wf.logs.push(LogLine {
+                            level: String::new(),
+                            stage: String::new(),
+                            message: String::new(),
+                            run_id: None,
+                            item_label: None,
+                        });
+                    }
                     let label = item_label
                         .map(|l| format!("Run started: {}", l))
                         .unwrap_or_else(|| "Run started".to_string());
