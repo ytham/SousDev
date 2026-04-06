@@ -7,6 +7,7 @@
 //! The agent has access to a read-only tool set: `readFile` and a
 //! restricted `reviewShell` that only allows allowlisted commands.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -192,7 +193,10 @@ fn is_allowed_command(command: &str) -> bool {
 }
 
 /// A shell executor that only permits allowlisted read-only commands.
-struct ReviewShellExecutor;
+/// All commands run with `current_dir` set to the workspace directory.
+struct ReviewShellExecutor {
+    workspace_dir: std::path::PathBuf,
+}
 
 #[async_trait]
 impl ToolExecutor for ReviewShellExecutor {
@@ -210,6 +214,7 @@ impl ToolExecutor for ReviewShellExecutor {
         let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
+            .current_dir(&self.workspace_dir)
             .output()
             .await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -222,11 +227,38 @@ impl ToolExecutor for ReviewShellExecutor {
     }
 }
 
-/// Create a read-only shell tool that only permits allowlisted commands.
-fn review_shell_tool() -> Tool {
+/// A file reader that resolves relative paths against the workspace directory.
+struct WorkspaceFileReader {
+    workspace_dir: std::path::PathBuf,
+}
+
+#[async_trait]
+impl ToolExecutor for WorkspaceFileReader {
+    async fn execute(&self, args: &serde_json::Value) -> Result<String> {
+        let path = args
+            .get("path")
+            .or_else(|| args.get("file_path"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("readFile: missing 'path' argument"))?;
+
+        let full_path = if std::path::Path::new(path).is_absolute() {
+            std::path::PathBuf::from(path)
+        } else {
+            self.workspace_dir.join(path)
+        };
+
+        match tokio::fs::read_to_string(&full_path).await {
+            Ok(content) => Ok(content),
+            Err(e) => Ok(format!("Error reading {}: {}", full_path.display(), e)),
+        }
+    }
+}
+
+/// Create a read-only shell tool rooted at the given workspace directory.
+fn review_shell_tool(workspace_dir: &Path) -> Tool {
     Tool::new(
         "shell",
-        "Run a read-only shell command. Allowed: gh pr diff/view/checks, git diff/log/show, cat, grep, find, head, tail, wc, sed, ls, tree",
+        "Run a read-only shell command in the PR workspace. Allowed: gh pr diff/view/checks, git diff/log/show, cat, grep, find, head, tail, wc, sed, ls, tree",
         json!({
             "type": "object",
             "properties": {
@@ -234,18 +266,38 @@ fn review_shell_tool() -> Tool {
             },
             "required": ["command"]
         }),
-        Arc::new(ReviewShellExecutor),
+        Arc::new(ReviewShellExecutor {
+            workspace_dir: workspace_dir.to_path_buf(),
+        }),
+    )
+}
+
+/// Create a file reader tool rooted at the given workspace directory.
+fn workspace_read_file_tool(workspace_dir: &Path) -> Tool {
+    Tool::new(
+        "readFile",
+        "Read the contents of a file in the PR workspace",
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to read (relative to workspace root)"}
+            },
+            "required": ["path"]
+        }),
+        Arc::new(WorkspaceFileReader {
+            workspace_dir: workspace_dir.to_path_buf(),
+        }),
     )
 }
 
 /// Build a [`ToolRegistry`] with only read-only tools for PR review.
 ///
-/// Includes `readFile` (standard) and a restricted `shell` that only
-/// allows allowlisted commands.
-pub fn review_tool_registry() -> ToolRegistry {
+/// All tools operate within the given workspace directory (the checked-out
+/// PR branch of the target repository).
+pub fn review_tool_registry(workspace_dir: &Path) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
-    registry.register(crate::tools::built_ins::read_file_tool());
-    registry.register(review_shell_tool());
+    registry.register(workspace_read_file_tool(workspace_dir));
+    registry.register(review_shell_tool(workspace_dir));
     registry
 }
 
@@ -323,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_review_tool_registry_has_expected_tools() {
-        let registry = review_tool_registry();
+        let registry = review_tool_registry(std::path::Path::new("/tmp"));
         assert!(registry.get("readFile").is_some());
         assert!(registry.get("shell").is_some());
         assert!(registry.get("writeFile").is_none()); // no write tool!
@@ -331,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_review_tool_definitions() {
-        let registry = review_tool_registry();
+        let registry = review_tool_registry(std::path::Path::new("/tmp"));
         let defs = registry.to_tool_definitions();
         assert_eq!(defs.len(), 2);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();

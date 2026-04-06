@@ -1994,7 +1994,7 @@ impl WorkflowExecutor {
                         ctx.system_prompt.as_deref().unwrap_or("")
                     ))
                 };
-                let review_registry = crate::workflows::stages::api_review_loop::review_tool_registry();
+                let review_registry = crate::workflows::stages::api_review_loop::review_tool_registry(&ctx.workspace_dir);
                 let review_text = crate::workflows::stages::api_review_loop::run_api_review_loop(
                     provider.as_ref(),
                     &review_registry,
@@ -2145,7 +2145,7 @@ impl WorkflowExecutor {
             // ── Build per-model execution plans ──────────────────────────
             // For each model, prefer the API-based review loop (faster, no CLI
             // dependency) if an API key is available.  Fall back to CLI otherwise.
-            let review_registry = crate::workflows::stages::api_review_loop::review_tool_registry();
+            let review_registry = crate::workflows::stages::api_review_loop::review_tool_registry(&ctx.workspace_dir);
 
             enum ReviewMethod {
                 Api(std::sync::Arc<dyn crate::providers::provider::LLMProvider>),
