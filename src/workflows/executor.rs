@@ -2243,6 +2243,14 @@ impl WorkflowExecutor {
             }
 
             // ── Run all model agents concurrently ────────────────────────
+            // Mark the "agent-loop" sidebar stage as in-progress for the
+            // duration of all parallel model reviews.
+            self.opts.tui_tx.send(TuiEvent::StageStarted {
+                workflow_name: self.config.name.clone(),
+                run_id: run_id.clone(),
+                stage_name: "agent-loop".to_string(),
+            });
+
             // Each future borrows `&ctx` and `&review_registry` (immutable).
             // `futures::future::join_all` runs on the same task — no `Send`
             // bound is needed.
@@ -2300,9 +2308,21 @@ impl WorkflowExecutor {
                 }
             }
 
+            // Mark "agent-loop" as done (or failed if all models failed).
             if reviews.is_empty() {
+                self.opts.tui_tx.send(TuiEvent::StageFailed {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    stage_name: "agent-loop".to_string(),
+                    error: "All review models failed".to_string(),
+                });
                 return Err(anyhow::anyhow!("All review models failed"));
             }
+            self.opts.tui_tx.send(TuiEvent::StageCompleted {
+                workflow_name: self.config.name.clone(),
+                run_id: run_id.clone(),
+                stage_name: "agent-loop".to_string(),
+            });
 
             // ── Consolidate reviews ──────────────────────────────────────
             let consolidated = if reviews.len() >= 2 {
