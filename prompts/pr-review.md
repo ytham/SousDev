@@ -75,6 +75,26 @@ The `Verdict:` line MUST be the last line before `END_SUMMARY`. Use exactly one 
 - `Verdict: ✅ Approved` — the code is correct and ready to merge (minor suggestions are OK)
 - `Verdict: 🔴 Not Approved` — there are bugs, missing tests, or issues that must be fixed
 
+## Verdict calibration
+
+Use `🔴 Not Approved` ONLY for issues that would cause **real harm** if merged:
+- **Bugs**: Logic errors, data corruption, crashes, security vulnerabilities
+- **Missing critical tests**: A new feature with zero test coverage
+- **Breaking changes**: Undocumented API changes, removed public interfaces
+
+Use `✅ Approved` (with comments noting the issues) for everything else:
+- Missing or inaccurate doc comments
+- Style inconsistencies
+- Unused variables or imports
+- Missing edge-case handling that is low-risk
+- Suggestions for better patterns or naming
+- TODO items or follow-up work
+- Minor test gaps (some tests exist but could be more thorough)
+
+When in doubt, **approve with comments**. A PR that improves the codebase
+should not be blocked by minor issues that can be addressed in follow-up.
+Your inline comments will be visible to the author regardless of the verdict.
+
 ## Review guidelines
 
 - Be constructive and specific — reference exact code, not vague descriptions
