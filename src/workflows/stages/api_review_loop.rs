@@ -82,7 +82,7 @@ pub async fn run_api_review_loop(
             ..Default::default()
         };
 
-        let result = provider.complete(&messages, Some(&options)).await?;
+        let result = complete_with_retry(provider, &messages, &options, 3, logger).await?;
 
         match result.stop_reason {
             Some(StopReason::ToolUse) => {
@@ -214,7 +214,7 @@ pub async fn run_api_review_loop(
                 ..Default::default()
             };
 
-            let result = provider.complete(&messages, Some(&options)).await?;
+        let result = complete_with_retry(provider, &messages, &options, 3, logger).await?;
 
             match result.stop_reason {
                 Some(StopReason::ToolUse) => {
@@ -278,6 +278,52 @@ pub async fn run_api_review_loop(
     }
 
     Ok(final_review)
+}
+
+/// Call `provider.complete()` with retry for transient errors.
+///
+/// Retries on network errors, 429 rate limits, and 5xx server errors.
+/// Uses exponential backoff (2s, 4s, 8s).
+async fn complete_with_retry(
+    provider: &dyn LLMProvider,
+    messages: &[Message],
+    options: &CompleteOptions,
+    max_retries: u32,
+    logger: &Logger,
+) -> Result<CompletionResult> {
+    let mut last_error = None;
+    for attempt in 0..=max_retries {
+        match provider.complete(messages, Some(options)).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let err_str = e.to_string();
+                let is_retryable = err_str.contains("error sending request")
+                    || err_str.contains("connection")
+                    || err_str.contains("timeout")
+                    || err_str.contains("429")
+                    || err_str.contains("500 ")
+                    || err_str.contains("502 ")
+                    || err_str.contains("503 ")
+                    || err_str.contains("overloaded");
+
+                if is_retryable && attempt < max_retries {
+                    let delay = 2u64.pow(attempt + 1);
+                    logger.info(&format!(
+                        "API call failed (attempt {}/{}), retrying in {}s: {}",
+                        attempt + 1,
+                        max_retries + 1,
+                        delay,
+                        if err_str.len() > 100 { &err_str[..100] } else { &err_str }
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    last_error = Some(e);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("max retries exceeded")))
 }
 
 /// Check if a review seems incomplete based on known "gave up" phrases.
