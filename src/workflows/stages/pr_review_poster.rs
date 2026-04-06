@@ -167,8 +167,20 @@ impl Stage for PrReviewPosterStage {
             }
         });
 
+        let show_branding = ctx
+            .config
+            .pull_request
+            .as_ref()
+            .and_then(|pr| pr.show_branding)
+            .unwrap_or(true);
+
         if let Some(ref text) = summary_text {
-            body_parts.push(format!("## 🧑‍🍳 PR Review\n\n{}", text));
+            let header = if show_branding {
+                "## 🧑‍🍳 PR Review"
+            } else {
+                "## PR Review"
+            };
+            body_parts.push(format!("{}\n\n{}", header, text));
         }
 
         // Inline observations: include a summary in the timeline comment AND
@@ -185,7 +197,11 @@ impl Stage for PrReviewPosterStage {
 
             // Post each inline comment as an actual PR review comment on the diff.
             for comment in &inline_comments {
-                let inline_body = format!("🧑‍🍳 {}", comment.body);
+                let inline_body = if show_branding {
+                    format!("🧑‍🍳 {}", comment.body)
+                } else {
+                    comment.body.clone()
+                };
                 match crate::workflows::github_prs::post_inline_comment(
                     &pr.repo,
                     pr.number,
