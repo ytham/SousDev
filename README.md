@@ -15,6 +15,8 @@ Run bare `sousdev` to launch the interactive TUI dashboard. All workflows, logs,
 - Rust 1.74+ (stable)
 - `git` and [`gh` CLI](https://cli.github.com/) authenticated (`gh auth login`)
 - `claude` CLI installed (`npm install -g @anthropic-ai/claude-code`)
+- Optional: `codex` CLI (for `codex-loop` technique, requires `OPENAI_API_KEY`)
+- Optional: `gemini` CLI (for `gemini-loop` technique, requires `GEMINI_API_KEY`)
 
 ### Setup
 
@@ -53,6 +55,7 @@ sousdev start                             # start headless cron daemon
 | Mode | Config field | What it does |
 |---|---|---|
 | **Issue autofix** | `github_issues` or `linear_issues` | Fetches assigned issues, fixes them autonomously, opens PRs |
+| **Plan-first autofix** | `github_issues` + `plan_first = true` | Creates a plan PR for human review before writing code (default) |
 | **PR reviewer** | `github_prs` | Reviews PRs where your review is requested, posts inline comments |
 | **PR responder** | `github_pr_responses` | Addresses reviewer comments on your open PRs, pushes fixes |
 | **Shell trigger** | `trigger` + `parser` | Runs any shell command and acts on its output |
@@ -72,17 +75,38 @@ cron tick
       → PullRequestStage (commit, push, rebase CI fixes, gh pr create)
 ```
 
+### Plan-first autofix flow (default: `plan_first = true`)
+
+```
+cron tick
+  → fetch issues → skip handled
+  → for each unhandled issue:
+      State: (none) → plan_posted
+        → Agent generates implementation plan
+        → Opens plan PR for human review
+        → [Pl] PlanPending badge in TUI
+      State: plan_posted → plan_approved (60s background polling)
+        → Human approves plan PR on GitHub
+      State: plan_approved → code_complete
+        → Agent executes the approved plan
+        → Opens implementation PR (or pushes to plan branch)
+```
+
 ### PR reviewer flow
 
 ```
 cron tick
   → fetch PRs where review requested + verify reviewer match
-  → skip already-reviewed (unless new commits or @me ping)
+  → skip already-reviewed (unless new commits or new human comment)
   → for each unreviewed PR:
       fetch PR branch → checkout
-      → AgentLoopStage (Claude reads diff, produces review)
-      → PrReviewPosterStage (post inline comments + summary)
+      → AgentLoopStage / ApiReviewLoopStage (reads diff, produces review)
+      → PrReviewPosterStage (post inline comments + summary with verdict)
 ```
+
+**Multi-model review:** When 2+ models are configured in `[[models]]`, runs parallel reviews from each model and consolidates results. Each model outputs a verdict (`✅ Approved` or `🔴 Not Approved`), and the consolidated review includes a per-model verdict table.
+
+**API-based review:** When API keys are available (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), uses native tool-use APIs instead of CLI binaries. Read-only tool set with allowlisted shell commands. Falls back to CLI when no API key.
 
 ### PR responder flow
 
@@ -112,12 +136,12 @@ cp .env.example .env
 
 | Variable | When needed | Used by |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Only for harness-native techniques (react, reflexion, etc.) | Direct Anthropic API calls |
-| `OPENAI_API_KEY` | Only if `provider = "openai"` | OpenAI provider |
+| `ANTHROPIC_API_KEY` | Harness-native techniques + API-based PR review + multi-model review | Direct Anthropic API calls |
+| `OPENAI_API_KEY` | OpenAI models + API-based PR review + multi-model review | OpenAI provider |
 | `LINEAR_API_KEY` | Only for Linear issue source | `linear_issues` workflow trigger |
 | `GITHUB_TOKEN` | Usually not needed (`gh` CLI handles auth) | Override for `gh` auth |
 
-Most users running the default `claude-loop` workflow **don't need any API keys** — only `gh auth login` and `claude` CLI auth.
+Most users running the default `claude-loop` workflow **don't need any API keys** — only `gh auth login` and `claude` CLI auth. Setting API keys unlocks API-based review (native tool-use) and multi-model review (parallel reviews from 2+ models).
 
 ---
 
@@ -194,10 +218,17 @@ SousDev looks for `config.toml` by walking up from the current directory.
 
 ```toml
 # 🧑‍🍳 SousDev configuration
-provider = "anthropic"
-model = "claude-opus-4-6"
 target_repo = "your-org/your-repo"
 git_method = "ssh"
+
+# Model configuration — first entry is primary, additional entries enable multi-model review
+[[models]]
+provider = "anthropic"
+model = "claude-opus-4-6"
+
+[[models]]
+provider = "openai"
+model = "gpt-5.4"
 
 # System prompt injected into every agent invocation
 # system_prompt = "prompts/system.md"   # default
@@ -210,6 +241,7 @@ pretty = true       # structured log rendering in TUI (default true)
 [[workflows]]
 name = "issue-autofix"
 schedule = "0 0 * * * *"    # every hour
+# plan_first = true          # default: create plan PR for human review before coding
 
 [workflows.github_issues]
 assignees = ["@me"]
@@ -322,11 +354,13 @@ sousdev run multi-agent-debate --task "Is Pluto a planet?" --num-agents 3
 
 ## LLM Providers
 
-| Provider | Config value | Required env var |
-|---|---|---|
-| Anthropic Claude | `"anthropic"` | `ANTHROPIC_API_KEY` |
-| OpenAI | `"openai"` | `OPENAI_API_KEY` |
-| Ollama (local) | `"ollama"` | `OLLAMA_BASE_URL` (default: `http://localhost:11434`) |
+Configured via `[[models]]` array in `config.toml`. First entry is the primary model; additional entries enable multi-model PR review.
+
+| Provider | `[[models]]` provider value | Required env var | Tool-use support |
+|---|---|---|---|
+| Anthropic Claude | `"anthropic"` | `ANTHROPIC_API_KEY` | Yes (native) |
+| OpenAI | `"openai"` | `OPENAI_API_KEY` | Yes (function calling) |
+| Ollama (local) | `"ollama"` | `OLLAMA_BASE_URL` (default: `http://localhost:11434`) | No |
 
 ---
 
@@ -362,7 +396,13 @@ sousdev/
 │   ├── bug-fix.md
 │   ├── code-review.md
 │   ├── pr-description.md
+│   ├── pr-review.md         ← PR review (CRITICAL CONSTRAINTS, verdict requirement)
+│   ├── pr-comment-response.md
 │   ├── reflect.md           ← reflexion prompt for retry reasoning
+│   ├── plan-generation.md   ← plan-first: generate implementation plan
+│   ├── plan-pr-body.md      ← plan-first: PR body for plan review
+│   ├── plan-execution.md    ← plan-first: execute approved plan
+│   ├── review-consolidation.md ← multi-model: consolidate parallel reviews
 │   └── ...
 └── src/
     ├── main.rs              ← CLI entry point (clap)
@@ -378,15 +418,16 @@ sousdev/
     │   ├── ui.rs            ← layout + toast rendering
     │   └── widgets/         ← sidebar, log_view, info_panel, command_menu
     ├── workflows/
-    │   ├── executor.rs      ← WorkflowExecutor (all 4 modes)
+    │   ├── executor.rs      ← WorkflowExecutor (all 5 modes)
     │   ├── github_issues.rs ← gh issue list/comment/close
     │   ├── github_prs.rs    ← gh pr list/comment/reply
     │   ├── linear_issues.rs ← Linear GraphQL API
-    │   ├── stores.rs        ← RunStore + dedup + failure cooldown
+    │   ├── stores.rs        ← RunStore + dedup + failure cooldown + plan_state
+    │   ├── multi_review.rs  ← multi-model PR review: detection, consolidation
     │   ├── workspace.rs     ← clone, checkout, reset, teardown
     │   ├── workflow_log.rs  ← per-run structured logs
     │   ├── cron_runner.rs   ← tokio-cron-scheduler + live rescheduling
-    │   └── stages/          ← workflow stages
+    │   └── stages/          ← 12 workflow stages (including api_review_loop)
     └── techniques/          ← 8 standalone reasoning algorithms
 ```
 
@@ -395,7 +436,7 @@ sousdev/
 ## Development
 
 ```bash
-cargo test            # 470+ tests, all mocked (no API keys needed)
+cargo test            # 608+ tests, all mocked (no API keys needed)
 cargo build           # debug build
 cargo build --release # optimized build
 cargo clippy          # lint (must pass with zero warnings)

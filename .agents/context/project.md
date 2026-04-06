@@ -1,7 +1,7 @@
 # 🧑‍🍳 SousDev — Project Context
 
 This document describes the current state of SousDev for agent context.
-Last updated after ~200+ changes in the initial build session.
+Last updated after plan-first workflow, multi-model review, and API-based review additions.
 
 ---
 
@@ -13,7 +13,7 @@ on a cron schedule. It watches GitHub (and optionally Linear) repos for activity
 that edit code, run tests, open PRs, and post review comments.
 
 **Binary:** `sousdev`
-**Config:** `config.toml` (auto-discovered by walking up from CWD)
+**Config:** `config.toml` (auto-discovered by walking up from CWD). Uses `[[models]]` array (first entry is primary; additional entries enable multi-model review). Legacy `provider`/`model` fields replaced.
 **Env vars:** `.env` file loaded automatically via `dotenvy`
 **Session state:** `.session.toml` (gitignored, persists enabled/disabled workflows)
 **Branding:** 🧑‍🍳 SousDev — "Prep, review, and plate your PRs automatically."
@@ -32,6 +32,8 @@ that edit code, run tests, open PRs, and post review comments.
 
 The default `claude-loop` workflow requires NO API keys — only `gh auth login` and `claude` CLI auth.
 
+When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, the corresponding provider enables **API-based PR review** (native tool-use) and **multi-model review** (parallel reviews from 2+ models).
+
 ---
 
 ## Project layout
@@ -48,9 +50,13 @@ sousdev/
 │   ├── code-review.md               reviewer prompt
 │   ├── review-feedback.md           critique fed back to agent on rejection
 │   ├── pr-description.md            PR title + body generation
-│   ├── pr-review.md                 PR review (IMPORTANT CONSTRAINTS at top)
-│   ├── pr-comment-response.md       PR comment response
+│   ├── pr-review.md                 PR review (CRITICAL CONSTRAINTS at top, explicit verdict requirement)
+│   ├── pr-comment-response.md       PR comment response ("look around" for sibling code)
 │   ├── reflect.md                   reflexion prompt for retry reasoning
+│   ├── plan-generation.md           Plan-first: generate implementation plan from issue
+│   ├── plan-pr-body.md              Plan-first: PR body for plan review
+│   ├── plan-execution.md            Plan-first: execute approved plan
+│   ├── review-consolidation.md      Multi-model: consolidate parallel reviews
 │   └── ...
 ├── output/                          state files + logs (gitignored)
 │   ├── runs.json
@@ -63,7 +69,7 @@ sousdev/
     ├── main.rs                      CLI entry point (clap)
     ├── lib.rs                       library root
     ├── types/
-    │   ├── config.rs                HarnessConfig, WorkflowConfig, all sub-configs
+    │   ├── config.rs                HarnessConfig, WorkflowConfig, ModelConfig, all sub-configs
     │   └── technique.rs             RunResult, TrajectoryStep, StepType (PartialEq, Eq)
     ├── utils/
     │   ├── logger.rs                Logger (wraps tracing with prefix)
@@ -71,9 +77,10 @@ sousdev/
     │   ├── config_loader.rs         Walk-up config.toml discovery
     │   └── truncate.rs              safe_truncate() — UTF-8 safe string truncation
     ├── providers/
-    │   ├── provider.rs              LLMProvider trait, NoopProvider, Message, CompletionResult
-    │   ├── anthropic.rs             Anthropic Messages API
-    │   ├── openai.rs                OpenAI Chat Completions API
+    │   ├── provider.rs              LLMProvider trait, NoopProvider, Message, CompletionResult,
+    │   │                            ContentBlock, ToolDefinition, ToolChoice, StopReason, TokenUsage
+    │   ├── anthropic.rs             Anthropic Messages API (full tool-use support)
+    │   ├── openai.rs                OpenAI Chat Completions API (full tool-use / function calling)
     │   └── ollama.rs                Ollama local API
     ├── tools/
     │   ├── registry.rs              ToolRegistry, Tool, ToolExecutor trait
@@ -93,14 +100,16 @@ sousdev/
     ├── workflows/
     │   ├── workflow.rs              ParsedTask, make_skipped_result
     │   ├── stage.rs                 Stage trait, StageContext, ResolvedPrompts
-    │   ├── executor.rs              WorkflowExecutor — 4 modes + refresh_info_only
+    │   ├── executor.rs              WorkflowExecutor — 5 modes + refresh_info_only
     │   ├── cron_runner.rs           tokio-cron-scheduler + live rescheduling + info refresh
     │   ├── workspace.rs             WorkspaceManager (clone, checkout, reset, teardown)
     │   ├── github_issues.rs         fetch issues (OR-logic labels), comment, close
     │   ├── github_prs.rs            fetch PRs (3 searches), reviews, inline comments
     │   ├── linear_issues.rs         Linear GraphQL API issue fetching
     │   ├── stores.rs                RunStore + HandledIssueStore + PrReviewStore +
-    │   │                            PrResponseStore + FailureCooldownStore
+    │   │                            PrResponseStore + FailureCooldownStore.
+    │   │                            HandledIssueRecord gains `state` and `branch` fields (plan_state module).
+    │   ├── multi_review.rs          Multi-model PR review: ReviewerModel, detection, consolidation
     │   ├── workflow_log.rs          Per-run structured log files
     │   └── stages/
     │       ├── trigger.rs           Shell command → stdout
@@ -112,6 +121,7 @@ sousdev/
     │       ├── pr_description.rs    Claude CLI generates title + body from diff
     │       ├── pull_request.rs      Commit, rebase CI, push, create PR + agent fallback
     │       ├── pr_checkout.rs       Set ctx.branch from PR
+    │       ├── api_review_loop.rs   API-based review agent loop with read-only tools
     │       ├── pr_review_poster.rs  Posts timeline comment (NOT formal review) + dedup check
     │       └── pr_comment_responder.rs  Reply + summary + update PR description
     └── techniques/                  8 standalone reasoning algorithms
@@ -121,7 +131,7 @@ sousdev/
 
 ## TUI Dashboard
 
-Three-column layout: `Sidebar (26) | Info pane (24) | Log pane (remaining)`
+Three-column layout: `Sidebar (26) | Info pane (34) | Log pane (remaining)`
 
 ### Key routing (context stack, highest priority first)
 
@@ -137,18 +147,20 @@ Each context owns its keys exclusively. Universal: `Ctrl+C` quits.
 | Panel | Purpose |
 |---|---|
 | **Sidebar** | Workflow list + stage flowcharts. Blue thick border when active. |
-| **Info pane** | Compact item status. Clicking an item sets the log filter. |
+| **Info pane** | Compact item status (34 chars wide). Workflow name header, selected item detail footer (status + issue/PR name). Clicking an item sets the log filter. Active/inactive title dimming. |
 | **Log pane** | Real-time agent output in pretty mode. Click expands entries. |
 | **Info Expanded** | Floating left-side panel, full height, 10px left margin. |
-| **Command menu** | Floating bottom bar with padding, shows version. |
+| **Command menu** | Floating bottom bar (`BG_MENU`), flush to bottom, shows version. |
 | **Status bar** | Bottom 2 rows: workflow info + filter label + item title. |
-| **Toast** | Centered, padded, auto-expires. |
+| **Toast** | Full-width bar, no y-padding, centered message in lighter green, dark green background. Auto-expires. |
 
 ### Pretty log mode
 
 - **Thinking**: Subtle background (`BG_THOUGHT`), thick cyan border (`▎`), collapsed to 1 line by default. Click expands. Newlines flattened to `  ` when collapsed, split to actual lines when expanded.
 - **Tool calls**: Purple `[tool]` prefix, result hidden. Click expands.
 - **Consolidated tools**: 3+ consecutive → last call + `[+] N more`. Click expands.
+- **Color-coded log lines**: 10-color palette per item. Colored borders in pretty mode, colored dots in flat mode.
+- **Expandable error entries**: Click to see full multi-line API error details.
 - **Click vs drag**: < 3px movement = click (toggle expand), >= 3px = drag (copy).
 - **Copy**: Always includes full expanded content of selected entries.
 
@@ -162,13 +174,15 @@ Each context owns its keys exclusively. Universal: `Ctrl+C` quits.
 | `[!!]` | Error / Cooldown | All |
 | `[A✓]` | Agent approved, needs manual approval | pr-reviewer |
 | `[A✗]` | Agent found concerns, needs review | pr-reviewer |
+| `[✓✓]` | PR has GitHub reviewDecision == APPROVED | pr-reviewer |
+| `[Pl]` | PlanPending — plan PR waiting for human review | plan-first issues |
 | `[--]` | No new comments (0 count) | pr-responder |
 | `[ N]` | Comment count (gray=no new, cyan=new) | pr-responder |
 | `[**]` | New comments (no count available) | pr-responder |
 
 ---
 
-## The four workflow modes
+## The five workflow modes
 
 ### Mode 1: Issue autofix (`github_issues` or `linear_issues`)
 
@@ -182,6 +196,16 @@ Each context owns its keys exclusively. Universal: `Ctrl+C` quits.
 - Reflexion-style reflection between retries
 - Agent-assisted PR creation fallback when automated flow fails
 
+### Mode 1b: Plan-first autofix (`github_issues` + `plan_first = true`)
+
+- Default mode (`plan_first = true` by default)
+- State machine: `plan_posted` → `plan_approved` → `code_complete`
+- Agent creates a plan PR for human review before writing code
+- 60-second background polling for approval
+- `HandledIssueRecord` tracks `state` and `branch` fields
+- TUI shows `[Pl]` PlanPending badge while awaiting approval
+- New prompts: `plan-generation.md`, `plan-pr-body.md`, `plan-execution.md`
+
 ### Mode 2: PR reviewer (`github_prs`)
 
 - **Three GitHub searches** merged: `user-review-requested:@me`, `assignee:@me`, `review-requested:@me`
@@ -192,6 +216,13 @@ Each context owns its keys exclusively. Universal: `Ctrl+C` quits.
 - Rebase detection: SHA changed but additions/deletions same → skip (not a real code change)
 - PR review prompt has **IMPORTANT CONSTRAINTS** at top: no build/test/install, no `gh pr review`
 - `has_concerns` tracked in `PrReviewRecord` for `[A✓]` vs `[A✗]` status
+- **Multi-model review**: When 2+ model CLIs/API keys available (from `[[models]]` config), runs parallel reviews and consolidates. Auto-detects available models.
+- **API-based review**: Uses native tool-use APIs (Anthropic, OpenAI) instead of CLI binaries. Falls back to CLI when no API key. Read-only tool set with allowlisted shell commands (`api_review_loop.rs`).
+- **Review verdicts**: Each model outputs `Verdict: ✅ Approved` or `Verdict: 🔴 Not Approved`. Consolidated reviews include per-model verdict table.
+- **`--disallowedTools`** for Claude CLI blocks `gh pr review`, `gh pr comment`, etc. deterministically.
+- **`--permission-mode auto`** for PR review (instead of `--dangerously-skip-permissions`) — read-only review doesn't need bypass.
+- `github_prs` mode accepts `claude-loop`, `codex-loop`, or `gemini-loop` techniques.
+- `[✓✓]` Approved badge shows when PR has GitHub reviewDecision == APPROVED
 
 ### Mode 3: PR comment responder (`github_pr_responses`)
 
@@ -264,13 +295,14 @@ BG_SIDEBAR         Rgb(24, 24, 32)     Sidebar
 BG_INFO_EXPANDED   Rgb(28, 28, 38)     Floating panels + command menu
 BG_STATUS_BAR      Rgb(30, 30, 42)     Status bar
 BG_THOUGHT         Rgb(24, 26, 34)     Thinking block background
+BG_MENU            Rgb(35, 35, 45)     Command menu background
 BG_ROW_FOCUS       Rgb(40, 40, 54)     Keyboard cursor highlight
 BG_TEXT_SELECTION   Rgb(50, 50, 70)     Mouse drag selection
 ACCENT_BORDER      Rgb(80, 110, 200)   Active panel border (thick ▎)
 ACCENT_THOUGHT     Rgb(80, 160, 200)   Thinking block left border
 ACCENT_TOOL        Rgb(140, 120, 200)  [tool] tag
 ACCENT_INFO_LEVEL  Rgb(70, 110, 190)   Info log level
-ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications
+ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications (dark green background, lighter green text)
 ```
 
 ---
@@ -279,7 +311,9 @@ ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications
 
 - All `gh api` calls use direct `Command::new("gh").arg(...)` — no shell injection
 - `safe_truncate()` in `src/utils/truncate.rs` prevents UTF-8 boundary panics
-- `--dangerously-skip-permissions` grants Claude full system access (by design)
+- `--dangerously-skip-permissions` grants Claude full system access (by design, for code-writing modes)
+- `--permission-mode auto` used for PR review (read-only, no bypass needed)
+- `--disallowedTools` for Claude CLI deterministically blocks `gh pr review`, `gh pr comment`, etc.
 - `blocked_commands` is prompt-level only — not technically enforced
 - Issue bodies are a prompt injection vector
 - PR reviews are posted as timeline comments, never formal GitHub reviews
@@ -290,20 +324,25 @@ ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications
 
 | Metric | Value |
 |---|---|
-| Test count | 531+ |
+| Test count | 608+ |
 | Clippy warnings | 0 |
 | Default agent timeout | 900s (15 min) |
 | Default PR review timeout | 600s (10 min) |
 | Default issue/PR limit | 100 (effectively unlimited) |
 | Failure cooldown | 60min → 120min → 240min → ... cap 24h |
 | Log files loaded on startup | Up to 5 per workflow |
+| Prompts | 10+ template files |
+| Stages | 12 (including api_review_loop) |
+| Info panel width | 34 chars |
+| Log cap | 10K entries/workflow |
+| RunStore max | 500 entries (pruned) |
 | Startup time | ~50-100ms (GitHub data fetched in background) |
 
 ---
 
 ## Key invariants
 
-1. `cargo test` — 531+ tests, zero failures
+1. `cargo test` — 608+ tests, zero failures
 2. `cargo clippy` — zero warnings
 3. Every Stage returns `Ok(())` for business failures; only `Err` for unrecoverable errors
 4. `HandledIssueStore.mark_handled()` only when `success && pr_url.is_some()`

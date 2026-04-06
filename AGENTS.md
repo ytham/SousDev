@@ -4,7 +4,7 @@
 
 SousDev is a Rust CLI daemon that runs autonomous agentic workflows on a cron schedule. It watches GitHub repos and handles issues, PR reviews, and reviewer comments using AI agents that edit code, run tests, and post results.
 
-Four workflow modes: bug autofix (`github_issues`), PR reviewer (`github_prs`), PR comment responder (`github_pr_responses`), shell trigger (`trigger`).
+Five workflow modes: bug autofix (`github_issues`), plan-first autofix (`github_issues` + `plan_first = true`), PR reviewer (`github_prs`), PR comment responder (`github_pr_responses`), shell trigger (`trigger`).
 
 Eight standalone techniques: ReAct, Reflexion, Tree of Thoughts, Self-Consistency, Critique Loop, Plan-and-Solve, Skeleton-of-Thought, Multi-Agent Debate.
 
@@ -17,7 +17,7 @@ maintain state across turns. This directory is gitignored — treat it as your w
 ## Build, test, lint
 
 ```bash
-cargo test          # 268 tests — run before every commit
+cargo test          # 608+ tests — run before every commit
 cargo clippy        # must pass with zero warnings
 cargo build         # debug build
 ```
@@ -32,22 +32,30 @@ Tests are fully mocked — no API keys, no real git, no network calls.
 src/
   main.rs                  CLI (clap). Only place process::exit() is allowed.
   lib.rs                   Library root — re-exports all modules.
-  types/config.rs          HarnessConfig, WorkflowConfig, all sub-configs.
+  types/config.rs          HarnessConfig, WorkflowConfig, ModelConfig, all sub-configs.
   types/technique.rs       RunResult, TrajectoryStep — fixed return shape.
   utils/                   Logger, PromptLoader ({{var}} substitution), config_loader.
-  providers/               LLMProvider trait + Anthropic, OpenAI, Ollama.
+  providers/               LLMProvider trait + Anthropic, OpenAI, Ollama (with tool-use support).
   tools/                   ToolRegistry + built-ins (read_file, write_file, shell).
   workflows/
-    executor.rs            WorkflowExecutor — routes all 4 modes. Most critical file.
+    executor.rs            WorkflowExecutor — routes all 5 modes. Most critical file.
     stage.rs               Stage trait + StageContext (shared mutable context).
     stores.rs              RunStore, HandledIssueStore, PrReviewStore, PrResponseStore.
+                           HandledIssueRecord gains `state` and `branch` fields (plan_state module).
     workspace.rs           WorkspaceManager — clone, checkout, reset, teardown.
     github_issues.rs       gh issue list/comment/close wrappers.
     github_prs.rs          gh pr list, inline comments, replies, login detection.
+    multi_review.rs        Multi-model PR review: ReviewerModel, detection, consolidation.
     cron_runner.rs         tokio-cron-scheduler daemon with overlap guard.
-    stages/                11 workflow stages (trigger → parse → agent → review → PR).
+    stages/                12 workflow stages (trigger → parse → agent → review → PR).
+      api_review_loop.rs   API-based review agent loop with read-only tools.
   techniques/              8 standalone reasoning algorithms, each in its own module.
 prompts/                   Editable .md templates with {{variable}} placeholders.
+  plan-generation.md       Plan-first: generate implementation plan from issue.
+  plan-pr-body.md          Plan-first: PR body for plan review.
+  plan-execution.md        Plan-first: execute approved plan.
+  review-consolidation.md  Multi-model: consolidate parallel reviews.
+.agents/context/prompts.md Prompt design lessons and conventions.
 config.toml                Reference config. Must stay valid and well-commented.
 ```
 
@@ -75,7 +83,7 @@ config.toml                Reference config. Must stay valid and well-commented.
 
 ## Invariants
 
-1. `cargo test` — 275+ tests, zero failures.
+1. `cargo test` — 608+ tests, zero failures.
 2. `cargo clippy` — zero warnings.
 3. `HandledIssueStore.mark_handled()` only called when `success && pr_url.is_some()`.
 4. `PrReviewStore.mark_reviewed()` and `PrResponseStore.mark_responded()` only after `success && !skipped`.
@@ -84,7 +92,7 @@ config.toml                Reference config. Must stay valid and well-commented.
 7. `config.toml` must always be a valid, runnable example.
 8. PR workspaces (`-pr<N>` dirs) are never torn down — always preserved for reuse.
 9. Bug-fix workspaces are torn down only after success; otherwise preserved.
-10. `github_prs` and `github_pr_responses` modes fail with a clear error if technique is not `claude-loop`.
+10. `github_prs` mode accepts `claude-loop`, `codex-loop`, or `gemini-loop` techniques. `github_pr_responses` mode fails with a clear error if technique is not `claude-loop`.
 
 ## Do not
 
