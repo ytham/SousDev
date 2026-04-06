@@ -1359,7 +1359,7 @@ impl WorkflowExecutor {
                 tokio::fs::write(&plan_path, &plan_content).await?;
 
                 // Commit and push the updated plan.
-                exec_git(&["add", "tmp/"], dir).await?;
+                exec_git(&["add", "-f", "tmp/"], dir).await?;
                 let status = exec_git(&["status", "--porcelain"], dir).await?;
                 if !status.trim().is_empty() {
                     exec_git(

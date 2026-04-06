@@ -62,7 +62,7 @@ section empty if everything is clear>
 ### Step 4 — Commit and stop
 
 ```
-git add tmp/plan-issue-{{issue_number}}.md
+git add -f tmp/plan-issue-{{issue_number}}.md
 git commit -m "plan: add implementation plan for issue #{{issue_number}}"
 ```
 
