@@ -53,6 +53,9 @@ pub struct PrReviewResult {
     pub summary_posted: bool,
     pub head_sha: String,
     pub errors: Vec<String>,
+    /// The review verdict: `"approved"`, `"not_approved"`, or `"unknown"`.
+    #[serde(default)]
+    pub verdict: String,
 }
 
 /// Summary of a PR response pass stored inside a [`WorkflowResult`].
@@ -1015,6 +1018,7 @@ mod tests {
                 summary_posted: true,
                 head_sha: "abc".into(),
                 errors: vec![],
+                verdict: "approved".into(),
             }),
             pr_response_result: None,
         };

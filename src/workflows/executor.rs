@@ -1841,8 +1841,8 @@ impl WorkflowExecutor {
                             has_concerns: result
                                 .pr_review_result
                                 .as_ref()
-                                .map(|r| r.inline_comment_count > 0)
-                                .unwrap_or(false),
+                                .map(|r| r.verdict != "approved")
+                                .unwrap_or(true),
                             last_comment_id,
                             reviewed_at: Utc::now().to_rfc3339(),
                         },

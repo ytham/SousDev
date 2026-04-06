@@ -200,11 +200,15 @@ impl Stage for PrReviewPosterStage {
             false
         };
 
+        // Parse the verdict from the review text.
+        let verdict = parse_verdict(agent_output);
+
         ctx.pr_review_result = Some(PrReviewResult {
             inline_comment_count: inline_count,
             summary_posted,
             head_sha,
             errors,
+            verdict,
         });
         Ok(())
     }
@@ -220,6 +224,34 @@ impl Stage for PrReviewPosterStage {
 /// lines like "I don't have permission to submit reviews directly. Here's my
 /// review:" before the actual review content.  This function finds the first
 /// line that looks like real review content and drops everything before it.
+/// Parse the verdict from the review text.
+///
+/// Looks for a line matching `Verdict: Approved` or `Verdict: Not Approved`
+/// (case-insensitive).  Returns `"approved"`, `"not_approved"`, or `"unknown"`.
+fn parse_verdict(text: &str) -> String {
+    for line in text.lines().rev() {
+        let trimmed = line.trim().to_lowercase();
+        if let Some(rest_raw) = trimmed.strip_prefix("verdict:") {
+            let rest = rest_raw.trim();
+            if rest.starts_with("approved") || rest == "lgtm" || rest == "looks good" {
+                return "approved".to_string();
+            }
+            if rest.starts_with("not approved") || rest.starts_with("not_approved")
+                || rest.starts_with("rejected") || rest.starts_with("changes requested")
+            {
+                return "not_approved".to_string();
+            }
+            // Unrecognized verdict text — return as-is normalized.
+            return if rest.contains("approv") {
+                "approved".to_string()
+            } else {
+                "not_approved".to_string()
+            };
+        }
+    }
+    "unknown".to_string()
+}
+
 /// Fix Markdown spacing issues that cause incorrect rendering on GitHub.
 ///
 /// - Ensures `---` / `***` / `___` horizontal rules have blank lines before
@@ -562,5 +594,42 @@ END_INLINE_COMMENT";
         let input = "A\n\nB";
         let result = collapse_excess_blank_lines(input);
         assert_eq!(result, "A\n\nB");
+    }
+
+    // ── parse_verdict tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_verdict_approved() {
+        assert_eq!(parse_verdict("Some review.\n\nVerdict: Approved"), "approved");
+        assert_eq!(parse_verdict("Verdict: approved"), "approved");
+        assert_eq!(parse_verdict("VERDICT: APPROVED"), "approved");
+    }
+
+    #[test]
+    fn test_parse_verdict_not_approved() {
+        assert_eq!(
+            parse_verdict("Issues found.\n\nVerdict: Not Approved"),
+            "not_approved"
+        );
+        assert_eq!(parse_verdict("Verdict: not approved"), "not_approved");
+        assert_eq!(parse_verdict("Verdict: Not_Approved"), "not_approved");
+        assert_eq!(parse_verdict("Verdict: Changes Requested"), "not_approved");
+    }
+
+    #[test]
+    fn test_parse_verdict_lgtm() {
+        assert_eq!(parse_verdict("Verdict: LGTM"), "approved");
+    }
+
+    #[test]
+    fn test_parse_verdict_unknown() {
+        assert_eq!(parse_verdict("No verdict in this review"), "unknown");
+        assert_eq!(parse_verdict(""), "unknown");
+    }
+
+    #[test]
+    fn test_parse_verdict_in_summary_block() {
+        let text = "SUMMARY\nLooks good overall.\n\nVerdict: Approved\nEND_SUMMARY";
+        assert_eq!(parse_verdict(text), "approved");
     }
 }

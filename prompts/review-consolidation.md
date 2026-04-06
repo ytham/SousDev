@@ -23,6 +23,9 @@ them into a single, well-organized review.
    file and line
 6. **Note what looks good** — if models agree the code is well-written
    in specific areas, mention that too
+7. **Extract each model's verdict** — look for `Verdict: Approved` or
+   `Verdict: Not Approved` in each review. Include a per-model verdict
+   table and a final consolidated verdict.
 
 ## Reviews
 
@@ -42,7 +45,15 @@ SUMMARY
 ### What looks good
 <areas where models agreed the code is solid>
 
+### Model verdicts
+
+| Model | Verdict |
+|-------|---------|
+<one row per model, e.g. "| claude | Approved |">
+
 **Models used:** {{model_names}}
+
+Verdict: <Approved or Not Approved — Approved only if ALL models approved; otherwise Not Approved>
 END_SUMMARY
 
 For any inline findings worth preserving (deduplicated):

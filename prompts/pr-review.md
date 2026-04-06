@@ -61,8 +61,14 @@ After all inline comments (or if there are no inline comments), output a summary
 ```
 SUMMARY
 <overall assessment — mention what looks good, what needs attention, and any patterns or themes across the changes>
+
+Verdict: <Approved or Not Approved>
 END_SUMMARY
 ```
+
+The `Verdict:` line MUST be the last line before `END_SUMMARY`. Use exactly one of:
+- `Verdict: Approved` — the code is correct and ready to merge (minor suggestions are OK)
+- `Verdict: Not Approved` — there are bugs, missing tests, or issues that must be fixed
 
 ## Review guidelines
 
@@ -70,4 +76,4 @@ END_SUMMARY
 - If a change is correct and well-implemented, say so in the summary
 - Flag bugs, missing error handling, performance concerns, and test gaps
 - Do not nitpick style unless it violates consistency with the surrounding code
-- If there are no issues, output only the SUMMARY block with a positive assessment
+- If there are no issues, output only the SUMMARY block with a positive assessment and `Verdict: Approved`
