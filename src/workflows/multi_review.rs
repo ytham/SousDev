@@ -164,9 +164,17 @@ pub async fn load_workspace_conventions(workspace_dir: &Path) -> String {
 /// Claude supports `--disallowedTools` natively.  Codex and Gemini do not,
 /// so we return an empty vec for them (they rely on prompt-level constraints
 /// in `pr-review.md` instead).
+/// Build extra CLI flags appropriate for a given reviewer model.
+///
+/// For Claude: uses `--permission-mode auto` (read-only review doesn't need
+/// `--dangerously-skip-permissions`) and `--disallowedTools` to block write
+/// commands.  For Codex/Gemini: returns empty (they rely on prompt-level
+/// constraints in `pr-review.md`).
 pub fn disallowed_tools_for(model: ReviewerModel) -> Vec<String> {
     match model {
         ReviewerModel::Claude => vec![
+            "--permission-mode".to_string(),
+            "auto".to_string(),
             "--disallowedTools".to_string(),
             "Bash(gh pr review*)".to_string(),
             "Bash(gh pr comment*)".to_string(),

@@ -70,8 +70,12 @@ async fn run_claude_review(ctx: &mut StageContext) -> Result<()> {
     vars.insert("round_note".to_string(), String::new());
     let review_prompt = loader.load(&ctx.prompts.code_review, &vars).await?;
 
-    // Block the reviewer agent from posting reviews or comments directly.
+    // Internal code review is read-only — use auto permission mode
+    // instead of --dangerously-skip-permissions.  Block write commands
+    // via --disallowedTools.
     let disallowed = vec![
+        "--permission-mode".to_string(),
+        "auto".to_string(),
         "--disallowedTools".to_string(),
         "Bash(gh pr review*)".to_string(),
         "Bash(gh pr comment*)".to_string(),

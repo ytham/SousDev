@@ -78,13 +78,29 @@ pub fn claude_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter
                 .clone()
                 .or_else(|| defaults.model.clone())
                 .or_else(|| std::env::var("ANTHROPIC_MODEL").ok());
+
+            // Check if extra_flags specify a custom permission mode.
+            // If so, skip the default --dangerously-skip-permissions.
+            let has_custom_permission_mode = options
+                .extra_flags
+                .as_ref()
+                .map(|f| f.iter().any(|flag| flag.contains("--permission-mode")))
+                .unwrap_or(false)
+                || defaults
+                    .extra_flags
+                    .as_ref()
+                    .map(|f| f.iter().any(|flag| flag.contains("--permission-mode")))
+                    .unwrap_or(false);
+
             let mut args = vec![
                 "--print".to_string(),
-                "--dangerously-skip-permissions".to_string(),
                 "--output-format".to_string(),
                 "stream-json".to_string(),
                 "--verbose".to_string(),
             ];
+            if !has_custom_permission_mode {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
             if let Some(m) = model {
                 args.push("--model".to_string());
                 args.push(m);

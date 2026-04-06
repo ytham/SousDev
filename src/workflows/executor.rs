@@ -1934,10 +1934,13 @@ impl WorkflowExecutor {
         let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
         ctx.reviewing_pr = Some(pr.clone());
 
-        // Block the agent from posting reviews, comments, or approvals
-        // directly.  --disallowedTools removes these tool patterns from the
-        // model's context entirely — the agent cannot even attempt them.
+        // PR review is read-only — use auto permission mode instead of
+        // --dangerously-skip-permissions.  The auto mode classifier blocks
+        // write operations, and --disallowedTools removes dangerous patterns
+        // from the model's context entirely.
         ctx.extra_agent_flags = Some(vec![
+            "--permission-mode".to_string(),
+            "auto".to_string(),
             "--disallowedTools".to_string(),
             "Bash(gh pr review*)".to_string(),
             "Bash(gh pr comment*)".to_string(),
