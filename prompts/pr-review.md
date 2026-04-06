@@ -37,10 +37,15 @@ The following pull request has been submitted for review:
 
 ## How to review
 
-1. Run `gh pr diff {{pr_number}}` to see the full diff
-2. Run `gh pr view {{pr_number}} --json files` to see which files changed
+1. Run `gh pr view {{pr_number}} --json files --jq '.files[].path'` to list all changed files
+2. Run `gh pr diff {{pr_number}}` to see the full diff
+   - **For large PRs (50+ files):** inspect files individually with
+     `gh pr diff {{pr_number}} -- <path>` to avoid truncation. Prioritize
+     files with the most changes, business logic, migrations, and tests.
 3. Read the changed files and surrounding context to understand the changes
-4. Write your review using the format below
+4. You MUST review ALL changed files before writing your verdict. Do NOT
+   say you were unable to inspect files — use per-file commands if needed.
+5. Write your review using the format below
 
 ## Output format
 

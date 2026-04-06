@@ -24,6 +24,11 @@ use crate::utils::logger::Logger;
 /// Maximum number of tool-call iterations before giving up.
 const MAX_ITERATIONS: usize = 50;
 
+/// Maximum size of a single tool output in bytes.
+/// Both Claude and GPT-5.4 support 1M+ token context windows, so 500KB
+/// of text (~125K tokens) is safely within bounds for a single tool result.
+const MAX_TOOL_OUTPUT_BYTES: usize = 500_000;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -137,11 +142,12 @@ pub async fn run_api_review_loop(
 
 /// Truncate tool output to prevent context overflow.
 fn truncate_tool_output(output: String) -> String {
-    if output.len() > 50_000 {
+    if output.len() > MAX_TOOL_OUTPUT_BYTES {
         format!(
-            "{}...\n\n[truncated — {} bytes total]",
-            &output[..50_000],
-            output.len()
+            "{}...\n\n[truncated — showing {:.0}KB of {:.0}KB total. Use per-file commands like `gh pr diff <number> -- <path>` to inspect specific files.]",
+            &output[..MAX_TOOL_OUTPUT_BYTES],
+            MAX_TOOL_OUTPUT_BYTES as f64 / 1024.0,
+            output.len() as f64 / 1024.0,
         )
     } else {
         output
