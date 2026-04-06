@@ -119,6 +119,10 @@ pub fn claude_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter
 }
 
 /// Build an adapter for the OpenAI `codex` CLI.
+///
+/// Uses `codex exec` for non-interactive execution with `--json` for
+/// structured JSONL output and `--full-auto` for sandboxed automatic
+/// execution.  The prompt is delivered as a positional argument.
 pub fn codex_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter {
     ExternalAgentAdapter {
         name: "codex".to_string(),
@@ -131,7 +135,11 @@ pub fn codex_adapter(defaults: ExternalAgentRunOptions) -> ExternalAgentAdapter 
                 .clone()
                 .or_else(|| defaults.model.clone())
                 .or_else(|| std::env::var("OPENAI_MODEL").ok());
-            let mut args = vec!["--quiet".to_string()];
+            let mut args = vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "--full-auto".to_string(),
+            ];
             if let Some(m) = model {
                 args.push("--model".to_string());
                 args.push(m);
@@ -1016,7 +1024,9 @@ mod tests {
     fn test_codex_adapter_args() {
         let adapter = codex_adapter(ExternalAgentRunOptions::default());
         let args = (adapter.build_args)(&ExternalAgentRunOptions::default());
-        assert!(args.contains(&"--quiet".to_string()));
+        assert!(args.contains(&"exec".to_string()));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"--full-auto".to_string()));
         assert_eq!(adapter.prompt_delivery, PromptDelivery::Argument);
     }
 
