@@ -237,7 +237,7 @@ fn parse_verdict(text: &str) -> String {
                 .trim()
                 .trim_start_matches('✅')
                 .trim_start_matches('❌')
-                .trim_start_matches('🟢')
+                .trim_start_matches('✅')
                 .trim_start_matches('🔴')
                 .trim();
             if rest.starts_with("approved") || rest == "lgtm" || rest == "looks good" {
@@ -644,7 +644,7 @@ END_INLINE_COMMENT";
     fn test_parse_verdict_with_emoji() {
         assert_eq!(parse_verdict("Verdict: ✅ Approved"), "approved");
         assert_eq!(parse_verdict("Verdict: ❌ Not Approved"), "not_approved");
-        assert_eq!(parse_verdict("Verdict: 🟢 Approved"), "approved");
+        assert_eq!(parse_verdict("Verdict: ✅ Approved"), "approved");
         assert_eq!(parse_verdict("Verdict: 🔴 Not Approved"), "not_approved");
     }
 }
