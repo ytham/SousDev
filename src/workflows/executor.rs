@@ -1986,6 +1986,13 @@ impl WorkflowExecutor {
 
             if let Some(provider) = api_model {
                 logger.info("Using API-based review loop");
+
+                self.opts.tui_tx.send(TuiEvent::StageStarted {
+                    workflow_name: self.config.name.clone(),
+                    run_id: run_id.clone(),
+                    stage_name: "agent-loop".to_string(),
+                });
+
                 let conventions = load_workspace_conventions(&ctx.workspace_dir).await;
                 let api_system_prompt = if conventions.is_empty() {
                     ctx.system_prompt.clone()
@@ -1997,13 +2004,33 @@ impl WorkflowExecutor {
                     ))
                 };
                 let review_registry = crate::workflows::stages::api_review_loop::review_tool_registry(&ctx.workspace_dir);
-                let review_text = crate::workflows::stages::api_review_loop::run_api_review_loop(
+                let review_result = crate::workflows::stages::api_review_loop::run_api_review_loop(
                     provider.as_ref(),
                     &review_registry,
                     &ctx.parsed_task.full_text(),
                     api_system_prompt.as_deref(),
                     &logger,
-                ).await?;
+                ).await;
+
+                match &review_result {
+                    Ok(_) => {
+                        self.opts.tui_tx.send(TuiEvent::StageCompleted {
+                            workflow_name: self.config.name.clone(),
+                            run_id: run_id.clone(),
+                            stage_name: "agent-loop".to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        self.opts.tui_tx.send(TuiEvent::StageFailed {
+                            workflow_name: self.config.name.clone(),
+                            run_id: run_id.clone(),
+                            stage_name: "agent-loop".to_string(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+
+                let review_text = review_result?;
                 ctx.agent_result = Some(RunResult::success(
                     "api-review",
                     review_text,
