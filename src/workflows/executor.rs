@@ -2186,12 +2186,23 @@ impl WorkflowExecutor {
 
             struct ModelRun {
                 model: ReviewerModel,
+                display_name: String,
                 method: ReviewMethod,
                 system_prompt: Option<String>,
             }
 
             let mut runs: Vec<ModelRun> = Vec::new();
             for &model in models {
+                // Look up the model ID from the config to get the display name.
+                let model_id = self.opts.models.iter()
+                    .find(|mc| mc.provider == match model {
+                        ReviewerModel::Claude => "anthropic",
+                        ReviewerModel::Codex => "openai",
+                        ReviewerModel::Gemini => "gemini",
+                    })
+                    .map(|mc| mc.model.as_str())
+                    .unwrap_or(model.name());
+                let display_name = multi_review::model_display_name(model_id);
                 // Claude reads CLAUDE.md natively; non-Claude models need
                 // the workspace conventions prepended to the system prompt.
                 let model_system_prompt = if model == ReviewerModel::Claude {
@@ -2228,7 +2239,7 @@ impl WorkflowExecutor {
                     stage_name: format!("review-{}", model.name()),
                 });
 
-                runs.push(ModelRun { model, method, system_prompt: model_system_prompt });
+                runs.push(ModelRun { model, display_name, method, system_prompt: model_system_prompt });
             }
 
             // ── Run all model agents concurrently ────────────────────────
@@ -2259,15 +2270,15 @@ impl WorkflowExecutor {
                             .map(|r| r.answer)
                         }
                     };
-                    (run.model, result)
+                    (run.model, run.display_name.clone(), result)
                 }
             }).collect();
 
             let model_results = futures::future::join_all(review_futures).await;
 
             // Emit completion events and collect successful reviews.
-            let mut reviews: Vec<(ReviewerModel, String)> = Vec::new();
-            for (model, result) in &model_results {
+            let mut reviews: Vec<(String, String)> = Vec::new(); // (display_name, review_text)
+            for (model, display_name, result) in &model_results {
                 match result {
                     Ok(review_text) => {
                         self.opts.tui_tx.send(TuiEvent::StageCompleted {
@@ -2275,7 +2286,7 @@ impl WorkflowExecutor {
                             run_id: run_id.clone(),
                             stage_name: format!("review-{}", model.name()),
                         });
-                        reviews.push((*model, review_text.clone()));
+                        reviews.push((display_name.clone(), review_text.clone()));
                     }
                     Err(e) => {
                         self.opts.tui_tx.send(TuiEvent::StageFailed {
@@ -2284,7 +2295,7 @@ impl WorkflowExecutor {
                             stage_name: format!("review-{}", model.name()),
                             error: e.to_string(),
                         });
-                        logger.error(&format!("{} review failed: {}", model.name(), e));
+                        logger.error(&format!("{} review failed: {}", display_name, e));
                     }
                 }
             }
@@ -2295,6 +2306,8 @@ impl WorkflowExecutor {
 
             // ── Consolidate reviews ──────────────────────────────────────
             let consolidated = if reviews.len() >= 2 {
+                let display_names: Vec<&str> = reviews.iter().map(|(name, _)| name.as_str()).collect();
+                let example_row = format!("| {} | ✅ Approved |", display_names.first().unwrap_or(&"Model"));
                 let consolidation_prompt = self.load_and_render_prompt(
                     "review-consolidation",
                     &[
@@ -2302,7 +2315,8 @@ impl WorkflowExecutor {
                         ("pr_title", &pr.title),
                         ("pr_number", &pr.number.to_string()),
                         ("reviews", &format_reviews_for_consolidation(&reviews)),
-                        ("model_names", &reviews.iter().map(|(m, _)| m.name()).collect::<Vec<_>>().join(", ")),
+                        ("model_display_names", &display_names.join(", ")),
+                        ("model_display_names_example", &example_row),
                     ],
                 );
 

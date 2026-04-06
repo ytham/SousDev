@@ -24,8 +24,7 @@ them into a single, well-organized review.
 6. **Note what looks good** — if models agree the code is well-written
    in specific areas, mention that too
 7. **Extract each model's verdict** — look for `Verdict: Approved` or
-   `Verdict: Not Approved` in each review. Include a per-model verdict
-   table and a final consolidated verdict.
+   `Verdict: Not Approved` in each review.
 
 ## Reviews
 
@@ -33,7 +32,8 @@ them into a single, well-organized review.
 
 ## Output format
 
-Write a consolidated review using this exact structure:
+Write a consolidated review using this exact structure. The Summary
+section MUST be the very last thing before END_SUMMARY:
 
 SUMMARY
 ### Consensus findings
@@ -45,19 +45,21 @@ SUMMARY
 ### What looks good
 <areas where models agreed the code is solid>
 
-### Model verdicts
+### Inline observations
+<any notable file-specific findings, formatted as bold file:line followed by description>
+
+### Summary
 
 | Model | Verdict |
 |-------|---------|
-<one row per model, e.g. "| claude | Approved |">
+<one row per model using their FULL display name and emoji verdict, e.g.:>
+| {{model_display_names_example}} |
 
-**Models used:** {{model_names}}
-
-Verdict: <Approved or Not Approved — Approved only if ALL models approved; otherwise Not Approved>
+Verdict: <✅ Approved or ❌ Not Approved — ✅ Approved only if ALL models approved; otherwise ❌ Not Approved>
 END_SUMMARY
 
-For any inline findings worth preserving (deduplicated):
-
-INLINE_COMMENT <path>:<line>
-<consolidated comment text>
-END_INLINE_COMMENT
+IMPORTANT:
+- Use the full model display names exactly as provided: {{model_display_names}}
+- Use ✅ before "Approved" and ❌ before "Not Approved" in both the table and the final verdict
+- The "Summary" section with the verdict table and final verdict MUST be the last section before END_SUMMARY
+- Do NOT include a "Models used:" line — the table already shows this information

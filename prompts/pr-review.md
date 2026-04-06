@@ -67,8 +67,8 @@ END_SUMMARY
 ```
 
 The `Verdict:` line MUST be the last line before `END_SUMMARY`. Use exactly one of:
-- `Verdict: Approved` — the code is correct and ready to merge (minor suggestions are OK)
-- `Verdict: Not Approved` — there are bugs, missing tests, or issues that must be fixed
+- `Verdict: ✅ Approved` — the code is correct and ready to merge (minor suggestions are OK)
+- `Verdict: ❌ Not Approved` — there are bugs, missing tests, or issues that must be fixed
 
 ## Review guidelines
 

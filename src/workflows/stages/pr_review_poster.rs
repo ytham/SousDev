@@ -232,7 +232,14 @@ fn parse_verdict(text: &str) -> String {
     for line in text.lines().rev() {
         let trimmed = line.trim().to_lowercase();
         if let Some(rest_raw) = trimmed.strip_prefix("verdict:") {
-            let rest = rest_raw.trim();
+            // Strip emoji prefixes (✅, ❌) and whitespace.
+            let rest = rest_raw
+                .trim()
+                .trim_start_matches('✅')
+                .trim_start_matches('❌')
+                .trim_start_matches('\u{2705}')  // ✅
+                .trim_start_matches('\u{274C}')  // ❌
+                .trim();
             if rest.starts_with("approved") || rest == "lgtm" || rest == "looks good" {
                 return "approved".to_string();
             }
@@ -631,5 +638,11 @@ END_INLINE_COMMENT";
     fn test_parse_verdict_in_summary_block() {
         let text = "SUMMARY\nLooks good overall.\n\nVerdict: Approved\nEND_SUMMARY";
         assert_eq!(parse_verdict(text), "approved");
+    }
+
+    #[test]
+    fn test_parse_verdict_with_emoji() {
+        assert_eq!(parse_verdict("Verdict: ✅ Approved"), "approved");
+        assert_eq!(parse_verdict("Verdict: ❌ Not Approved"), "not_approved");
     }
 }

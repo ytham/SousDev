@@ -50,6 +50,34 @@ impl std::fmt::Display for ReviewerModel {
     }
 }
 
+/// Map a model API ID to a human-readable display name.
+///
+/// E.g., `"claude-opus-4-6"` → `"Claude Opus 4.6"`,
+///       `"gpt-5.4"` → `"GPT-5.4"`.
+pub fn model_display_name(model_id: &str) -> String {
+    match model_id {
+        // Anthropic models
+        "claude-opus-4-6" => "Claude Opus 4.6".into(),
+        "claude-sonnet-4-6" => "Claude Sonnet 4.6".into(),
+        "claude-haiku-4-5" => "Claude Haiku 4.5".into(),
+        "claude-opus-4-5" => "Claude Opus 4.5".into(),
+        "claude-sonnet-4-5" => "Claude Sonnet 4.5".into(),
+        "claude-opus-4-1" => "Claude Opus 4.1".into(),
+        "claude-sonnet-4-0" | "claude-sonnet-4" => "Claude Sonnet 4".into(),
+        "claude-opus-4-0" | "claude-opus-4" => "Claude Opus 4".into(),
+        // OpenAI models
+        "gpt-5.4" => "GPT-5.4".into(),
+        "gpt-5.4-mini" => "GPT-5.4 Mini".into(),
+        "gpt-5.4-nano" => "GPT-5.4 Nano".into(),
+        "gpt-4o" => "GPT-4o".into(),
+        "gpt-4o-mini" => "GPT-4o Mini".into(),
+        "o3" => "o3".into(),
+        "o4-mini" => "o4 Mini".into(),
+        // Unknown — capitalize and return as-is
+        other => other.to_string(),
+    }
+}
+
 /// Detect which reviewer model CLIs are available on the system.
 ///
 /// A model is available when its CLI binary is on `$PATH` and, for models
@@ -292,12 +320,13 @@ pub fn provider_for_review_model(
 }
 
 /// Format multiple model review outputs for the consolidation prompt.
-pub fn format_reviews_for_consolidation(reviews: &[(ReviewerModel, String)]) -> String {
+/// Format reviews for the consolidation prompt using display names.
+pub fn format_reviews_for_consolidation(reviews: &[(String, String)]) -> String {
     let mut output = String::new();
-    for (model, review_text) in reviews {
+    for (display_name, review_text) in reviews {
         output.push_str(&format!(
             "### Review from {}\n\n{}\n\n---\n\n",
-            model.name(),
+            display_name,
             review_text
         ));
     }
@@ -387,14 +416,33 @@ mod tests {
     #[test]
     fn test_format_reviews_for_consolidation() {
         let reviews = vec![
-            (ReviewerModel::Claude, "Claude found bug X.".to_string()),
-            (ReviewerModel::Codex, "Codex found bug Y.".to_string()),
+            ("Claude Opus 4.6".to_string(), "Claude found bug X.".to_string()),
+            ("GPT-5.4".to_string(), "Codex found bug Y.".to_string()),
         ];
         let formatted = format_reviews_for_consolidation(&reviews);
-        assert!(formatted.contains("### Review from claude"));
+        assert!(formatted.contains("### Review from Claude Opus 4.6"));
         assert!(formatted.contains("Claude found bug X."));
-        assert!(formatted.contains("### Review from codex"));
+        assert!(formatted.contains("### Review from GPT-5.4"));
         assert!(formatted.contains("Codex found bug Y."));
+    }
+
+    #[test]
+    fn test_model_display_name_anthropic() {
+        assert_eq!(model_display_name("claude-opus-4-6"), "Claude Opus 4.6");
+        assert_eq!(model_display_name("claude-sonnet-4-6"), "Claude Sonnet 4.6");
+        assert_eq!(model_display_name("claude-haiku-4-5"), "Claude Haiku 4.5");
+    }
+
+    #[test]
+    fn test_model_display_name_openai() {
+        assert_eq!(model_display_name("gpt-5.4"), "GPT-5.4");
+        assert_eq!(model_display_name("gpt-5.4-mini"), "GPT-5.4 Mini");
+        assert_eq!(model_display_name("gpt-4o"), "GPT-4o");
+    }
+
+    #[test]
+    fn test_model_display_name_unknown() {
+        assert_eq!(model_display_name("some-custom-model"), "some-custom-model");
     }
 
     #[test]
