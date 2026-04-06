@@ -34,8 +34,10 @@ impl OpenAIProvider {
 struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
+    /// Newer OpenAI models (GPT-5.4+) require `max_completion_tokens`
+    /// instead of `max_tokens`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
+    max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,16 +163,16 @@ impl LLMProvider for OpenAIProvider {
                 }),
             });
 
-        // OpenAI requires max_tokens for most models.  Default to 16384
-        // when not specified (generous enough for review output).
-        let max_tokens = options
+        // GPT-5.4+ uses max_completion_tokens instead of max_tokens.
+        // Default to 16384 when not specified.
+        let max_completion_tokens = options
             .and_then(|o| o.max_tokens)
             .or(Some(16384));
 
         let request = OpenAIRequest {
             model: self.model.clone(),
             messages: api_messages,
-            max_tokens,
+            max_completion_tokens,
             temperature: options.and_then(|o| o.temperature),
             tools,
             tool_choice,

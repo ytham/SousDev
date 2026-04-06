@@ -22,7 +22,8 @@ use crate::tools::registry::{Tool, ToolExecutor, ToolRegistry};
 use crate::utils::logger::Logger;
 
 /// Maximum number of tool-call iterations before giving up.
-const MAX_ITERATIONS: usize = 50;
+/// Large PRs (100+ files) may require many tool calls for per-file inspection.
+const MAX_ITERATIONS: usize = 100;
 
 /// Maximum size of a single tool output in bytes.
 /// Both Claude and GPT-5.4 support 1M+ token context windows, so 500KB
