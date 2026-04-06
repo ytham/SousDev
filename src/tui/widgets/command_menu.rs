@@ -1,8 +1,7 @@
 /// Command menu overlay — shown at the bottom when the user presses `:`.
 /// Also renders the cron edit input when in CronEdit mode.
 ///
-/// Floating modals use consistent BG_INFO_EXPANDED background with
-/// blue left border and standard margins.
+/// Floating modals use consistent BG_MENU background with blue left border.
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -10,7 +9,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::tui::app::{App, InputMode};
-use crate::tui::ui::{ACCENT_BORDER, BG_INFO_EXPANDED};
+use crate::tui::ui::{ACCENT_BORDER, BG_MENU};
 
 /// Draw the command menu or cron edit overlay.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -23,13 +22,12 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 /// Draw the command menu overlay.
 ///
-/// Floats 1 line from the bottom, 2 chars from the left.
-/// 1 row + 1 char padding all around inside the box.
+/// Sits at the very bottom of the screen, 2 chars from the left.
 fn draw_command_menu(f: &mut Frame, _app: &App) {
     let area = f.area();
     let menu_height = 4u16; // top pad + title + commands + bottom pad
     let margin_left: u16 = 2;
-    let margin_bottom: u16 = 1;
+    let margin_bottom: u16 = 0; // flush to bottom
     if area.height < menu_height + margin_bottom + 1 || area.width < margin_left + 20 {
         return;
     }
@@ -43,8 +41,8 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
 
     f.render_widget(Clear, menu_area);
 
-    let bg = Style::default().bg(BG_INFO_EXPANDED);
-    let border = Style::default().fg(ACCENT_BORDER).bg(BG_INFO_EXPANDED);
+    let bg = Style::default().bg(BG_MENU);
+    let border = Style::default().fg(ACCENT_BORDER).bg(BG_MENU);
     let key = bg.fg(Color::White);
     let label = bg.fg(Color::DarkGray);
     let version = env!("CARGO_PKG_VERSION");
@@ -82,12 +80,12 @@ fn draw_command_menu(f: &mut Frame, _app: &App) {
 
 /// Draw the cron schedule edit input overlay.
 ///
-/// Same positioning as the command menu.
+/// Sits at the very bottom with 1-line y-padding top and bottom.
 fn draw_cron_edit(f: &mut Frame, app: &App) {
     let area = f.area();
-    let edit_height = 1u16;
+    let edit_height = 3u16; // top pad + input + bottom pad
     let margin_left: u16 = 2;
-    let margin_bottom: u16 = 1;
+    let margin_bottom: u16 = 0; // flush to bottom
     if area.height < edit_height + margin_bottom + 1 || area.width < margin_left + 20 {
         return;
     }
@@ -101,28 +99,35 @@ fn draw_cron_edit(f: &mut Frame, app: &App) {
 
     f.render_widget(Clear, edit_area);
 
-    let bg = Style::default().bg(BG_INFO_EXPANDED);
-    let border = Style::default().fg(ACCENT_BORDER).bg(BG_INFO_EXPANDED);
+    let bg = Style::default().bg(BG_MENU);
+    let border = Style::default().fg(ACCENT_BORDER).bg(BG_MENU);
     let key = bg.fg(Color::White);
     let label = bg.fg(Color::DarkGray);
     let cursor = "\u{2588}";
 
-    let line = Line::from(vec![
-        Span::styled("▎ ", border),
-        Span::styled(" Schedule: ", label),
-        Span::styled(
-            app.cron_input.clone(),
-            bg.fg(Color::White).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(cursor, bg.fg(Color::Gray)),
-        Span::styled("  (cron or e.g. 5m, 30min, 2hr) ", label),
-        Span::styled("ENTER ", key),
-        Span::styled("apply  ", label),
-        Span::styled("ESC ", key),
-        Span::styled("cancel", label),
-    ]);
+    let lines = vec![
+        // Top padding row.
+        Line::from(vec![Span::styled("▎ ", border), Span::styled(" ", bg)]),
+        // Input row.
+        Line::from(vec![
+            Span::styled("▎ ", border),
+            Span::styled(" Schedule: ", label),
+            Span::styled(
+                app.cron_input.clone(),
+                bg.fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(cursor, bg.fg(Color::Gray)),
+            Span::styled("  (cron or e.g. 5m, 30min, 2hr) ", label),
+            Span::styled("ENTER ", key),
+            Span::styled("apply  ", label),
+            Span::styled("ESC ", key),
+            Span::styled("cancel", label),
+        ]),
+        // Bottom padding row.
+        Line::from(vec![Span::styled("▎ ", border), Span::styled(" ", bg)]),
+    ];
 
     let block = Block::default().style(bg);
-    let paragraph = Paragraph::new(line).block(block);
+    let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, edit_area);
 }

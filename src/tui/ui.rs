@@ -21,6 +21,8 @@ pub const BG_INFO: Color = Color::Rgb(20, 20, 28);
 pub const BG_SIDEBAR: Color = Color::Rgb(24, 24, 32);
 /// Info expanded (floating) panel background.
 pub const BG_INFO_EXPANDED: Color = Color::Rgb(28, 28, 38);
+/// Menu/popup overlay background — slightly lighter than other dark backgrounds.
+pub const BG_MENU: Color = Color::Rgb(35, 35, 45);
 /// Status bar background.
 pub const BG_STATUS_BAR: Color = Color::Rgb(30, 30, 42);
 
