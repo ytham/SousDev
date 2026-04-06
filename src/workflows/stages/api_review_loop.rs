@@ -84,37 +84,39 @@ pub async fn run_api_review_loop(
                 ));
 
                 // Execute each tool call and collect results.
-                let mut tool_results: Vec<ContentBlock> = Vec::new();
-                for (id, name, input) in &tool_calls {
-                    let tool_result = match registry.execute(name, input).await {
-                        Ok(output) => {
-                            // Truncate very large outputs to avoid context overflow.
-                            let truncated = if output.len() > 50_000 {
-                                format!(
-                                    "{}...\n\n[truncated — {} bytes total]",
-                                    &output[..50_000],
-                                    output.len()
-                                )
-                            } else {
-                                output
-                            };
-                            ContentBlock::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: truncated,
-                                is_error: false,
-                            }
-                        }
-                        Err(e) => ContentBlock::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: format!("Error: {}", e),
-                            is_error: true,
-                        },
-                    };
-                    tool_results.push(tool_result);
-                }
+                // Format depends on the provider:
+                // - Anthropic: single user message with ToolResult content blocks
+                // - OpenAI: separate role:"tool" messages per tool call
+                let is_openai = provider.name() == "openai";
 
-                // Send tool results back to the LLM.
-                messages.push(Message::tool_results(tool_results));
+                if is_openai {
+                    for (id, name, input) in &tool_calls {
+                        let content = match registry.execute(name, input).await {
+                            Ok(output) => truncate_tool_output(output),
+                            Err(e) => format!("Error: {}", e),
+                        };
+                        messages.push(Message::tool_result(id, content));
+                    }
+                } else {
+                    // Anthropic format: single user message with ToolResult blocks.
+                    let mut tool_results: Vec<ContentBlock> = Vec::new();
+                    for (id, name, input) in &tool_calls {
+                        let tool_result = match registry.execute(name, input).await {
+                            Ok(output) => ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: truncate_tool_output(output),
+                                is_error: false,
+                            },
+                            Err(e) => ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: format!("Error: {}", e),
+                                is_error: true,
+                            },
+                        };
+                        tool_results.push(tool_result);
+                    }
+                    messages.push(Message::tool_results(tool_results));
+                }
             }
             _ => {
                 // EndTurn, MaxTokens, or None — the model is done.
@@ -131,6 +133,19 @@ pub async fn run_api_review_loop(
         "API review loop exceeded {} iterations",
         MAX_ITERATIONS
     ))
+}
+
+/// Truncate tool output to prevent context overflow.
+fn truncate_tool_output(output: String) -> String {
+    if output.len() > 50_000 {
+        format!(
+            "{}...\n\n[truncated — {} bytes total]",
+            &output[..50_000],
+            output.len()
+        )
+    } else {
+        output
+    }
 }
 
 /// Extract `(id, name, input)` tuples from a completion result's content blocks.
