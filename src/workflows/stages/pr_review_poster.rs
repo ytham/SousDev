@@ -379,7 +379,8 @@ fn parse_inline_comments(text: &str) -> Vec<ParsedInlineComment> {
             let mut body_lines: Vec<&str> = Vec::new();
             // Collect lines until END_INLINE_COMMENT
             for body_line in lines.by_ref() {
-                if body_line.trim().eq_ignore_ascii_case(INLINE_COMMENT_END) {
+                let stripped = strip_heading_prefix(body_line.trim());
+                if stripped.eq_ignore_ascii_case(INLINE_COMMENT_END) {
                     break;
                 }
                 body_lines.push(body_line);
@@ -398,17 +399,23 @@ fn parse_inline_comments(text: &str) -> Vec<ParsedInlineComment> {
 }
 
 /// Extract the content between `SUMMARY` … `END_SUMMARY` markers.
+/// Strip leading markdown heading characters (`#`, spaces) from a line.
+fn strip_heading_prefix(line: &str) -> &str {
+    line.trim().trim_start_matches('#').trim()
+}
+
 fn parse_summary(text: &str) -> Option<String> {
     let mut in_summary = false;
     let mut lines: Vec<&str> = Vec::new();
 
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case(SUMMARY_START) {
+        let stripped = strip_heading_prefix(trimmed);
+        if !in_summary && stripped.eq_ignore_ascii_case(SUMMARY_START) {
             in_summary = true;
             continue;
         }
-        if trimmed.eq_ignore_ascii_case(SUMMARY_END) {
+        if in_summary && stripped.eq_ignore_ascii_case(SUMMARY_END) {
             break;
         }
         if in_summary {
@@ -495,6 +502,24 @@ END_INLINE_COMMENT";
         let s = summary.unwrap();
         assert!(s.contains("Line one."));
         assert!(s.contains("Line two."));
+    }
+
+    #[test]
+    fn test_parse_summary_with_heading_prefix() {
+        // Agent may output ### SUMMARY instead of bare SUMMARY.
+        let text = "### INLINE COMMENTS\nSome text.\n### SUMMARY\nReview body.\nVerdict: Approved\n### END_SUMMARY";
+        let summary = parse_summary(text);
+        assert!(summary.is_some());
+        let s = summary.unwrap();
+        assert!(s.contains("Review body."));
+        assert!(s.contains("Verdict: Approved"));
+    }
+
+    #[test]
+    fn test_parse_summary_with_hash_prefix() {
+        let text = "## SUMMARY\nContent here.\n## END_SUMMARY";
+        let summary = parse_summary(text).unwrap();
+        assert!(summary.contains("Content here."));
     }
 
     #[test]
