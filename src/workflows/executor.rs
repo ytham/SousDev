@@ -2296,8 +2296,9 @@ impl WorkflowExecutor {
 
             let model_results = futures::future::join_all(review_futures).await;
 
-            // Emit completion events and collect successful reviews.
+            // Emit completion events and collect results.
             let mut reviews: Vec<(String, String)> = Vec::new(); // (display_name, review_text)
+            let mut failed_models: Vec<(String, String)> = Vec::new(); // (display_name, error)
             for (model, display_name, result) in &model_results {
                 match result {
                     Ok(review_text) => {
@@ -2316,6 +2317,7 @@ impl WorkflowExecutor {
                             error: e.to_string(),
                         });
                         logger.error(&format!("{} review failed: {}", display_name, e));
+                        failed_models.push((display_name.clone(), e.to_string()));
                     }
                 }
             }
@@ -2340,14 +2342,31 @@ impl WorkflowExecutor {
             let consolidated = if reviews.len() >= 2 {
                 let display_names: Vec<&str> = reviews.iter().map(|(name, _)| name.as_str()).collect();
                 let example_row = format!("| {} | ✅ Approved |", display_names.first().unwrap_or(&"Model"));
+
+                // Include info about failed models so the consolidation
+                // can note them in the Summary table.
+                let mut all_model_names = display_names.join(", ");
+                let mut failed_note = String::new();
+                if !failed_models.is_empty() {
+                    let failed_names: Vec<&str> = failed_models.iter().map(|(n, _)| n.as_str()).collect();
+                    all_model_names.push_str(", ");
+                    all_model_names.push_str(&failed_names.join(", "));
+                    failed_note.push_str("\n\nNote: The following models FAILED and could not produce a review. ");
+                    failed_note.push_str("Include them in the Summary table with '🔴 Failed':\n");
+                    for (name, error) in &failed_models {
+                        let short = if error.len() > 80 { &error[..80] } else { error.as_str() };
+                        failed_note.push_str(&format!("- {}: {}\n", name, short));
+                    }
+                }
+
                 let consolidation_prompt = self.load_and_render_prompt(
                     "review-consolidation",
                     &[
                         ("review_count", &reviews.len().to_string()),
                         ("pr_title", &pr.title),
                         ("pr_number", &pr.number.to_string()),
-                        ("reviews", &format_reviews_for_consolidation(&reviews)),
-                        ("model_display_names", &display_names.join(", ")),
+                        ("reviews", &format!("{}{}", format_reviews_for_consolidation(&reviews), failed_note)),
+                        ("model_display_names", &all_model_names),
                         ("model_display_names_example", &example_row),
                     ],
                 );
@@ -2413,8 +2432,26 @@ impl WorkflowExecutor {
 
                 consolidated_text
             } else {
-                // Only one model succeeded — use its review directly.
-                reviews[0].1.clone()
+                // Only one model succeeded — use its review but append a
+                // Summary section showing which models succeeded/failed.
+                let mut text = reviews[0].1.clone();
+
+                if !failed_models.is_empty() {
+                    text.push_str("\n\n### Summary\n\n");
+                    text.push_str("| Model | Verdict |\n|-------|--------|\n");
+                    text.push_str(&format!("| {} | (see review above) |\n", reviews[0].0));
+                    for (name, error) in &failed_models {
+                        // Truncate error for the table.
+                        let short_err = if error.len() > 60 {
+                            format!("{}...", &error[..57])
+                        } else {
+                            error.clone()
+                        };
+                        text.push_str(&format!("| {} | 🔴 Failed: {} |\n", name, short_err));
+                    }
+                }
+
+                text
             };
 
             // ── Set agent result and post the review ─────────────────────
