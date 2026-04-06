@@ -1166,9 +1166,16 @@ impl WorkflowExecutor {
         record: &HandledIssueRecord,
     ) -> Result<()> {
         let logger = Logger::new(format!("{} #{}", self.config.name, issue_number));
-        let pr_number = record.pr_number.ok_or_else(|| {
-            anyhow::anyhow!("No PR number for plan-posted issue #{}", issue_number)
-        })?;
+        // Try pr_number field first; fall back to extracting from pr_url.
+        let pr_number = record.pr_number
+            .or_else(|| {
+                record.pr_url.as_ref().and_then(|url| {
+                    url.split('/').next_back().and_then(|s| s.parse::<u64>().ok())
+                })
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("No PR number for plan-posted issue #{}", issue_number)
+            })?;
         let repo = &record.issue_repo;
 
         // Check if the PR is still open.
@@ -1349,9 +1356,15 @@ impl WorkflowExecutor {
         let branch = record.branch.as_deref().ok_or_else(|| {
             anyhow::anyhow!("No branch for plan-approved issue #{}", issue_number)
         })?;
-        let pr_number = record.pr_number.ok_or_else(|| {
-            anyhow::anyhow!("No PR number for plan-approved issue #{}", issue_number)
-        })?;
+        let pr_number = record.pr_number
+            .or_else(|| {
+                record.pr_url.as_ref().and_then(|url| {
+                    url.split('/').next_back().and_then(|s| s.parse::<u64>().ok())
+                })
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("No PR number for plan-approved issue #{}", issue_number)
+            })?;
         let repo = &record.issue_repo;
 
         logger.info(&format!(
