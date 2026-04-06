@@ -171,7 +171,8 @@ impl Stage for PrReviewPosterStage {
             body_parts.push(format!("## 🧑‍🍳 PR Review\n\n{}", text));
         }
 
-        // Inline observations section (formatted as markdown, not formal review comments).
+        // Inline observations: include a summary in the timeline comment AND
+        // post each as an actual inline PR comment on the specific line.
         if !inline_comments.is_empty() {
             let mut inline_section = String::from("\n### Inline observations\n");
             for comment in &inline_comments {
@@ -181,6 +182,36 @@ impl Stage for PrReviewPosterStage {
                 ));
             }
             body_parts.push(inline_section);
+
+            // Post each inline comment as an actual PR review comment on the diff.
+            for comment in &inline_comments {
+                let inline_body = format!("🧑‍🍳 {}", comment.body);
+                match crate::workflows::github_prs::post_inline_comment(
+                    &pr.repo,
+                    pr.number,
+                    &head_sha,
+                    &comment.path,
+                    comment.line,
+                    &inline_body,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        ctx.logger.debug(&format!(
+                            "Posted inline comment on {}:{}",
+                            comment.path, comment.line
+                        ));
+                    }
+                    Err(e) => {
+                        // Non-fatal: the comment is still in the timeline summary.
+                        // Common failure: line number doesn't exist in the diff.
+                        ctx.logger.debug(&format!(
+                            "Could not post inline comment on {}:{} — {}",
+                            comment.path, comment.line, e
+                        ));
+                    }
+                }
+            }
         }
 
         let summary_posted = if !body_parts.is_empty() {
