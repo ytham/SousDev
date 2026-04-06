@@ -2307,7 +2307,7 @@ impl WorkflowExecutor {
             // ── Consolidate reviews ──────────────────────────────────────
             let consolidated = if reviews.len() >= 2 {
                 let display_names: Vec<&str> = reviews.iter().map(|(name, _)| name.as_str()).collect();
-                let example_row = format!("| {} | ✅ Approved |", display_names.first().unwrap_or(&"Model"));
+                let example_row = format!("| {} | 🟢 Approved |", display_names.first().unwrap_or(&"Model"));
                 let consolidation_prompt = self.load_and_render_prompt(
                     "review-consolidation",
                     &[

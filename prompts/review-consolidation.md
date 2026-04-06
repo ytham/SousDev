@@ -55,11 +55,11 @@ SUMMARY
 <one row per model using their FULL display name and emoji verdict, e.g.:>
 | {{model_display_names_example}} |
 
-Verdict: <✅ Approved or ❌ Not Approved — ✅ Approved only if ALL models approved; otherwise ❌ Not Approved>
+Verdict: <🟢 Approved or 🔴 Not Approved — 🟢 Approved only if ALL models approved; otherwise 🔴 Not Approved>
 END_SUMMARY
 
 IMPORTANT:
 - Use the full model display names exactly as provided: {{model_display_names}}
-- Use ✅ before "Approved" and ❌ before "Not Approved" in both the table and the final verdict
+- Use 🟢 before "Approved" and 🔴 before "Not Approved" in both the table and the final verdict
 - The "Summary" section with the verdict table and final verdict MUST be the last section before END_SUMMARY
 - Do NOT include a "Models used:" line — the table already shows this information
