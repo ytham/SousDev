@@ -2082,9 +2082,35 @@ impl WorkflowExecutor {
                     self.opts.target_repo.clone(),
                     self.opts.git_method.as_deref().unwrap_or("https"),
                 );
-                let info = ws.setup_for_pr_review(pr, &run_id).await?;
-                ctx.workspace_dir = info.dir;
-                ctx.branch = info.branch;
+                match ws.setup_for_pr_review(pr, &run_id).await {
+                    Ok(info) => {
+                        ctx.workspace_dir = info.dir;
+                        ctx.branch = info.branch;
+                    }
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        if err_str.contains("couldn't find remote ref")
+                            || err_str.contains("does not exist")
+                        {
+                            logger.info(&format!(
+                                "PR #{}: branch deleted — skipping",
+                                pr.number
+                            ));
+                            self.opts.tui_tx.send(TuiEvent::LogMessage {
+                                workflow_name: self.config.name.clone(),
+                                level: "warn".to_string(),
+                                stage: "pr-checkout".to_string(),
+                                message: format!(
+                                    "PR #{}: branch '{}' no longer exists — skipping",
+                                    pr.number, pr.head_ref_name
+                                ),
+                                run_id: run_id.clone(),
+                            });
+                            return Err(anyhow::anyhow!("SKIP:branch_deleted"));
+                        }
+                        return Err(e);
+                    }
+                }
             }
             self.run_stage(&PrCheckoutStage, &mut ctx).await?;
 
@@ -2193,18 +2219,24 @@ impl WorkflowExecutor {
                 })
             }
             Err(e) => {
+                let error = e.to_string();
+                let is_skip = error.contains("SKIP:branch_deleted");
                 if let Some(ref log) = wf_log {
-                    let _ = log.error("executor", &e.to_string()).await;
-                    let _ = log.complete("failed").await;
+                    if is_skip {
+                        let _ = log.complete("skipped").await;
+                    } else {
+                        let _ = log.error("executor", &error).await;
+                        let _ = log.complete("failed").await;
+                    }
                 }
                 Ok(WorkflowResult {
                     workflow_name: self.config.name.clone(),
                     run_id,
                     started_at,
                     completed_at,
-                    success: false,
-                    skipped: false,
-                    error: Some(e.to_string()),
+                    success: is_skip,
+                    skipped: is_skip,
+                    error: if is_skip { None } else { Some(error) },
                     pr_number: Some(pr.number),
                     retry_count: 0,
                     review_rounds: 0,
