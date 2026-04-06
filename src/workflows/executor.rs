@@ -1972,7 +1972,48 @@ impl WorkflowExecutor {
                 ctx.branch = info.branch;
             }
             self.run_stage(&PrCheckoutStage, &mut ctx).await?;
-            self.run_stage(&AgentLoopStage, &mut ctx).await?;
+
+            // Prefer API-based review when an API key is available.
+            // Falls back to CLI-based AgentLoopStage otherwise.
+            let technique = &self.config.agent_loop.technique;
+            let api_model = match technique.as_str() {
+                "claude-loop" => multi_review::provider_for_review_model(ReviewerModel::Claude),
+                "codex-loop" => multi_review::provider_for_review_model(ReviewerModel::Codex),
+                _ => None,
+            };
+
+            if let Some(provider) = api_model {
+                logger.info("Using API-based review loop");
+                let conventions = load_workspace_conventions(&ctx.workspace_dir).await;
+                let api_system_prompt = if conventions.is_empty() {
+                    ctx.system_prompt.clone()
+                } else {
+                    Some(format!(
+                        "{}{}",
+                        conventions,
+                        ctx.system_prompt.as_deref().unwrap_or("")
+                    ))
+                };
+                let review_registry = crate::workflows::stages::api_review_loop::review_tool_registry();
+                let review_text = crate::workflows::stages::api_review_loop::run_api_review_loop(
+                    provider.as_ref(),
+                    &review_registry,
+                    &ctx.parsed_task.full_text(),
+                    api_system_prompt.as_deref(),
+                    &logger,
+                ).await?;
+                ctx.agent_result = Some(RunResult::success(
+                    "api-review",
+                    review_text,
+                    vec![],
+                    0,
+                    0,
+                ));
+            } else {
+                logger.info("Using CLI-based review (no API key)");
+                self.run_stage(&AgentLoopStage, &mut ctx).await?;
+            }
+
             self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
             Ok::<_, anyhow::Error>(())
         }
@@ -2101,29 +2142,27 @@ impl WorkflowExecutor {
             let ext_cfg = self.config.agent_loop.external_agent.clone().unwrap_or_default();
             let workspace_cwd = ctx.workspace_dir.to_string_lossy().to_string();
 
-            // ── Build per-model adapters and options ──────────────────────
+            // ── Build per-model execution plans ──────────────────────────
+            // For each model, prefer the API-based review loop (faster, no CLI
+            // dependency) if an API key is available.  Fall back to CLI otherwise.
+            let review_registry = crate::workflows::stages::api_review_loop::review_tool_registry();
+
+            enum ReviewMethod {
+                Api(std::sync::Arc<dyn crate::providers::provider::LLMProvider>),
+                Cli(
+                    crate::workflows::stages::external_agent_loop::ExternalAgentAdapter,
+                    ExternalAgentRunOptions,
+                ),
+            }
+
             struct ModelRun {
                 model: ReviewerModel,
-                adapter: crate::workflows::stages::external_agent_loop::ExternalAgentAdapter,
-                opts: ExternalAgentRunOptions,
+                method: ReviewMethod,
                 system_prompt: Option<String>,
             }
 
             let mut runs: Vec<ModelRun> = Vec::new();
             for &model in models {
-                let adapter = match model {
-                    ReviewerModel::Claude => claude_adapter(ExternalAgentRunOptions::default()),
-                    ReviewerModel::Codex => codex_adapter(ExternalAgentRunOptions::default()),
-                    ReviewerModel::Gemini => gemini_adapter(ExternalAgentRunOptions::default()),
-                };
-
-                let opts = ExternalAgentRunOptions {
-                    cwd: Some(workspace_cwd.clone()),
-                    timeout_secs: ext_cfg.timeout_secs,
-                    model: None,
-                    extra_flags: Some(disallowed_tools_for(model)),
-                };
-
                 // Claude reads CLAUDE.md natively; non-Claude models need
                 // the workspace conventions prepended to the system prompt.
                 let model_system_prompt = if model == ReviewerModel::Claude {
@@ -2133,6 +2172,26 @@ impl WorkflowExecutor {
                     if combined.is_empty() { None } else { Some(combined) }
                 };
 
+                // Try API provider first, fall back to CLI.
+                let method = if let Some(provider) = multi_review::provider_for_review_model(model) {
+                    logger.info(&format!("PR #{}: {} using API", pr.number, model.name()));
+                    ReviewMethod::Api(provider)
+                } else {
+                    logger.info(&format!("PR #{}: {} using CLI (no API key)", pr.number, model.name()));
+                    let adapter = match model {
+                        ReviewerModel::Claude => claude_adapter(ExternalAgentRunOptions::default()),
+                        ReviewerModel::Codex => codex_adapter(ExternalAgentRunOptions::default()),
+                        ReviewerModel::Gemini => gemini_adapter(ExternalAgentRunOptions::default()),
+                    };
+                    let opts = ExternalAgentRunOptions {
+                        cwd: Some(workspace_cwd.clone()),
+                        timeout_secs: ext_cfg.timeout_secs,
+                        model: None,
+                        extra_flags: Some(disallowed_tools_for(model)),
+                    };
+                    ReviewMethod::Cli(adapter, opts)
+                };
+
                 // Emit stage-started event.
                 self.opts.tui_tx.send(TuiEvent::StageStarted {
                     workflow_name: self.config.name.clone(),
@@ -2140,22 +2199,37 @@ impl WorkflowExecutor {
                     stage_name: format!("review-{}", model.name()),
                 });
 
-                runs.push(ModelRun { model, adapter, opts, system_prompt: model_system_prompt });
+                runs.push(ModelRun { model, method, system_prompt: model_system_prompt });
             }
 
             // ── Run all model agents concurrently ────────────────────────
-            // Each future borrows `&ctx` (immutable) and its own `ModelRun`.
+            // Each future borrows `&ctx` and `&review_registry` (immutable).
             // `futures::future::join_all` runs on the same task — no `Send`
             // bound is needed.
             let review_futures: Vec<_> = runs.iter().map(|run| {
                 async {
-                    let result = run_external_agent_loop(
-                        &review_prompt,
-                        &ctx,
-                        &run.adapter,
-                        &run.opts,
-                        run.system_prompt.as_deref(),
-                    ).await;
+                    let result: Result<String> = match &run.method {
+                        ReviewMethod::Api(provider) => {
+                            crate::workflows::stages::api_review_loop::run_api_review_loop(
+                                provider.as_ref(),
+                                &review_registry,
+                                &review_prompt,
+                                run.system_prompt.as_deref(),
+                                &logger,
+                            ).await
+                        }
+                        ReviewMethod::Cli(adapter, opts) => {
+                            run_external_agent_loop(
+                                &review_prompt,
+                                &ctx,
+                                adapter,
+                                opts,
+                                run.system_prompt.as_deref(),
+                            )
+                            .await
+                            .map(|r| r.answer)
+                        }
+                    };
                     (run.model, result)
                 }
             }).collect();
@@ -2166,21 +2240,13 @@ impl WorkflowExecutor {
             let mut reviews: Vec<(ReviewerModel, String)> = Vec::new();
             for (model, result) in &model_results {
                 match result {
-                    Ok(run_result) => {
+                    Ok(review_text) => {
                         self.opts.tui_tx.send(TuiEvent::StageCompleted {
                             workflow_name: self.config.name.clone(),
                             run_id: run_id.clone(),
                             stage_name: format!("review-{}", model.name()),
                         });
-                        if run_result.success {
-                            reviews.push((*model, run_result.answer.clone()));
-                        } else {
-                            logger.error(&format!(
-                                "{} review returned failure: {}",
-                                model.name(),
-                                run_result.error.as_deref().unwrap_or("unknown")
-                            ));
-                        }
+                        reviews.push((*model, review_text.clone()));
                     }
                     Err(e) => {
                         self.opts.tui_tx.send(TuiEvent::StageFailed {
@@ -2222,7 +2288,7 @@ impl WorkflowExecutor {
                     let provider = crate::providers::anthropic::AnthropicProvider::new("claude-sonnet-4-20250514");
                     use crate::providers::provider::{LLMProvider as _, Message as LLMMessage, MessageRole as LLMRole};
                     match provider.complete(
-                        &[LLMMessage { role: LLMRole::User, content: consolidation_prompt.clone() }],
+                        &[LLMMessage { role: LLMRole::User, content: consolidation_prompt.clone(), content_blocks: None, tool_call_id: None }],
                         None,
                     ).await {
                         Ok(result) => Ok(result.content),

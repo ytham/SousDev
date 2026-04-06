@@ -352,6 +352,9 @@ mod tests {
                 Ok(CompletionResult {
                     content: "The final answer is 42.".to_string(),
                     done: true,
+                    content_blocks: None,
+                    stop_reason: None,
+                    usage: None,
                 })
             }
         }
@@ -406,7 +409,7 @@ mod tests {
                     // Second call: plain answer.
                     "The echo said: hello".to_string()
                 };
-                Ok(CompletionResult { content, done: true })
+                Ok(CompletionResult { content, done: true, content_blocks: None, stop_reason: None, usage: None })
             }
         }
 

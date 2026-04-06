@@ -459,7 +459,7 @@ mod tests {
                 } else {
                     "The final answer.".to_string()
                 };
-                Ok(CompletionResult { content, done: true })
+                Ok(CompletionResult { content, done: true, content_blocks: None, stop_reason: None, usage: None })
             }
         }
 

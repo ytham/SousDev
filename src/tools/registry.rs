@@ -76,6 +76,19 @@ impl ToolRegistry {
             None => Err(anyhow::anyhow!("Unknown tool: {}", name)),
         }
     }
+
+    /// Convert all registered tools into [`ToolDefinition`]s suitable for
+    /// passing to an LLM API's `tools` parameter.
+    pub fn to_tool_definitions(&self) -> Vec<crate::providers::provider::ToolDefinition> {
+        self.tools
+            .values()
+            .map(|t| crate::providers::provider::ToolDefinition {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.parameters.clone(),
+            })
+            .collect()
+    }
 }
 
 impl Default for ToolRegistry {

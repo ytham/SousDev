@@ -189,6 +189,42 @@ pub fn disallowed_tools_for(model: ReviewerModel) -> Vec<String> {
     }
 }
 
+/// Create an LLM provider for a specific reviewer model, if an API key is available.
+///
+/// Returns `None` if the required API key is not set (CLI fallback should be used).
+pub fn provider_for_review_model(
+    model: ReviewerModel,
+) -> Option<std::sync::Arc<dyn crate::providers::provider::LLMProvider>> {
+    match model {
+        ReviewerModel::Claude => {
+            if env_set("ANTHROPIC_API_KEY") {
+                let model_name = std::env::var("ANTHROPIC_MODEL")
+                    .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+                Some(std::sync::Arc::new(
+                    crate::providers::anthropic::AnthropicProvider::new(model_name),
+                ))
+            } else {
+                None
+            }
+        }
+        ReviewerModel::Codex => {
+            if env_set("OPENAI_API_KEY") {
+                let model_name = std::env::var("OPENAI_MODEL")
+                    .unwrap_or_else(|_| "gpt-4o".to_string());
+                Some(std::sync::Arc::new(
+                    crate::providers::openai::OpenAIProvider::new(model_name),
+                ))
+            } else {
+                None
+            }
+        }
+        ReviewerModel::Gemini => {
+            // Gemini doesn't have a harness-native provider yet — CLI only.
+            None
+        }
+    }
+}
+
 /// Format multiple model review outputs for the consolidation prompt.
 pub fn format_reviews_for_consolidation(reviews: &[(ReviewerModel, String)]) -> String {
     let mut output = String::new();

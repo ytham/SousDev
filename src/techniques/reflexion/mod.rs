@@ -356,7 +356,7 @@ mod tests {
             fn name(&self) -> &str { "mock" }
             fn model(&self) -> &str { "mock" }
             async fn complete(&self, _msgs: &[Message], _opts: Option<&CompleteOptions>) -> Result<CompletionResult> {
-                Ok(CompletionResult { content: "The answer is 42.".into(), done: true })
+                Ok(CompletionResult { content: "The answer is 42.".into(), done: true, content_blocks: None, stop_reason: None, usage: None })
             }
         }
 

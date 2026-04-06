@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod api_review_loop;
 pub mod external_agent_loop;
 pub mod parse;
 pub mod pr_checkout;

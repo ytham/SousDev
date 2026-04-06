@@ -43,6 +43,8 @@ pub async fn run_self_consistency(opts: Options) -> Result<RunResult> {
     let complete_opts = CompleteOptions {
         temperature: Some(temperature),
         max_tokens: Some(1024),
+        tools: None,
+        tool_choice: None,
     };
 
     // Sample `samples` independent chains.
@@ -215,7 +217,7 @@ mod tests {
                 let n = self.call.fetch_add(1, Ordering::SeqCst);
                 // Chains 0,1,2 say "42"; chain 3 says "43" — majority is "42".
                 let content = if n < 3 { "42" } else { "43" };
-                Ok(CompletionResult { content: content.into(), done: true })
+                Ok(CompletionResult { content: content.into(), done: true, content_blocks: None, stop_reason: None, usage: None })
             }
         }
 

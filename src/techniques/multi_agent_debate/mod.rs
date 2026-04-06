@@ -313,7 +313,7 @@ mod tests {
                 } else {
                     format!("Position from call {}: The answer is 4.", n)
                 };
-                Ok(CompletionResult { content, done: true })
+                Ok(CompletionResult { content, done: true, content_blocks: None, stop_reason: None, usage: None })
             }
         }
 
@@ -345,7 +345,7 @@ mod tests {
             fn name(&self) -> &str { "mock" }
             fn model(&self) -> &str { "mock" }
             async fn complete(&self, _msgs: &[Message], _: Option<&CompleteOptions>) -> Result<CompletionResult> {
-                Ok(CompletionResult { content: "42".into(), done: true })
+                Ok(CompletionResult { content: "42".into(), done: true, content_blocks: None, stop_reason: None, usage: None })
             }
         }
 

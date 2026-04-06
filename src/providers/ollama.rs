@@ -74,6 +74,7 @@ impl LLMProvider for OllamaProvider {
                     MessageRole::System => "system".to_string(),
                     MessageRole::User => "user".to_string(),
                     MessageRole::Assistant => "assistant".to_string(),
+                    MessageRole::Tool => "tool".to_string(),
                 },
                 content: m.content.clone(),
             })
@@ -100,6 +101,9 @@ impl LLMProvider for OllamaProvider {
         Ok(CompletionResult {
             content: response.message.content,
             done: true,
+            content_blocks: None,
+            stop_reason: None,
+            usage: None,
         })
     }
 }
