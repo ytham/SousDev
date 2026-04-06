@@ -250,7 +250,7 @@ fn status_badge(status: ItemStatus) -> (String, Color) {
         ItemStatus::Error => ("[!!]".into(), Color::Red),
         ItemStatus::Cooldown => ("[!!]".into(), Color::Red),
         ItemStatus::ReviewedApproved => ("[A✓]".into(), Color::Green),
-        ItemStatus::ReviewedConcerns => ("[A✗]".into(), Color::Yellow),
+        ItemStatus::ReviewedConcerns => ("[A✗]".into(), Color::Rgb(220, 120, 80)),
         ItemStatus::Approved => ("[✓✓]".into(), Color::Green),
         ItemStatus::PlanPending => ("[Pl]".into(), Color::Cyan),
         ItemStatus::NewComments => ("[**]".into(), Color::Cyan),

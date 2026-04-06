@@ -241,7 +241,7 @@ fn status_badge(status: ItemStatus) -> (String, Color) {
         ItemStatus::Error => ("[!!]".into(), Color::Red),
         ItemStatus::Cooldown => ("[!!]".into(), Color::Red),
         ItemStatus::ReviewedApproved => ("[A✓]".into(), Color::Green),
-        ItemStatus::ReviewedConcerns => ("[A✗]".into(), Color::Yellow),
+        ItemStatus::ReviewedConcerns => ("[A✗]".into(), Color::Rgb(220, 120, 80)),
         ItemStatus::Approved => ("[✓✓]".into(), Color::Green),
         ItemStatus::PlanPending => ("[Pl]".into(), Color::Cyan),
         ItemStatus::NewComments => ("[**]".into(), Color::Cyan),
@@ -274,7 +274,10 @@ mod tests {
         assert_eq!(status_badge(ItemStatus::Success).1, Color::Green);
         assert_eq!(status_badge(ItemStatus::Error).1, Color::Red);
         assert_eq!(status_badge(ItemStatus::ReviewedApproved).1, Color::Green);
-        assert_eq!(status_badge(ItemStatus::ReviewedConcerns).1, Color::Yellow);
+        assert_eq!(
+            status_badge(ItemStatus::ReviewedConcerns).1,
+            Color::Rgb(220, 120, 80)
+        );
         assert_eq!(status_badge(ItemStatus::Approved).1, Color::Green);
         assert_eq!(status_badge(ItemStatus::PlanPending).1, Color::Cyan);
         assert_eq!(status_badge(ItemStatus::NewComments).1, Color::Cyan);
