@@ -772,11 +772,18 @@ impl WorkflowExecutor {
                 .await
                 .unwrap_or_default();
             for (number, record) in plan_posted {
+                logger.info(&format!("Polling plan approval for issue #{}", number));
                 if let Err(e) = self.poll_plan_approval(number, &record).await {
-                    logger.error(&format!(
-                        "Plan poll for issue #{} failed: {}",
-                        number, e
-                    ));
+                    let error_msg = format!("Plan poll for issue #{} failed: {}", number, e);
+                    logger.error(&error_msg);
+                    // Also emit to TUI so the error is visible in the log pane.
+                    self.opts.tui_tx.send(TuiEvent::LogMessage {
+                        workflow_name: self.config.name.clone(),
+                        level: "error".to_string(),
+                        stage: "plan-approval".to_string(),
+                        message: error_msg,
+                        run_id: String::new(),
+                    });
                 }
             }
         }
@@ -1174,9 +1181,18 @@ impl WorkflowExecutor {
                 })
             })
             .ok_or_else(|| {
-                anyhow::anyhow!("No PR number for plan-posted issue #{}", issue_number)
+                anyhow::anyhow!(
+                    "No PR number for plan-posted issue #{} (pr_url: {:?})",
+                    issue_number,
+                    record.pr_url
+                )
             })?;
         let repo = &record.issue_repo;
+
+        logger.info(&format!(
+            "Checking PR #{} in {} for approval (state: {:?}, branch: {:?})",
+            pr_number, repo, record.state, record.branch
+        ));
 
         // Check if the PR is still open.
         let pr_state =
@@ -1197,6 +1213,19 @@ impl WorkflowExecutor {
         )
         .await
         .unwrap_or_default();
+
+        logger.info(&format!(
+            "PR #{}: found {} review(s) with bodies",
+            pr_number,
+            reviews.len()
+        ));
+        for r in &reviews {
+            logger.debug(&format!(
+                "  review by {}: {:?}",
+                r.login,
+                if r.body.len() > 50 { &r.body[..50] } else { &r.body }
+            ));
+        }
 
         let mut approval_review_id: Option<u64> = None;
         let mut addendum: Option<String> = None;
@@ -1239,6 +1268,10 @@ impl WorkflowExecutor {
         }
 
         if approval_review_id.is_none() {
+            logger.info(&format!(
+                "PR #{}: no approval found yet — will check next tick",
+                pr_number
+            ));
             return Ok(()); // Not yet approved — check next tick.
         }
 
