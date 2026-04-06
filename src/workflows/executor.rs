@@ -1494,6 +1494,17 @@ impl WorkflowExecutor {
             // Run the agent to execute the plan.
             self.run_stage(&AgentLoopStage, &mut ctx).await?;
 
+            // Commit any uncommitted changes left by the agent (e.g. if the
+            // agent timed out before running git commit).
+            let status = exec_git(&["status", "--porcelain"], &info.dir).await?;
+            if !status.trim().is_empty() {
+                logger.info("Committing uncommitted agent changes");
+                exec_git(&["add", "-A"], &info.dir).await?;
+                let fallback_msg = format!("feat: implement plan for issue #{}", issue_number);
+                let commit_msg = ctx.pr_title.as_deref().unwrap_or(&fallback_msg);
+                exec_git(&["commit", "-m", commit_msg], &info.dir).await?;
+            }
+
             // Run the internal review loop.
             self.run_stage(&ReviewFeedbackLoopStage, &mut ctx).await?;
 
