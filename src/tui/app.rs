@@ -122,7 +122,16 @@ impl LogEntry {
                     2 // last tool line + "[+N] N consolidated"
                 }
             }
-            LogEntryKind::System => 1,
+            LogEntryKind::System => {
+                if self.expanded {
+                    // Count newlines in the message for expanded height.
+                    self.lines.first()
+                        .map(|l| l.message.split('\n').count().max(1))
+                        .unwrap_or(1)
+                } else {
+                    1
+                }
+            }
         }
     }
 }
@@ -1507,6 +1516,16 @@ impl App {
                     }
                     LogEntryKind::ConsolidatedTools => {
                         target_idx = Some(i);
+                    }
+                    LogEntryKind::System => {
+                        // Expandable if the message is long (truncated at
+                        // render time) or contains newlines.
+                        let is_long = entry.lines.first()
+                            .map(|l| l.message.len() > 80 || l.message.contains('\n'))
+                            .unwrap_or(false);
+                        if is_long || entry.expanded {
+                            target_idx = Some(i);
+                        }
                     }
                     _ => {}
                 }

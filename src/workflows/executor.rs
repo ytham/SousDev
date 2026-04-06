@@ -2316,8 +2316,18 @@ impl WorkflowExecutor {
                             stage_name: format!("review-{}", model.name()),
                             error: e.to_string(),
                         });
-                        logger.error(&format!("{} review failed: {}", display_name, e));
-                        failed_models.push((display_name.clone(), e.to_string()));
+                        let full_error = e.to_string();
+                        logger.error(&format!("{} review failed: {}", display_name, full_error));
+                        // Emit to TUI log with full error details (StageFailed
+                        // only shows in the stage indicator, not the log pane).
+                        self.opts.tui_tx.send(TuiEvent::LogMessage {
+                            workflow_name: self.config.name.clone(),
+                            level: "error".to_string(),
+                            stage: format!("review-{}", model.name()),
+                            message: format!("{} review failed:\n{}", display_name, full_error),
+                            run_id: run_id.clone(),
+                        });
+                        failed_models.push((display_name.clone(), full_error));
                     }
                 }
             }

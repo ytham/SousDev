@@ -185,8 +185,10 @@ pub async fn run_api_review_loop(
 
     if final_review.is_empty() {
         return Err(anyhow::anyhow!(
-            "API review loop exceeded {} iterations",
-            MAX_ITERATIONS
+            "API review loop exceeded {} iterations.\nThe model made {} tool calls without producing a final review.\nProvider: {}\nTip: For large PRs, consider reducing the number of files or splitting the PR.",
+            MAX_ITERATIONS,
+            MAX_ITERATIONS,
+            provider.name()
         ));
     }
 

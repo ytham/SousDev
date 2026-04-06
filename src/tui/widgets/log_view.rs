@@ -480,17 +480,63 @@ fn render_system(
 
         let prefix_len = 2 + 6 + log.stage.len() + 3; // dot + level + [stage] + spaces
         let available = ctx.max_width.saturating_sub(prefix_len);
-        let msg = truncate_msg(&log.message, available);
 
-        lines.push(Line::from(vec![
-            dot,
-            Span::styled(
-                format!("{:<5} ", log.level.to_uppercase()),
-                rs.fg(level_color),
-            ),
-            Span::styled(format!("[{}] ", log.stage), rs.fg(Color::DarkGray)),
-            Span::styled(msg, rs.fg(Color::Gray)),
-        ]));
+        if entry.expanded {
+            // Expanded: show the full message, wrapping on newlines.
+            // First line: level + stage + first line of message.
+            let msg_lines: Vec<&str> = log.message.split('\n').collect();
+            let first_msg = if !msg_lines.is_empty() {
+                msg_lines[0]
+            } else {
+                &log.message
+            };
+
+            lines.push(Line::from(vec![
+                dot.clone(),
+                Span::styled(
+                    format!("{:<5} ", log.level.to_uppercase()),
+                    rs.fg(level_color),
+                ),
+                Span::styled(format!("[{}] ", log.stage), rs.fg(Color::DarkGray)),
+                Span::styled(first_msg.to_string(), rs.fg(Color::Gray)),
+            ]));
+
+            // Remaining lines: indented continuation.
+            for (j, sub_line) in msg_lines.iter().enumerate().skip(1) {
+                let screen_row = screen_y_base + j;
+                if screen_row >= ctx.area.y as usize + ctx.area.height as usize {
+                    break;
+                }
+                let row_s = ctx.row_style(screen_row);
+                let indent = " ".repeat(prefix_len);
+                lines.push(Line::from(vec![
+                    Span::styled(indent, row_s),
+                    Span::styled(sub_line.to_string(), row_s.fg(Color::Gray)),
+                ]));
+            }
+
+            // If the message was long but didn't have newlines, show it
+            // fully without truncation on a single line (already done above
+            // since we don't call truncate_msg).
+        } else {
+            // Collapsed: truncated to available width.
+            let msg = truncate_msg(&flatten_newlines(&log.message), available);
+
+            // Show expand indicator if the message is truncated.
+            let is_expandable = log.message.len() > available || log.message.contains('\n');
+            let suffix = if is_expandable { " ▸" } else { "" };
+
+            lines.push(Line::from(vec![
+                dot,
+                Span::styled(
+                    format!("{:<5} ", log.level.to_uppercase()),
+                    rs.fg(level_color),
+                ),
+                Span::styled(format!("[{}] ", log.stage), rs.fg(Color::DarkGray)),
+                Span::styled(msg, rs.fg(Color::Gray)),
+                Span::styled(suffix.to_string(), rs.fg(Color::DarkGray)),
+            ]));
+        }
     }
 }
 
