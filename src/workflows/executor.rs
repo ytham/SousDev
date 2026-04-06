@@ -668,6 +668,78 @@ impl WorkflowExecutor {
             });
         }
 
+        let plan_first = self
+            .config
+            .github_issues
+            .as_ref()
+            .and_then(|c| c.plan_first)
+            .unwrap_or(true);
+
+        // ── Phase 2 & 3: Plan polling and execution (BEFORE early return) ──
+        // These must run even when there are no new unhandled issues, since
+        // plan_posted issues need to be polled for approval and plan_approved
+        // issues need to be executed.
+        if plan_first {
+            let plan_posted = self
+                .issue_store
+                .get_issues_in_state(&self.config.name, plan_state::PLAN_POSTED)
+                .await
+                .unwrap_or_default();
+            if !plan_posted.is_empty() {
+                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                    workflow_name: self.config.name.clone(),
+                    level: "info".to_string(),
+                    stage: "plan-approval".to_string(),
+                    message: format!(
+                        "Found {} issue(s) in plan_posted state",
+                        plan_posted.len()
+                    ),
+                    run_id: String::new(),
+                });
+            }
+            for (number, record) in plan_posted {
+                logger.info(&format!("Polling plan approval for issue #{}", number));
+                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                    workflow_name: self.config.name.clone(),
+                    level: "info".to_string(),
+                    stage: "plan-approval".to_string(),
+                    message: format!(
+                        "Polling plan approval for issue #{} (PR: {})",
+                        number,
+                        record.pr_url.as_deref().unwrap_or("?")
+                    ),
+                    run_id: String::new(),
+                });
+                if let Err(e) = self.poll_plan_approval(number, &record).await {
+                    let error_msg = format!("Plan poll for issue #{} failed: {}", number, e);
+                    logger.error(&error_msg);
+                    self.opts.tui_tx.send(TuiEvent::LogMessage {
+                        workflow_name: self.config.name.clone(),
+                        level: "error".to_string(),
+                        stage: "plan-approval".to_string(),
+                        message: error_msg,
+                        run_id: String::new(),
+                    });
+                }
+            }
+        }
+
+        if plan_first {
+            let plan_approved = self
+                .issue_store
+                .get_issues_in_state(&self.config.name, plan_state::PLAN_APPROVED)
+                .await
+                .unwrap_or_default();
+            for (number, record) in plan_approved {
+                if let Err(e) = self.run_plan_execution(number, &record).await {
+                    logger.error(&format!(
+                        "Plan execution for issue #{} failed: {}",
+                        number, e
+                    ));
+                }
+            }
+        }
+
         if unhandled.is_empty() {
             logger.info("No new issues to process — skipping");
             let result = make_skipped_result(&self.config.name, &run_id, &started_at, None);
@@ -679,13 +751,6 @@ impl WorkflowExecutor {
             "Processing {} issue(s) sequentially",
             unhandled.len()
         ));
-
-        let plan_first = self
-            .config
-            .github_issues
-            .as_ref()
-            .and_then(|c| c.plan_first)
-            .unwrap_or(true);
 
         let mut last_result: Option<WorkflowResult> = None;
         for item in &unhandled {
@@ -764,46 +829,7 @@ impl WorkflowExecutor {
             last_result = Some(result);
         }
 
-        // Phase 2: Poll plan PRs for approval (plan_first only).
-        if plan_first {
-            let plan_posted = self
-                .issue_store
-                .get_issues_in_state(&self.config.name, plan_state::PLAN_POSTED)
-                .await
-                .unwrap_or_default();
-            for (number, record) in plan_posted {
-                logger.info(&format!("Polling plan approval for issue #{}", number));
-                if let Err(e) = self.poll_plan_approval(number, &record).await {
-                    let error_msg = format!("Plan poll for issue #{} failed: {}", number, e);
-                    logger.error(&error_msg);
-                    // Also emit to TUI so the error is visible in the log pane.
-                    self.opts.tui_tx.send(TuiEvent::LogMessage {
-                        workflow_name: self.config.name.clone(),
-                        level: "error".to_string(),
-                        stage: "plan-approval".to_string(),
-                        message: error_msg,
-                        run_id: String::new(),
-                    });
-                }
-            }
-        }
-
-        // Phase 3: Execute approved plans (plan_first only).
-        if plan_first {
-            let plan_approved = self
-                .issue_store
-                .get_issues_in_state(&self.config.name, plan_state::PLAN_APPROVED)
-                .await
-                .unwrap_or_default();
-            for (number, record) in plan_approved {
-                if let Err(e) = self.run_plan_execution(number, &record).await {
-                    logger.error(&format!(
-                        "Plan execution for issue #{} failed: {}",
-                        number, e
-                    ));
-                }
-            }
-        }
+        // (Phase 2 & 3 already handled above, before the early return.)
 
         Ok(last_result.unwrap_or_else(|| {
             make_skipped_result(&self.config.name, &run_id, &started_at, None)
