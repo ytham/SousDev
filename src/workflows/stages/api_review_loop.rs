@@ -4,8 +4,8 @@
 //! Uses the provider's native tool-calling API (Anthropic tool_use or
 //! OpenAI function calling) instead of shelling out to an external CLI.
 //!
-//! The agent has access to a read-only tool set: `readFile` and a
-//! restricted `reviewShell` that only allows allowlisted commands.
+//! The agent has access to a read-only tool set: `readFile`, `shell`,
+//! and `listChangedFiles`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -29,6 +29,21 @@ const MAX_ITERATIONS: usize = 50;
 /// of text (~125K tokens) is safely within bounds for a single tool result.
 const MAX_TOOL_OUTPUT_BYTES: usize = 500_000;
 
+/// Phrases that indicate the model gave up on a thorough review.
+const INCOMPLETE_REVIEW_PHRASES: &[&str] = &[
+    "unable to fully inspect",
+    "unable to inspect all",
+    "could not review all",
+    "couldn't review all",
+    "unable to review all",
+    "too large to fully",
+    "too many files to",
+    "not able to inspect",
+    "was not able to review",
+    "beyond the scope",
+    "unable to examine all",
+];
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -38,6 +53,9 @@ const MAX_TOOL_OUTPUT_BYTES: usize = 500_000;
 /// The agent iterates tool calls (file reads, shell commands) until it
 /// produces a final text response containing the review.  Returns the
 /// review text.
+///
+/// If the initial review indicates the model couldn't inspect all files,
+/// the loop prompts the model to continue using per-file commands.
 pub async fn run_api_review_loop(
     provider: &dyn LLMProvider,
     registry: &ToolRegistry,
@@ -52,6 +70,8 @@ pub async fn run_api_review_loop(
         messages.push(Message::system(sp));
     }
     messages.push(Message::user(review_prompt));
+
+    let mut final_review = String::new();
 
     for iteration in 0..MAX_ITERATIONS {
         let options = CompleteOptions {
@@ -68,19 +88,22 @@ pub async fn run_api_review_loop(
                 // Extract tool calls from the response.
                 let tool_calls = extract_tool_calls(&result);
                 if tool_calls.is_empty() {
-                    // stop_reason says tool_use but no tool calls — treat as done.
                     logger.info(&format!(
                         "API review loop: stop_reason=tool_use but no calls (iter {})",
                         iteration
                     ));
-                    return Ok(result.content);
+                    final_review = result.content;
+                    break;
                 }
 
-                logger.debug(&format!(
-                    "API review loop iter {}: {} tool call(s)",
-                    iteration,
-                    tool_calls.len()
-                ));
+                // Log each tool call for debugging.
+                for (_id, name, input) in &tool_calls {
+                    let args_summary = summarize_tool_args(name, input);
+                    logger.info(&format!(
+                        "[iter {}] tool: {}({})",
+                        iteration, name, args_summary,
+                    ));
+                }
 
                 // Record the assistant's response (with tool_use blocks).
                 messages.push(Message::assistant_with_blocks(
@@ -89,34 +112,59 @@ pub async fn run_api_review_loop(
                 ));
 
                 // Execute each tool call and collect results.
-                // Format depends on the provider:
-                // - Anthropic: single user message with ToolResult content blocks
-                // - OpenAI: separate role:"tool" messages per tool call
                 let is_openai = provider.name() == "openai";
 
                 if is_openai {
                     for (id, name, input) in &tool_calls {
                         let content = match registry.execute(name, input).await {
-                            Ok(output) => truncate_tool_output(output),
-                            Err(e) => format!("Error: {}", e),
+                            Ok(output) => {
+                                let size = output.len();
+                                let truncated = truncate_tool_output(output);
+                                logger.debug(&format!(
+                                    "[iter {}] {}() → {} bytes{}",
+                                    iteration, name, size,
+                                    if size > MAX_TOOL_OUTPUT_BYTES { " (truncated)" } else { "" }
+                                ));
+                                truncated
+                            }
+                            Err(e) => {
+                                logger.debug(&format!(
+                                    "[iter {}] {}() → error: {}",
+                                    iteration, name, e
+                                ));
+                                format!("Error: {}", e)
+                            }
                         };
                         messages.push(Message::tool_result(id, content));
                     }
                 } else {
-                    // Anthropic format: single user message with ToolResult blocks.
                     let mut tool_results: Vec<ContentBlock> = Vec::new();
                     for (id, name, input) in &tool_calls {
                         let tool_result = match registry.execute(name, input).await {
-                            Ok(output) => ContentBlock::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: truncate_tool_output(output),
-                                is_error: false,
-                            },
-                            Err(e) => ContentBlock::ToolResult {
-                                tool_use_id: id.clone(),
-                                content: format!("Error: {}", e),
-                                is_error: true,
-                            },
+                            Ok(output) => {
+                                let size = output.len();
+                                logger.debug(&format!(
+                                    "[iter {}] {}() → {} bytes{}",
+                                    iteration, name, size,
+                                    if size > MAX_TOOL_OUTPUT_BYTES { " (truncated)" } else { "" }
+                                ));
+                                ContentBlock::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: truncate_tool_output(output),
+                                    is_error: false,
+                                }
+                            }
+                            Err(e) => {
+                                logger.debug(&format!(
+                                    "[iter {}] {}() → error: {}",
+                                    iteration, name, e
+                                ));
+                                ContentBlock::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: format!("Error: {}", e),
+                                    is_error: true,
+                                }
+                            }
                         };
                         tool_results.push(tool_result);
                     }
@@ -124,20 +172,139 @@ pub async fn run_api_review_loop(
                 }
             }
             _ => {
-                // EndTurn, MaxTokens, or None — the model is done.
                 logger.info(&format!(
                     "API review loop completed after {} iterations",
                     iteration + 1
                 ));
-                return Ok(result.content);
+                final_review = result.content;
+                break;
             }
         }
     }
 
-    Err(anyhow::anyhow!(
-        "API review loop exceeded {} iterations",
-        MAX_ITERATIONS
-    ))
+    if final_review.is_empty() {
+        return Err(anyhow::anyhow!(
+            "API review loop exceeded {} iterations",
+            MAX_ITERATIONS
+        ));
+    }
+
+    // ── Quality check: did the model give up? ────────────────────────────
+    // If the review contains phrases suggesting the model couldn't inspect
+    // all files, prompt it to continue with per-file inspection.
+    if review_seems_incomplete(&final_review) {
+        logger.info("Review appears incomplete — prompting model to continue with per-file inspection");
+
+        messages.push(Message::assistant(&final_review));
+        messages.push(Message::user(
+            "Your review indicates you were unable to inspect all files. This is not acceptable. \
+             Please continue your review by using `gh pr diff <number> -- <specific_file_path>` \
+             to inspect the remaining files one at a time. Use `listChangedFiles` to see which \
+             files you haven't reviewed yet. After inspecting all files, provide your complete \
+             updated review with the SUMMARY and Verdict blocks."
+        ));
+
+        // Give the model more iterations to finish.
+        for iteration in 0..20 {
+            let options = CompleteOptions {
+                tools: Some(tools.clone()),
+                tool_choice: Some(ToolChoice::Auto),
+                max_tokens: None,
+                ..Default::default()
+            };
+
+            let result = provider.complete(&messages, Some(&options)).await?;
+
+            match result.stop_reason {
+                Some(StopReason::ToolUse) => {
+                    let tool_calls = extract_tool_calls(&result);
+                    if tool_calls.is_empty() {
+                        final_review = result.content;
+                        break;
+                    }
+
+                    for (_, name, input) in &tool_calls {
+                        logger.info(&format!(
+                            "[continuation iter {}] tool: {}({})",
+                            iteration, name, summarize_tool_args(name, input),
+                        ));
+                    }
+
+                    messages.push(Message::assistant_with_blocks(
+                        &result.content,
+                        result.content_blocks.clone().unwrap_or_default(),
+                    ));
+
+                    let is_openai = provider.name() == "openai";
+                    if is_openai {
+                        for (id, name, input) in &tool_calls {
+                            let content = match registry.execute(name, input).await {
+                                Ok(output) => truncate_tool_output(output),
+                                Err(e) => format!("Error: {}", e),
+                            };
+                            messages.push(Message::tool_result(id, content));
+                        }
+                    } else {
+                        let mut tool_results: Vec<ContentBlock> = Vec::new();
+                        for (id, name, input) in &tool_calls {
+                            let tool_result = match registry.execute(name, input).await {
+                                Ok(output) => ContentBlock::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: truncate_tool_output(output),
+                                    is_error: false,
+                                },
+                                Err(e) => ContentBlock::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: format!("Error: {}", e),
+                                    is_error: true,
+                                },
+                            };
+                            tool_results.push(tool_result);
+                        }
+                        messages.push(Message::tool_results(tool_results));
+                    }
+                }
+                _ => {
+                    logger.info(&format!(
+                        "Continuation review completed after {} additional iterations",
+                        iteration + 1
+                    ));
+                    final_review = result.content;
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(final_review)
+}
+
+/// Check if a review seems incomplete based on known "gave up" phrases.
+fn review_seems_incomplete(review: &str) -> bool {
+    let lower = review.to_lowercase();
+    INCOMPLETE_REVIEW_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+}
+
+/// Summarize tool arguments for logging (avoid dumping huge command strings).
+fn summarize_tool_args(name: &str, input: &serde_json::Value) -> String {
+    match name {
+        "shell" => {
+            let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("?");
+            if cmd.len() > 80 {
+                format!("\"{}...\"", &cmd[..77])
+            } else {
+                format!("\"{}\"", cmd)
+            }
+        }
+        "readFile" => {
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("\"{}\"", path)
+        }
+        "listChangedFiles" => "".into(),
+        _ => format!("{}", input),
+    }
 }
 
 /// Truncate tool output to prevent context overflow.
@@ -178,9 +345,6 @@ fn extract_tool_calls(result: &CompletionResult) -> Vec<(String, String, serde_j
 // ---------------------------------------------------------------------------
 
 /// Allowlisted shell command prefixes for the review shell tool.
-///
-/// Only commands starting with one of these prefixes are permitted.
-/// All others are rejected with an error message.
 const ALLOWED_COMMANDS: &[&str] = &[
     "gh pr diff",
     "gh pr view",
@@ -204,7 +368,6 @@ const ALLOWED_COMMANDS: &[&str] = &[
 /// Check if a shell command is in the allowlist.
 fn is_allowed_command(command: &str) -> bool {
     let trimmed = command.trim();
-    // Exact match for bare commands without arguments.
     if trimmed == "ls" || trimmed == "tree" {
         return true;
     }
@@ -214,7 +377,6 @@ fn is_allowed_command(command: &str) -> bool {
 }
 
 /// A shell executor that only permits allowlisted read-only commands.
-/// All commands run with `current_dir` set to the workspace directory.
 struct ReviewShellExecutor {
     workspace_dir: std::path::PathBuf,
 }
@@ -275,11 +437,62 @@ impl ToolExecutor for WorkspaceFileReader {
     }
 }
 
+/// List changed files for the PR.  Runs `gh pr view` to get the file list
+/// with additions/deletions so the model can prioritize which files to
+/// inspect in detail.
+struct ListChangedFilesExecutor {
+    workspace_dir: std::path::PathBuf,
+}
+
+#[async_trait]
+impl ToolExecutor for ListChangedFilesExecutor {
+    async fn execute(&self, args: &serde_json::Value) -> Result<String> {
+        let pr_number = args
+            .get("pr_number")
+            .and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| "")).and_then(|_| v.as_str()))
+            .or_else(|| args.get("pr_number").and_then(|v| v.as_u64()).map(|_| ""))
+            .unwrap_or("");
+
+        // Try to get the PR number from the argument, or detect from git.
+        let pr_arg = if !pr_number.is_empty() {
+            pr_number.to_string()
+        } else if let Some(n) = args.get("pr_number").and_then(|v| v.as_u64()) {
+            n.to_string()
+        } else {
+            // Fall back to detecting from the branch.
+            String::new()
+        };
+
+        let jq_expr = r#".files[] | "\(.path)\t+\(.additions)\t-\(.deletions)"#;
+        let mut cmd = tokio::process::Command::new("gh");
+        cmd.arg("pr").arg("view");
+        if !pr_arg.is_empty() {
+            cmd.arg(&pr_arg);
+        }
+        cmd.arg("--json").arg("files").arg("--jq").arg(jq_expr);
+        cmd.current_dir(&self.workspace_dir);
+
+        let output = cmd.output().await?;
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let file_count = stdout.lines().count();
+            Ok(format!(
+                "{} files changed:\n\n{}",
+                file_count,
+                stdout.trim()
+            ))
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Ok(format!("Error listing files: {}", stderr.trim()))
+        }
+    }
+}
+
 /// Create a read-only shell tool rooted at the given workspace directory.
 fn review_shell_tool(workspace_dir: &Path) -> Tool {
     Tool::new(
         "shell",
-        "Run a read-only shell command in the PR workspace. Allowed: gh pr diff/view/checks, git diff/log/show, cat, grep, find, head, tail, wc, sed, ls, tree",
+        "Run a read-only shell command in the PR workspace. Allowed: gh pr diff/view/checks, git diff/log/show, cat, grep, find, head, tail, wc, sed, ls, tree. For large PRs, use 'gh pr diff <number> -- <path>' to inspect individual files.",
         json!({
             "type": "object",
             "properties": {
@@ -313,6 +526,24 @@ fn workspace_read_file_tool(workspace_dir: &Path) -> Tool {
     )
 }
 
+/// Create a tool that lists changed files with addition/deletion counts.
+fn list_changed_files_tool(workspace_dir: &Path) -> Tool {
+    Tool::new(
+        "listChangedFiles",
+        "List all files changed in the PR with their addition/deletion counts. Use this to see which files to inspect and to prioritize large changes.",
+        json!({
+            "type": "object",
+            "properties": {
+                "pr_number": {"type": "string", "description": "PR number (optional — auto-detected from the workspace branch if omitted)"}
+            },
+            "additionalProperties": false
+        }),
+        Arc::new(ListChangedFilesExecutor {
+            workspace_dir: workspace_dir.to_path_buf(),
+        }),
+    )
+}
+
 /// Build a [`ToolRegistry`] with only read-only tools for PR review.
 ///
 /// All tools operate within the given workspace directory (the checked-out
@@ -321,6 +552,7 @@ pub fn review_tool_registry(workspace_dir: &Path) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(workspace_read_file_tool(workspace_dir));
     registry.register(review_shell_tool(workspace_dir));
+    registry.register(list_changed_files_tool(workspace_dir));
     registry
 }
 
@@ -335,6 +567,7 @@ mod tests {
     #[test]
     fn test_allowed_commands() {
         assert!(is_allowed_command("gh pr diff 123"));
+        assert!(is_allowed_command("gh pr diff 123 -- src/main.rs"));
         assert!(is_allowed_command("gh pr view 123 --json files"));
         assert!(is_allowed_command("gh pr checks 123"));
         assert!(is_allowed_command("git diff main..HEAD"));
@@ -401,6 +634,7 @@ mod tests {
         let registry = review_tool_registry(std::path::Path::new("/tmp"));
         assert!(registry.get("readFile").is_some());
         assert!(registry.get("shell").is_some());
+        assert!(registry.get("listChangedFiles").is_some());
         assert!(registry.get("writeFile").is_none()); // no write tool!
     }
 
@@ -408,9 +642,58 @@ mod tests {
     fn test_review_tool_definitions() {
         let registry = review_tool_registry(std::path::Path::new("/tmp"));
         let defs = registry.to_tool_definitions();
-        assert_eq!(defs.len(), 2);
+        assert_eq!(defs.len(), 3);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"readFile"));
         assert!(names.contains(&"shell"));
+        assert!(names.contains(&"listChangedFiles"));
+    }
+
+    #[test]
+    fn test_review_seems_incomplete() {
+        assert!(review_seems_incomplete(
+            "I was unable to fully inspect all files due to the scale."
+        ));
+        assert!(review_seems_incomplete(
+            "The PR is too large to fully review in detail."
+        ));
+        assert!(review_seems_incomplete(
+            "Could not review all changed files within the context window."
+        ));
+        assert!(!review_seems_incomplete(
+            "This is a thorough review of all changes. Verdict: Approved."
+        ));
+        assert!(!review_seems_incomplete(""));
+    }
+
+    #[test]
+    fn test_summarize_tool_args() {
+        assert_eq!(
+            summarize_tool_args("shell", &json!({"command": "gh pr diff 123"})),
+            "\"gh pr diff 123\""
+        );
+        assert_eq!(
+            summarize_tool_args("readFile", &json!({"path": "src/main.rs"})),
+            "\"src/main.rs\""
+        );
+        assert_eq!(
+            summarize_tool_args("listChangedFiles", &json!({})),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_truncate_tool_output_small() {
+        let output = "small output".to_string();
+        assert_eq!(truncate_tool_output(output.clone()), output);
+    }
+
+    #[test]
+    fn test_truncate_tool_output_large() {
+        let output = "x".repeat(MAX_TOOL_OUTPUT_BYTES + 1000);
+        let result = truncate_tool_output(output);
+        assert!(result.len() < MAX_TOOL_OUTPUT_BYTES + 200); // truncated + message
+        assert!(result.contains("[truncated"));
+        assert!(result.contains("per-file commands"));
     }
 }
