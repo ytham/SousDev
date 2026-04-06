@@ -161,25 +161,40 @@ impl LLMProvider for OpenAIProvider {
                 }),
             });
 
+        // OpenAI requires max_tokens for most models.  Default to 16384
+        // when not specified (generous enough for review output).
+        let max_tokens = options
+            .and_then(|o| o.max_tokens)
+            .or(Some(16384));
+
         let request = OpenAIRequest {
             model: self.model.clone(),
             messages: api_messages,
-            max_tokens: options.and_then(|o| o.max_tokens),
+            max_tokens,
             temperature: options.and_then(|o| o.temperature),
             tools,
             tool_choice,
         };
 
-        let response = self
+        let raw_response = self
             .client
             .post("https://api.openai.com/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request)
             .send()
-            .await?
-            .error_for_status()?
-            .json::<OpenAIResponse>()
             .await?;
+
+        if !raw_response.status().is_success() {
+            let status = raw_response.status();
+            let body = raw_response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "OpenAI API error ({}): {}",
+                status,
+                body
+            ));
+        }
+
+        let response = raw_response.json::<OpenAIResponse>().await?;
 
         let choice = response.choices.into_iter().next().ok_or_else(|| {
             anyhow::anyhow!("OpenAI response contained no choices")

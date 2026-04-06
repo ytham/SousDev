@@ -196,7 +196,7 @@ impl LLMProvider for AnthropicProvider {
             tool_choice,
         };
 
-        let response = self
+        let raw_response = self
             .client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
@@ -204,10 +204,19 @@ impl LLMProvider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&request)
             .send()
-            .await?
-            .error_for_status()?
-            .json::<AnthropicResponse>()
             .await?;
+
+        if !raw_response.status().is_success() {
+            let status = raw_response.status();
+            let body = raw_response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Anthropic API error ({}): {}",
+                status,
+                body
+            ));
+        }
+
+        let response = raw_response.json::<AnthropicResponse>().await?;
 
         // Extract text content.
         let text_content: String = response

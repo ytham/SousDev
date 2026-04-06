@@ -264,7 +264,8 @@ fn review_shell_tool(workspace_dir: &Path) -> Tool {
             "properties": {
                 "command": {"type": "string", "description": "Shell command to run (read-only commands only)"}
             },
-            "required": ["command"]
+            "required": ["command"],
+            "additionalProperties": false
         }),
         Arc::new(ReviewShellExecutor {
             workspace_dir: workspace_dir.to_path_buf(),
@@ -282,7 +283,8 @@ fn workspace_read_file_tool(workspace_dir: &Path) -> Tool {
             "properties": {
                 "path": {"type": "string", "description": "File path to read (relative to workspace root)"}
             },
-            "required": ["path"]
+            "required": ["path"],
+            "additionalProperties": false
         }),
         Arc::new(WorkspaceFileReader {
             workspace_dir: workspace_dir.to_path_buf(),
