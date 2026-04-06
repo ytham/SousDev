@@ -463,6 +463,13 @@ fn render_system(
     screen_y_base: usize,
 ) {
     if let Some(log) = entry.lines.first() {
+        // Blank separator lines render as empty.
+        if log.level.is_empty() && log.stage.is_empty() && log.message.is_empty() {
+            let rs = ctx.row_style(screen_y_base);
+            lines.push(Line::from(Span::styled(" ", rs)));
+            return;
+        }
+
         let rs = ctx.row_style(screen_y_base);
         let level_color = match log.level.as_str() {
             "error" => Color::Red,
@@ -574,6 +581,11 @@ fn draw_logs_flat(f: &mut Frame, app: &App, wf: &crate::tui::app::WorkflowState,
             } else {
                 bg
             };
+
+            // Blank separator lines (empty level/stage/message) render as empty.
+            if log.level.is_empty() && log.stage.is_empty() && log.message.is_empty() {
+                return Line::from(Span::styled(" ", row_bg));
+            }
 
             let level_color = match log.level.as_str() {
                 "error" => Color::Red,
