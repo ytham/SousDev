@@ -148,7 +148,15 @@ impl LLMProvider for AnthropicProvider {
             .map(convert_message_to_anthropic)
             .collect();
 
-        let max_tokens = options.and_then(|o| o.max_tokens).unwrap_or(8192);
+        // Anthropic API requires max_tokens.  Use a generous default that
+        // works with large context models (opus-4-6 supports 128K output,
+        // sonnet-4 supports 64K).  If the caller specified a value, use it.
+        let default_max_tokens = if self.model.contains("opus-4-6") {
+            128_000
+        } else {
+            64_000
+        };
+        let max_tokens = options.and_then(|o| o.max_tokens).unwrap_or(default_max_tokens);
         let temperature = options.and_then(|o| o.temperature);
 
         // Convert tool definitions.

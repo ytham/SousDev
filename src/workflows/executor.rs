@@ -1977,12 +1977,17 @@ impl WorkflowExecutor {
 
             // Prefer API-based review when an API key is available.
             // Falls back to CLI-based AgentLoopStage otherwise.
+            // Find the matching model config for the technique's provider and
+            // create an API provider from it (uses the correct model ID from config).
             let technique = &self.config.agent_loop.technique;
-            let api_model = match technique.as_str() {
-                "claude-loop" => multi_review::provider_for_review_model(ReviewerModel::Claude),
-                "codex-loop" => multi_review::provider_for_review_model(ReviewerModel::Codex),
+            let provider_name = match technique.as_str() {
+                "claude-loop" => Some("anthropic"),
+                "codex-loop" => Some("openai"),
                 _ => None,
             };
+            let api_model = provider_name
+                .and_then(|pn| self.opts.models.iter().find(|mc| mc.provider == pn))
+                .and_then(|mc| multi_review::provider_for_model_config(mc));
 
             if let Some(provider) = api_model {
                 logger.info("Using API-based review loop");
@@ -2213,8 +2218,15 @@ impl WorkflowExecutor {
                 };
 
                 // Try API provider first, fall back to CLI.
-                let method = if let Some(provider) = multi_review::provider_for_review_model(model) {
-                    logger.info(&format!("PR #{}: {} using API", pr.number, model.name()));
+                // Look up the model config entry to get the correct model ID.
+                let model_config = self.opts.models.iter()
+                    .find(|mc| mc.provider == match model {
+                        ReviewerModel::Claude => "anthropic",
+                        ReviewerModel::Codex => "openai",
+                        ReviewerModel::Gemini => "gemini",
+                    });
+                let method = if let Some(provider) = model_config.and_then(multi_review::provider_for_model_config) {
+                    logger.info(&format!("PR #{}: {} using API (model: {})", pr.number, model.name(), model_id));
                     ReviewMethod::Api(provider)
                 } else {
                     logger.info(&format!("PR #{}: {} using CLI (no API key)", pr.number, model.name()));
