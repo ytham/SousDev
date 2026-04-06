@@ -58,7 +58,7 @@ impl std::fmt::Display for ReviewerModel {
 /// Claude CLI uses OAuth (no API key env var needed).
 /// Codex CLI requires `OPENAI_API_KEY`.
 /// Gemini CLI requires `GEMINI_API_KEY`.
-pub async fn detect_available_reviewers() -> Vec<ReviewerModel> {
+pub async fn detect_available_reviewers_all() -> Vec<ReviewerModel> {
     let mut models = Vec::new();
 
     if cli_available("claude").await {
@@ -74,6 +74,40 @@ pub async fn detect_available_reviewers() -> Vec<ReviewerModel> {
     models
 }
 
+/// Detect which reviewer models are available, filtered to only include
+/// models that are configured in the `[[models]]` array.
+pub async fn detect_available_reviewers(
+    models: &[crate::types::config::ModelConfig],
+) -> Vec<ReviewerModel> {
+    let mut available = Vec::new();
+    for mc in models {
+        let reviewer = match mc.provider.as_str() {
+            "anthropic" => {
+                if env_set("ANTHROPIC_API_KEY") || cli_available("claude").await {
+                    Some(ReviewerModel::Claude)
+                } else {
+                    None
+                }
+            }
+            "openai" => {
+                if env_set("OPENAI_API_KEY") || cli_available("codex").await {
+                    Some(ReviewerModel::Codex)
+                } else {
+                    None
+                }
+            }
+            "ollama" => None, // No review support for Ollama
+            _ => None,
+        };
+        if let Some(r) = reviewer {
+            if !available.contains(&r) {
+                available.push(r);
+            }
+        }
+    }
+    available
+}
+
 /// Check whether multi-model review should be used.
 ///
 /// Returns the list of models to use, or `None` if single-model
@@ -83,15 +117,18 @@ pub async fn detect_available_reviewers() -> Vec<ReviewerModel> {
 /// other model.
 pub async fn resolve_multi_model(
     config_override: Option<bool>,
+    models: &[crate::types::config::ModelConfig],
 ) -> Option<Vec<ReviewerModel>> {
     let enabled = config_override.unwrap_or(true);
-    if !enabled {
+    if !enabled || models.len() < 2 {
         return None;
     }
 
-    let models = detect_available_reviewers().await;
-    if models.len() >= 2 && models.contains(&ReviewerModel::Claude) {
-        Some(models)
+    let available = detect_available_reviewers(models).await;
+    // Multi-model requires 2+ available models, and Claude must be one of them
+    // (for consolidation).
+    if available.len() >= 2 && available.contains(&ReviewerModel::Claude) {
+        Some(available)
     } else {
         None
     }
@@ -186,6 +223,35 @@ pub fn disallowed_tools_for(model: ReviewerModel) -> Vec<String> {
             "Bash(gh api -X PUT*)".to_string(),
         ],
         ReviewerModel::Codex | ReviewerModel::Gemini => vec![],
+    }
+}
+
+/// Create an LLM provider from a model config entry.
+///
+/// Returns `None` if the required API key is not set (CLI fallback should be used).
+pub fn provider_for_model_config(
+    config: &crate::types::config::ModelConfig,
+) -> Option<std::sync::Arc<dyn crate::providers::provider::LLMProvider>> {
+    match config.provider.as_str() {
+        "anthropic" => {
+            if env_set("ANTHROPIC_API_KEY") {
+                Some(std::sync::Arc::new(
+                    crate::providers::anthropic::AnthropicProvider::new(&config.model),
+                ))
+            } else {
+                None
+            }
+        }
+        "openai" => {
+            if env_set("OPENAI_API_KEY") {
+                Some(std::sync::Arc::new(
+                    crate::providers::openai::OpenAIProvider::new(&config.model),
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 

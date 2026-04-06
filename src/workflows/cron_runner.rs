@@ -347,6 +347,7 @@ fn create_job(
                     prompts: s.harness_config.prompts.clone(),
                     system_prompt: None,
                     tui_tx: s.tui_tx.clone(),
+                    models: s.harness_config.models.clone(),
                 };
                 let refresher = WorkflowExecutor::new(s.wf_config.clone(), refresh_opts);
                 refresher.refresh_info_only().await;
@@ -365,7 +366,7 @@ fn create_job(
                 *lock = true;
             }
 
-            let provider = match resolve_provider(&s.harness_config) {
+            let provider = match resolve_provider(s.harness_config.primary_model()) {
                 Ok(p) => p,
                 Err(e) => {
                     s.tui_tx.send(TuiEvent::TickSkipped {
@@ -393,6 +394,7 @@ fn create_job(
                 prompts: s.harness_config.prompts.clone(),
                 system_prompt,
                 tui_tx: s.tui_tx.clone(),
+                models: s.harness_config.models.clone(),
             };
 
             let executor = WorkflowExecutor::new(s.wf_config.clone(), opts);
@@ -441,8 +443,10 @@ mod tests {
     #[test]
     fn test_cron_runner_new_creates_instance() {
         let config = HarnessConfig {
-            provider: "anthropic".into(),
-            model: "claude-opus-4-6".into(),
+            models: vec![crate::types::config::ModelConfig {
+                provider: "anthropic".into(),
+                model: "claude-opus-4-6".into(),
+            }],
             ..Default::default()
         };
         let runner = CronRunner::new(config, true);
@@ -461,8 +465,10 @@ mod tests {
     #[test]
     fn test_cron_runner_no_workflows_is_fine() {
         let config = HarnessConfig {
-            provider: "openai".into(),
-            model: "gpt-4o".into(),
+            models: vec![crate::types::config::ModelConfig {
+                provider: "openai".into(),
+                model: "gpt-4o".into(),
+            }],
             ..Default::default()
         };
         let runner = CronRunner::new(config, true);

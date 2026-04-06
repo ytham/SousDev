@@ -56,17 +56,19 @@ mod tests {
     async fn test_load_config_found() {
         let dir = TempDir::new().unwrap();
         let config_content = r#"
+target_repo = "owner/repo"
+
+[[models]]
 provider = "anthropic"
 model = "claude-opus-4-6"
-target_repo = "owner/repo"
 "#;
         fs::write(dir.path().join("config.toml"), config_content)
             .await
             .unwrap();
 
         let (config, root) = load_config(Some(dir.path())).await.unwrap();
-        assert_eq!(config.provider, "anthropic");
-        assert_eq!(config.model, "claude-opus-4-6");
+        assert_eq!(config.models[0].provider, "anthropic");
+        assert_eq!(config.models[0].model, "claude-opus-4-6");
         assert_eq!(config.target_repo.as_deref(), Some("owner/repo"));
         assert_eq!(root, dir.path());
     }
@@ -87,7 +89,9 @@ target_repo = "owner/repo"
         let dir = TempDir::new().unwrap();
         let subdir = dir.path().join("a").join("b").join("c");
         fs::create_dir_all(&subdir).await.unwrap();
-        let config_content = r#"provider = "openai"
+        let config_content = r#"
+[[models]]
+provider = "openai"
 model = "gpt-4o"
 "#;
         fs::write(dir.path().join("config.toml"), config_content)
@@ -95,8 +99,8 @@ model = "gpt-4o"
             .unwrap();
 
         let (config, root) = load_config(Some(&subdir)).await.unwrap();
-        assert_eq!(config.provider, "openai");
-        assert_eq!(config.model, "gpt-4o");
+        assert_eq!(config.models[0].provider, "openai");
+        assert_eq!(config.models[0].model, "gpt-4o");
         assert_eq!(root, dir.path());
     }
 
@@ -132,8 +136,6 @@ model = "gpt-4o"
     async fn test_load_config_full_fields() {
         let dir = TempDir::new().unwrap();
         let config_content = r#"
-provider = "ollama"
-model = "llama3"
 git_method = "ssh"
 
 [logging]
@@ -148,13 +150,17 @@ branching = 3
 strategy = "bfs"
 max_depth = 4
 score_threshold = 0.7
+
+[[models]]
+provider = "ollama"
+model = "llama3"
 "#;
         fs::write(dir.path().join("config.toml"), config_content)
             .await
             .unwrap();
 
         let (config, _root) = load_config(Some(dir.path())).await.unwrap();
-        assert_eq!(config.provider, "ollama");
+        assert_eq!(config.models[0].provider, "ollama");
         assert_eq!(config.git_method.as_deref(), Some("ssh"));
 
         let log = config.logging.as_ref().unwrap();

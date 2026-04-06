@@ -1,6 +1,42 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Model config
+// ---------------------------------------------------------------------------
+
+/// Valid provider identifiers.
+const VALID_PROVIDERS: &[&str] = &["anthropic", "openai", "ollama"];
+
+/// A model entry in the `[[models]]` configuration array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Provider: `"anthropic"`, `"openai"`, or `"ollama"`.
+    pub provider: String,
+    /// Model ID (e.g. `"claude-opus-4-6"`, `"gpt-5.4"`).
+    pub model: String,
+}
+
+impl ModelConfig {
+    /// Validate the model configuration.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !VALID_PROVIDERS.contains(&self.provider.as_str()) {
+            anyhow::bail!(
+                "Unknown provider '{}'. Valid providers: {}",
+                self.provider,
+                VALID_PROVIDERS.join(", ")
+            );
+        }
+        if self.model.is_empty() {
+            anyhow::bail!(
+                "Model name cannot be empty for provider '{}'",
+                self.provider
+            );
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level harness config (deserialised from harness.config.toml)
 // ---------------------------------------------------------------------------
 
@@ -10,10 +46,10 @@ use serde::{Deserialize, Serialize};
 /// skipped during TOML deserialisation and must be set programmatically.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HarnessConfig {
-    /// LLM provider identifier: `"anthropic"`, `"openai"`, or `"ollama"`.
-    pub provider: String,
-    /// Model name passed to the provider (e.g. `"claude-opus-4-6"`).
-    pub model: String,
+    /// Ordered list of models. The first entry is the primary model.
+    /// Additional entries enable multi-model PR review.
+    #[serde(default)]
+    pub models: Vec<ModelConfig>,
     /// Optional default target repository in `owner/repo` form.
     pub target_repo: Option<String>,
     /// Git transport method: `"ssh"` or `"https"` (default `"https"`).
@@ -42,6 +78,31 @@ pub struct HarnessConfig {
     /// Also accepts `[[workflows]]` for backward compatibility.
     #[serde(default, alias = "pipelines")]
     pub workflows: Vec<WorkflowConfig>,
+}
+
+impl HarnessConfig {
+    /// Validate the configuration, returning an error with a helpful message
+    /// if any fields are invalid.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.models.is_empty() {
+            anyhow::bail!(
+                "No models configured. Add a [[models]] entry to config.toml:\n\n\
+                 [[models]]\n\
+                 provider = \"anthropic\"\n\
+                 model = \"claude-opus-4-6\"\n"
+            );
+        }
+        for (i, m) in self.models.iter().enumerate() {
+            m.validate()
+                .map_err(|e| anyhow::anyhow!("models[{}]: {}", i, e))?;
+        }
+        Ok(())
+    }
+
+    /// Return the primary (first) model config.
+    pub fn primary_model(&self) -> &ModelConfig {
+        &self.models[0]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,16 +458,13 @@ mod tests {
     #[test]
     fn harness_config_default_is_empty() {
         let cfg = HarnessConfig::default();
-        assert_eq!(cfg.provider, "");
-        assert_eq!(cfg.model, "");
+        assert!(cfg.models.is_empty());
         assert!(cfg.workflows.is_empty());
     }
 
     #[test]
     fn harness_config_toml_roundtrip() {
         let toml_src = r#"
-provider = "anthropic"
-model = "claude-opus-4-6"
 target_repo = "owner/repo"
 git_method = "ssh"
 
@@ -420,10 +478,15 @@ max_iterations = 10
 [techniques.reflexion]
 max_trials = 3
 memory_window = 5
+
+[[models]]
+provider = "anthropic"
+model = "claude-opus-4-6"
 "#;
         let cfg: HarnessConfig = toml::from_str(toml_src).unwrap();
-        assert_eq!(cfg.provider, "anthropic");
-        assert_eq!(cfg.model, "claude-opus-4-6");
+        assert_eq!(cfg.models.len(), 1);
+        assert_eq!(cfg.models[0].provider, "anthropic");
+        assert_eq!(cfg.models[0].model, "claude-opus-4-6");
         assert_eq!(cfg.target_repo.as_deref(), Some("owner/repo"));
         assert_eq!(cfg.git_method.as_deref(), Some("ssh"));
 
@@ -442,6 +505,70 @@ memory_window = 5
     }
 
     #[test]
+    fn harness_config_validate_empty_models() {
+        let cfg = HarnessConfig::default();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("No models configured"));
+    }
+
+    #[test]
+    fn harness_config_validate_invalid_provider() {
+        let cfg = HarnessConfig {
+            models: vec![ModelConfig {
+                provider: "invalid".into(),
+                model: "test".into(),
+            }],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn harness_config_validate_empty_model_name() {
+        let cfg = HarnessConfig {
+            models: vec![ModelConfig {
+                provider: "anthropic".into(),
+                model: "".into(),
+            }],
+            ..Default::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn harness_config_validate_ok() {
+        let cfg = HarnessConfig {
+            models: vec![ModelConfig {
+                provider: "anthropic".into(),
+                model: "claude-opus-4-6".into(),
+            }],
+            ..Default::default()
+        };
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn harness_config_primary_model() {
+        let cfg = HarnessConfig {
+            models: vec![
+                ModelConfig {
+                    provider: "anthropic".into(),
+                    model: "claude-opus-4-6".into(),
+                },
+                ModelConfig {
+                    provider: "openai".into(),
+                    model: "gpt-4o".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(cfg.primary_model().provider, "anthropic");
+        assert_eq!(cfg.primary_model().model, "claude-opus-4-6");
+    }
+
+    #[test]
     fn workflow_config_default() {
         let pc = WorkflowConfig::default();
         assert_eq!(pc.name, "");
@@ -452,6 +579,7 @@ memory_window = 5
     #[test]
     fn workflow_config_toml_roundtrip() {
         let toml_src = r#"
+[[models]]
 provider = "anthropic"
 model = "claude-opus-4-6"
 
@@ -541,7 +669,8 @@ technique = "claude-loop"
     fn workflow_config_minimal_toml() {
         // Workflow with only name/schedule and defaulted agent_loop
         let toml_src = r#"
-provider = "test"
+[[models]]
+provider = "anthropic"
 model = "test"
 
 [[workflows]]
@@ -559,7 +688,8 @@ schedule = "* * * * *"
     #[test]
     fn workflow_config_pr_response_toml() {
         let toml_src = r#"
-provider = "test"
+[[models]]
+provider = "anthropic"
 model = "test"
 
 [[workflows]]
@@ -626,7 +756,8 @@ team = "ENG"
     #[test]
     fn workflow_config_linear_issues_toml() {
         let toml_src = r#"
-provider = "test"
+[[models]]
+provider = "anthropic"
 model = "test"
 
 [[workflows]]

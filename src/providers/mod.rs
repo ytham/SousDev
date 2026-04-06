@@ -10,20 +10,20 @@ pub use provider::{CompleteOptions, CompletionResult, LLMProvider, Message, Mess
 
 use anyhow::Result;
 use std::sync::Arc;
-use crate::types::config::HarnessConfig;
+use crate::types::config::ModelConfig;
 
-/// Resolve a concrete [`LLMProvider`] from the harness configuration.
+/// Resolve a concrete [`LLMProvider`] from a model configuration entry.
 ///
 /// The `OLLAMA_BASE_URL` environment variable overrides the default
 /// `http://localhost:11434` when the `ollama` provider is selected.
-pub fn resolve_provider(config: &HarnessConfig) -> Result<Arc<dyn LLMProvider>> {
-    match config.provider.as_str() {
-        "anthropic" => Ok(Arc::new(AnthropicProvider::new(config.model.clone()))),
-        "openai" => Ok(Arc::new(OpenAIProvider::new(config.model.clone()))),
+pub fn resolve_provider(model_config: &ModelConfig) -> Result<Arc<dyn LLMProvider>> {
+    match model_config.provider.as_str() {
+        "anthropic" => Ok(Arc::new(AnthropicProvider::new(model_config.model.clone()))),
+        "openai" => Ok(Arc::new(OpenAIProvider::new(model_config.model.clone()))),
         "ollama" => {
             let base_url = std::env::var("OLLAMA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".to_string());
-            Ok(Arc::new(OllamaProvider::new(config.model.clone(), base_url)))
+            Ok(Arc::new(OllamaProvider::new(model_config.model.clone(), base_url)))
         }
         other => Err(anyhow::anyhow!("Unknown provider: {}", other)),
     }
@@ -32,13 +32,12 @@ pub fn resolve_provider(config: &HarnessConfig) -> Result<Arc<dyn LLMProvider>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::config::HarnessConfig;
+    use crate::types::config::ModelConfig;
 
-    fn cfg(provider: &str) -> HarnessConfig {
-        HarnessConfig {
+    fn cfg(provider: &str) -> ModelConfig {
+        ModelConfig {
             provider: provider.to_string(),
             model: "test-model".to_string(),
-            ..Default::default()
         }
     }
 

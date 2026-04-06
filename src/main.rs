@@ -281,7 +281,8 @@ async fn main() -> Result<()> {
                 })?
                 .clone();
 
-            let provider = resolve_provider(&harness_config)?;
+            harness_config.validate()?;
+            let provider = resolve_provider(harness_config.primary_model())?;
             let store = Arc::new(RunStore::new(&harness_root));
 
             println!("\nRunning workflow \"{}\"…\n", name);
@@ -299,6 +300,7 @@ async fn main() -> Result<()> {
                     prompts: harness_config.prompts.clone(),
                     system_prompt: resolve_system_prompt(&harness_config, &harness_root),
                     tui_tx: TuiEventSender::noop(),
+                    models: harness_config.models.clone(),
                 },
             );
 
@@ -418,7 +420,8 @@ async fn main() -> Result<()> {
                 max_points,
                 no_parallel,
             } = *args;
-            let provider = resolve_provider(&harness_config)?;
+            harness_config.validate()?;
+            let provider = resolve_provider(harness_config.primary_model())?;
             let registry = Arc::new(ToolRegistry::new());
 
             let result: RunResult = match technique.as_str() {

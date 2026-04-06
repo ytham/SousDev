@@ -4,9 +4,6 @@
 # This is the reference config. Copy and edit it for your project.
 # The CLI auto-discovers this file by walking up from CWD.
 
-provider = "anthropic"
-model = "claude-opus-4-6"
-
 # The repository to operate on. Required when running standalone.
 # Accepts "owner/repo", "https://github.com/owner/repo.git", or
 # "git@github.com:owner/repo.git".
@@ -71,6 +68,19 @@ parallel_expansion = true
 num_agents = 3
 rounds = 2
 aggregation = "judge"
+
+# ---- Models ----
+# The first model is the primary model used for all agent operations.
+# Additional models enable multi-model PR review (each model reviews
+# independently, then the primary model consolidates the results).
+
+[[models]]
+provider = "anthropic"
+model = "claude-opus-4-6"
+
+# [[models]]
+# provider = "openai"
+# model = "gpt-5.4"
 
 # ---- Pipelines ----
 # Define one or more workflows as [[workflows]] sections.

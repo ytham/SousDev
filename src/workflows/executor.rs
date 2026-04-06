@@ -75,6 +75,8 @@ pub struct ExecutorOptions {
     pub system_prompt: Option<String>,
     /// TUI event sender for real-time UI updates (no-op in headless mode).
     pub tui_tx: TuiEventSender,
+    /// All configured models (for multi-model review routing).
+    pub models: Vec<crate::types::config::ModelConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1873,7 +1875,7 @@ impl WorkflowExecutor {
         // available, route to the parallel multi-model path instead.
         let multi_model_override = self.config.github_prs.as_ref()
             .and_then(|c| c.multi_model_review);
-        if let Some(models) = multi_review::resolve_multi_model(multi_model_override).await {
+        if let Some(models) = multi_review::resolve_multi_model(multi_model_override, &self.opts.models).await {
             return self.run_multi_model_review(pr, _reviewer_login, &models).await;
         }
 
@@ -2285,7 +2287,8 @@ impl WorkflowExecutor {
 
                 // Try Anthropic API first; fall back to Claude CLI.
                 let consolidation_result = if std::env::var("ANTHROPIC_API_KEY").map(|k| !k.is_empty()).unwrap_or(false) {
-                    let provider = crate::providers::anthropic::AnthropicProvider::new("claude-sonnet-4-20250514");
+                    let primary = self.opts.models.first().map(|m| m.model.as_str()).unwrap_or("claude-sonnet-4-20250514");
+                    let provider = crate::providers::anthropic::AnthropicProvider::new(primary);
                     use crate::providers::provider::{LLMProvider as _, Message as LLMMessage, MessageRole as LLMRole};
                     match provider.complete(
                         &[LLMMessage { role: LLMRole::User, content: consolidation_prompt.clone(), content_blocks: None, tool_call_id: None }],
