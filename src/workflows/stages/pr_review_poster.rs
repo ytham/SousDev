@@ -469,15 +469,22 @@ fn strip_agent_preamble<'a>(lines: &[&'a str]) -> Vec<&'a str> {
 
 
 
-/// Parse inline comments from markdown bold format: `**path:line**` or
-/// `**\`path:line\`**` followed by description text.
+/// Parse inline comments from markdown formats commonly used by models:
+///
+/// - `**path:line**` or `**\`path:line\`**` (bold, with/without backticks)
+/// - `- \`path:line\`` (list item with backticks)
+/// - `- **\`path:line\`**` (list item with bold + backticks)
+/// - `**\`path:line\`** — description` (inline description)
+/// - `- \`path:line\` — description` (list with inline description)
 ///
 /// This is a fallback parser for when models don't use the structured
 /// `INLINE_COMMENT` markers but instead use markdown formatting.
 fn parse_markdown_inline_comments(text: &str) -> Vec<ParsedInlineComment> {
     let mut result = Vec::new();
+    // Match file:line in various markdown wrappers.
+    // Group 1: file path (with extension), Group 2: line number, Group 3: trailing text on same line
     let re = Regex::new(
-        r"(?m)^\*\*`?([^`*:]+\.\w+):(\d+)`?\*\*[:\s—-]*(.*)$"
+        r"(?m)^[-*\s]*\*{0,2}`?([^`*\s:]+\.\w+):(\d+)`?\*{0,2}[:\s—–\-]*(.*?)$"
     ).unwrap();
 
     for caps in re.captures_iter(text) {
@@ -917,6 +924,27 @@ END_INLINE_COMMENT";
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].path, "rust/services/src/runner.rs");
         assert_eq!(comments[0].line, 247);
+    }
+
+    #[test]
+    fn test_parse_markdown_inline_list_backtick() {
+        let text = "- `equity_documents_repo.rs:9` — Doc comment placed after\n- `equity_documents_repo.rs:180` — todo!() now reachable";
+        let comments = parse_markdown_inline_comments(text);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].path, "equity_documents_repo.rs");
+        assert_eq!(comments[0].line, 9);
+        assert!(comments[0].body.contains("Doc comment"));
+        assert_eq!(comments[1].path, "equity_documents_repo.rs");
+        assert_eq!(comments[1].line, 180);
+    }
+
+    #[test]
+    fn test_parse_markdown_inline_list_bold_backtick() {
+        let text = "- **`src/auth.rs:42`** — Missing null check.";
+        let comments = parse_markdown_inline_comments(text);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].path, "src/auth.rs");
+        assert_eq!(comments[0].line, 42);
     }
 
     #[test]
