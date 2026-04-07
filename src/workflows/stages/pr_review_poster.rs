@@ -278,9 +278,15 @@ pub fn parse_score_from_text(text: &str) -> Option<u32> {
 
 /// Parse inline comments from review text. Public alias for use by the executor.
 ///
-/// Returns a vec of `ParsedInlineComment` with path, line, and body.
+/// Tries structured `INLINE_COMMENT` markers first; falls back to parsing
+/// markdown bold `**path:line**` format if no structured markers found.
 pub fn parse_inline_comments_from_text(text: &str) -> Vec<ParsedInlineComment> {
-    parse_inline_comments(text)
+    let structured = parse_inline_comments(text);
+    if !structured.is_empty() {
+        return structured;
+    }
+    // Fallback: parse markdown bold format.
+    parse_markdown_inline_comments(text)
 }
 
 /// Parse the score (0-100) from the review text.
@@ -436,7 +442,55 @@ fn strip_agent_preamble<'a>(lines: &[&'a str]) -> Vec<&'a str> {
 
 
 
-/// Resolve the current HEAD SHA in the workspace (short 7-char).
+/// Parse inline comments from markdown bold format: `**path:line**` or
+/// `**\`path:line\`**` followed by description text.
+///
+/// This is a fallback parser for when models don't use the structured
+/// `INLINE_COMMENT` markers but instead use markdown formatting.
+fn parse_markdown_inline_comments(text: &str) -> Vec<ParsedInlineComment> {
+    let mut result = Vec::new();
+    let re = Regex::new(
+        r"(?m)^\*\*`?([^`*:]+\.\w+):(\d+)`?\*\*[:\s—-]*(.*)$"
+    ).unwrap();
+
+    for caps in re.captures_iter(text) {
+        let path = caps[1].trim().to_string();
+        let line: u64 = caps[2].parse().unwrap_or(0);
+        let mut body = caps[3].trim().to_string();
+
+        if line == 0 || path.is_empty() {
+            continue;
+        }
+
+        // If the body is empty, try to get text from the next non-empty lines
+        // (the comment may be on the following line).
+        if body.is_empty() {
+            // Look for the body after this match in the original text.
+            let match_end = caps.get(0).unwrap().end();
+            let remaining = &text[match_end..];
+            let mut body_lines = Vec::new();
+            for next_line in remaining.lines() {
+                let trimmed = next_line.trim();
+                if trimmed.is_empty() {
+                    break;
+                }
+                // Stop if we hit another bold path:line or a heading.
+                if trimmed.starts_with("**") || trimmed.starts_with('#') || trimmed.starts_with('|') {
+                    break;
+                }
+                body_lines.push(trimmed);
+            }
+            body = body_lines.join(" ");
+        }
+
+        if !body.is_empty() {
+            result.push(ParsedInlineComment { path, line, body });
+        }
+    }
+
+    result
+}
+
 /// Parse all `INLINE_COMMENT path:line … END_INLINE_COMMENT` blocks from
 /// `text`.
 fn parse_inline_comments(text: &str) -> Vec<ParsedInlineComment> {
@@ -783,5 +837,64 @@ END_INLINE_COMMENT";
     fn test_parse_score_in_summary_block() {
         let text = "SUMMARY\nLooks good.\n\nScore: 88\nVerdict: Approved\nEND_SUMMARY";
         assert_eq!(parse_score(text), Some(88));
+    }
+
+    // ── parse_markdown_inline_comments tests ──────────────────────────────
+
+    #[test]
+    fn test_parse_markdown_inline_bold_backtick() {
+        let text = "**`src/auth.rs:42`**\nMissing null check on user.\n\n**`src/main.rs:10`**\nUnused import.";
+        let comments = parse_markdown_inline_comments(text);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].path, "src/auth.rs");
+        assert_eq!(comments[0].line, 42);
+        assert!(comments[0].body.contains("Missing null check"));
+        assert_eq!(comments[1].path, "src/main.rs");
+        assert_eq!(comments[1].line, 10);
+    }
+
+    #[test]
+    fn test_parse_markdown_inline_bold_no_backtick() {
+        let text = "**src/auth.rs:42** — Missing null check.";
+        let comments = parse_markdown_inline_comments(text);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].path, "src/auth.rs");
+        assert_eq!(comments[0].line, 42);
+        assert!(comments[0].body.contains("Missing null check"));
+    }
+
+    #[test]
+    fn test_parse_markdown_inline_with_description_label() {
+        let text = "**`rust/services/src/runner.rs:247`**\n**Efficiency concern (single-model finding):** Some description here.";
+        let comments = parse_markdown_inline_comments(text);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].path, "rust/services/src/runner.rs");
+        assert_eq!(comments[0].line, 247);
+    }
+
+    #[test]
+    fn test_parse_markdown_inline_empty() {
+        let text = "No inline comments here.";
+        let comments = parse_markdown_inline_comments(text);
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn test_parse_inline_comments_from_text_fallback() {
+        // No INLINE_COMMENT markers, but has markdown bold format.
+        let text = "SUMMARY\nLooks good.\nEND_SUMMARY\n\n**`src/main.rs:10`**\nUnused import.";
+        let comments = parse_inline_comments_from_text(text);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].path, "src/main.rs");
+    }
+
+    #[test]
+    fn test_parse_inline_comments_from_text_prefers_structured() {
+        // Has both INLINE_COMMENT markers and markdown bold.
+        let text = "INLINE_COMMENT src/main.rs:10\nUnused import.\nEND_INLINE_COMMENT\n\n**`src/auth.rs:42`**\nAnother issue.";
+        let comments = parse_inline_comments_from_text(text);
+        // Should return the structured one (not the markdown fallback).
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].path, "src/main.rs");
     }
 }

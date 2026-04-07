@@ -2609,46 +2609,40 @@ impl WorkflowExecutor {
                 text
             };
 
-            // ── Collect inline comments from individual model reviews ────
-            // The consolidation model often fails to reproduce structured
-            // INLINE_COMMENT blocks.  Extract them from each model's raw
-            // review and deduplicate by path:line before posting.
-            let mut all_inline_comments = Vec::new();
-            let mut seen_locations = std::collections::HashSet::new();
-            for (_name, review_text) in &reviews {
-                let comments = crate::workflows::stages::pr_review_poster::parse_inline_comments_from_text(review_text);
-                for c in comments {
-                    let key = format!("{}:{}", c.path, c.line);
-                    if seen_locations.insert(key) {
-                        all_inline_comments.push(c);
+            // ── Post inline comments FIRST (before the timeline summary) ──
+            // Extract from each individual model's raw review and deduplicate
+            // by path:line. Uses both structured INLINE_COMMENT markers and
+            // markdown bold **path:line** format as fallback.
+            {
+                let mut all_inline_comments = Vec::new();
+                let mut seen_locations = std::collections::HashSet::new();
+                for (_name, review_text) in &reviews {
+                    let comments = crate::workflows::stages::pr_review_poster::parse_inline_comments_from_text(review_text);
+                    for c in comments {
+                        let key = format!("{}:{}", c.path, c.line);
+                        if seen_locations.insert(key) {
+                            all_inline_comments.push(c);
+                        }
                     }
                 }
-            }
+                // Also try parsing the consolidated text itself.
+                {
+                    let consolidated_comments = crate::workflows::stages::pr_review_poster::parse_inline_comments_from_text(&consolidated);
+                    for c in consolidated_comments {
+                        let key = format!("{}:{}", c.path, c.line);
+                        if seen_locations.insert(key) {
+                            all_inline_comments.push(c);
+                        }
+                    }
+                }
 
-            // ── Set agent result and post the review ─────────────────────
-            ctx.agent_result = Some(RunResult::success(
-                "multi-model-review",
-                consolidated,
-                vec![],
-                models.len(),
-                0,
-            ));
-
-            self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
-
-            // Post inline comments from individual model reviews that
-            // the poster may not have found in the consolidated text.
-            if !all_inline_comments.is_empty() {
-                let head_sha = &pr.head_ref_oid;
-                let show_branding = self.config.pull_request.as_ref()
-                    .and_then(|pr_cfg| pr_cfg.show_branding)
-                    .unwrap_or(true);
-                let posted_by_poster = ctx.pr_review_result.as_ref()
-                    .map(|r| r.inline_comment_count)
-                    .unwrap_or(0);
-                if posted_by_poster == 0 {
+                if !all_inline_comments.is_empty() {
+                    let head_sha = &pr.head_ref_oid;
+                    let show_branding = self.config.pull_request.as_ref()
+                        .and_then(|pr_cfg| pr_cfg.show_branding)
+                        .unwrap_or(true);
                     logger.info(&format!(
-                        "Posting {} inline comment(s) from individual model reviews",
+                        "Posting {} inline comment(s) before timeline summary",
                         all_inline_comments.len()
                     ));
                     for c in &all_inline_comments {
@@ -2666,6 +2660,17 @@ impl WorkflowExecutor {
                     }
                 }
             }
+
+            // ── Then post the consolidated timeline summary ──────────────
+            ctx.agent_result = Some(RunResult::success(
+                "multi-model-review",
+                consolidated,
+                vec![],
+                models.len(),
+                0,
+            ));
+
+            self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
 
             // Log per-model verdicts with scores for the TUI.
             let mut all_scores: Vec<u32> = Vec::new();
