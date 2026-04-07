@@ -55,8 +55,8 @@ SUMMARY
 <one row per model using their FULL display name, score (from their Score: line), and emoji verdict, e.g.:>
 | {{model_display_names_example}} |
 
-Avg Score: <average of all model scores, to one decimal place>
-Verdict: <✅ Approved or 🔴 Not Approved — ✅ Approved only if ALL models approved; otherwise 🔴 Not Approved>
+{{score_prefix}}Avg Score: <average of all model scores, to one decimal place>
+{{verdict_prefix}}Verdict: <✅ Approved or 🔴 Not Approved — ✅ Approved only if ALL models approved; otherwise 🔴 Not Approved>
 END_SUMMARY
 
 After END_SUMMARY, output INLINE_COMMENT blocks for each file-specific finding

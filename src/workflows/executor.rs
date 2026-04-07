@@ -2514,6 +2514,12 @@ impl WorkflowExecutor {
                     }
                 }
 
+                let show_branding = self.config.pull_request.as_ref()
+                    .and_then(|pr_cfg| pr_cfg.show_branding)
+                    .unwrap_or(true);
+                let score_prefix = if show_branding { "📊 " } else { "" };
+                let verdict_prefix = if show_branding { "🧑‍🍳 " } else { "" };
+
                 let consolidation_prompt = self.load_and_render_prompt(
                     "review-consolidation",
                     &[
@@ -2523,6 +2529,8 @@ impl WorkflowExecutor {
                         ("reviews", &format!("{}{}", format_reviews_for_consolidation(&reviews), failed_note)),
                         ("model_display_names", &all_model_names),
                         ("model_display_names_example", &example_row),
+                        ("score_prefix", score_prefix),
+                        ("verdict_prefix", verdict_prefix),
                     ],
                 );
 
