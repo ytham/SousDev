@@ -271,6 +271,29 @@ impl Stage for PrReviewPosterStage {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Strip leading emoji characters and whitespace from a line.
+///
+/// Handles branding prefixes like `🧑‍🍳 `, `📊 `, and other common emoji.
+fn strip_leading_emojis(s: &str) -> &str {
+    let mut start = 0;
+    let bytes = s.as_bytes();
+    while start < s.len() {
+        // Skip whitespace.
+        if bytes[start] == b' ' || bytes[start] == b'\t' {
+            start += 1;
+            continue;
+        }
+        // ASCII characters (letters, digits, punctuation) — stop stripping.
+        if bytes[start].is_ascii_alphanumeric() || bytes[start] == b'#' || bytes[start] == b'*' || bytes[start] == b'-' || bytes[start] == b'|' {
+            break;
+        }
+        // Non-ASCII = likely emoji. Skip the full UTF-8 character.
+        let ch = s[start..].chars().next().unwrap();
+        start += ch.len_utf8();
+    }
+    &s[start..]
+}
+
 /// Parse the score from review text. Public alias for use by the executor.
 pub fn parse_score_from_text(text: &str) -> Option<u32> {
     parse_score(text)
@@ -296,7 +319,9 @@ pub fn parse_inline_comments_from_text(text: &str) -> Vec<ParsedInlineComment> {
 fn parse_score(text: &str) -> Option<u32> {
     for line in text.lines().rev() {
         let trimmed = line.trim().to_lowercase();
-        if let Some(rest) = trimmed.strip_prefix("score:") {
+        let stripped = strip_leading_emojis(&trimmed);
+        if let Some(rest) = stripped.strip_prefix("score:")
+            .or_else(|| stripped.strip_prefix("avg score:")) {
             let rest = rest.trim();
             // Parse the number, ignoring anything after it (like "/100").
             let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -328,7 +353,9 @@ pub fn parse_verdict_from_text(text: &str) -> String {
 fn parse_verdict(text: &str) -> String {
     for line in text.lines().rev() {
         let trimmed = line.trim().to_lowercase();
-        if let Some(rest_raw) = trimmed.strip_prefix("verdict:") {
+        // Strip leading emoji/branding prefixes before checking for "verdict:".
+        let stripped = strip_leading_emojis(&trimmed);
+        if let Some(rest_raw) = stripped.strip_prefix("verdict:") {
             // Strip emoji prefixes and whitespace.
             let rest = rest_raw
                 .trim()
@@ -803,6 +830,26 @@ END_INLINE_COMMENT";
         assert_eq!(parse_verdict("Verdict: ❌ Not Approved"), "not_approved");
         assert_eq!(parse_verdict("Verdict: ✅ Approved"), "approved");
         assert_eq!(parse_verdict("Verdict: 🔴 Not Approved"), "not_approved");
+    }
+
+    #[test]
+    fn test_parse_verdict_with_branding_prefix() {
+        assert_eq!(parse_verdict("🧑\u{200d}🍳 Verdict: ✅ Approved"), "approved");
+        assert_eq!(parse_verdict("🧑\u{200d}🍳 Verdict: 🔴 Not Approved"), "not_approved");
+    }
+
+    #[test]
+    fn test_parse_score_with_branding_prefix() {
+        assert_eq!(parse_score("📊 Avg Score: 93.0"), Some(93));
+        assert_eq!(parse_score("📊 Score: 85"), Some(85));
+    }
+
+    #[test]
+    fn test_strip_leading_emojis() {
+        assert_eq!(strip_leading_emojis("🧑\u{200d}🍳 Verdict: ok"), "Verdict: ok");
+        assert_eq!(strip_leading_emojis("📊 Score: 85"), "Score: 85");
+        assert_eq!(strip_leading_emojis("Verdict: ok"), "Verdict: ok");
+        assert_eq!(strip_leading_emojis("  Verdict: ok"), "Verdict: ok");
     }
 
     // ── parse_score tests ─────────────────────────────────────────────────
