@@ -46,7 +46,7 @@ SUMMARY
 <areas where models agreed the code is solid>
 
 ### Inline observations
-<any notable file-specific findings, formatted as bold file:line followed by description>
+<brief summary of file-specific findings — one line per file:line>
 
 ### Summary
 
@@ -59,6 +59,23 @@ Avg Score: <average of all model scores, to one decimal place>
 Verdict: <✅ Approved or 🔴 Not Approved — ✅ Approved only if ALL models approved; otherwise 🔴 Not Approved>
 END_SUMMARY
 
+After END_SUMMARY, output INLINE_COMMENT blocks for each file-specific finding
+that references a specific line in the diff. These MUST use this exact format:
+
+INLINE_COMMENT <path>:<line>
+<comment text — be specific and actionable>
+END_INLINE_COMMENT
+
+For example:
+
+INLINE_COMMENT src/auth.rs:42
+Missing null check — `user` can be None when the session expires.
+END_INLINE_COMMENT
+
+Output one block per finding. Only include findings that reference a specific
+file and line number. Skip findings that are general observations without a
+specific location.
+
 IMPORTANT:
 - Use the full model display names exactly as provided: {{model_display_names}}
 - Extract each model's `Score:` line from their review and include it in the table
@@ -67,3 +84,4 @@ IMPORTANT:
 - Use left-aligned columns in the table (`:------` syntax)
 - The "Summary" section with the verdict table, avg score, and final verdict MUST be the last section before END_SUMMARY
 - Do NOT include a "Models used:" line — the table already shows this information
+- You MUST output INLINE_COMMENT blocks AFTER END_SUMMARY for every finding that has a specific file path and line number — these are posted as inline comments on the PR diff
