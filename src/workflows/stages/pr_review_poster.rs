@@ -27,11 +27,15 @@ const SUMMARY_END: &str = "END_SUMMARY";
 // Parsed inline comment
 // ---------------------------------------------------------------------------
 
+/// A parsed inline comment from agent review output.
 #[derive(Debug, Clone)]
-struct ParsedInlineComment {
-    path: String,
-    line: u64,
-    body: String,
+pub struct ParsedInlineComment {
+    /// File path relative to the repo root.
+    pub path: String,
+    /// Line number in the new version of the file.
+    pub line: u64,
+    /// Comment body text.
+    pub body: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +274,13 @@ impl Stage for PrReviewPosterStage {
 /// Parse the score from review text. Public alias for use by the executor.
 pub fn parse_score_from_text(text: &str) -> Option<u32> {
     parse_score(text)
+}
+
+/// Parse inline comments from review text. Public alias for use by the executor.
+///
+/// Returns a vec of `ParsedInlineComment` with path, line, and body.
+pub fn parse_inline_comments_from_text(text: &str) -> Vec<ParsedInlineComment> {
+    parse_inline_comments(text)
 }
 
 /// Parse the score (0-100) from the review text.

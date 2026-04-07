@@ -2609,6 +2609,22 @@ impl WorkflowExecutor {
                 text
             };
 
+            // ── Collect inline comments from individual model reviews ────
+            // The consolidation model often fails to reproduce structured
+            // INLINE_COMMENT blocks.  Extract them from each model's raw
+            // review and deduplicate by path:line before posting.
+            let mut all_inline_comments = Vec::new();
+            let mut seen_locations = std::collections::HashSet::new();
+            for (_name, review_text) in &reviews {
+                let comments = crate::workflows::stages::pr_review_poster::parse_inline_comments_from_text(review_text);
+                for c in comments {
+                    let key = format!("{}:{}", c.path, c.line);
+                    if seen_locations.insert(key) {
+                        all_inline_comments.push(c);
+                    }
+                }
+            }
+
             // ── Set agent result and post the review ─────────────────────
             ctx.agent_result = Some(RunResult::success(
                 "multi-model-review",
@@ -2619,6 +2635,37 @@ impl WorkflowExecutor {
             ));
 
             self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
+
+            // Post inline comments from individual model reviews that
+            // the poster may not have found in the consolidated text.
+            if !all_inline_comments.is_empty() {
+                let head_sha = &pr.head_ref_oid;
+                let show_branding = self.config.pull_request.as_ref()
+                    .and_then(|pr_cfg| pr_cfg.show_branding)
+                    .unwrap_or(true);
+                let posted_by_poster = ctx.pr_review_result.as_ref()
+                    .map(|r| r.inline_comment_count)
+                    .unwrap_or(0);
+                if posted_by_poster == 0 {
+                    logger.info(&format!(
+                        "Posting {} inline comment(s) from individual model reviews",
+                        all_inline_comments.len()
+                    ));
+                    for c in &all_inline_comments {
+                        let body = if show_branding {
+                            format!("🧑‍🍳 {}", c.body)
+                        } else {
+                            c.body.clone()
+                        };
+                        match crate::workflows::github_prs::post_inline_comment(
+                            &pr.repo, pr.number, head_sha, &c.path, c.line, &body,
+                        ).await {
+                            Ok(()) => logger.info(&format!("Posted inline comment on {}:{}", c.path, c.line)),
+                            Err(e) => logger.warn(&format!("Could not post inline on {}:{} — {}", c.path, c.line, e)),
+                        }
+                    }
+                }
+            }
 
             // Log per-model verdicts with scores for the TUI.
             let mut all_scores: Vec<u32> = Vec::new();
