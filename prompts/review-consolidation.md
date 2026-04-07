@@ -50,16 +50,20 @@ SUMMARY
 
 ### Summary
 
-| Model | Verdict |
-|-------|---------|
-<one row per model using their FULL display name and emoji verdict, e.g.:>
+| Model | Score | Verdict |
+|:------|:------|:--------|
+<one row per model using their FULL display name, score (from their Score: line), and emoji verdict, e.g.:>
 | {{model_display_names_example}} |
 
+Avg Score: <average of all model scores, to one decimal place>
 Verdict: <✅ Approved or 🔴 Not Approved — ✅ Approved only if ALL models approved; otherwise 🔴 Not Approved>
 END_SUMMARY
 
 IMPORTANT:
 - Use the full model display names exactly as provided: {{model_display_names}}
+- Extract each model's `Score:` line from their review and include it in the table
+- Compute the average score across all models to one decimal place
 - Use ✅ before "Approved" and 🔴 before "Not Approved" in both the table and the final verdict
-- The "Summary" section with the verdict table and final verdict MUST be the last section before END_SUMMARY
+- Use left-aligned columns in the table (`:------` syntax)
+- The "Summary" section with the verdict table, avg score, and final verdict MUST be the last section before END_SUMMARY
 - Do NOT include a "Models used:" line — the table already shows this information

@@ -56,6 +56,9 @@ pub struct PrReviewResult {
     /// The review verdict: `"approved"`, `"not_approved"`, or `"unknown"`.
     #[serde(default)]
     pub verdict: String,
+    /// The review score (0-100).  `None` if the model didn't output a score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<u32>,
 }
 
 /// Summary of a PR response pass stored inside a [`WorkflowResult`].
@@ -1019,6 +1022,7 @@ mod tests {
                 head_sha: "abc".into(),
                 errors: vec![],
                 verdict: "approved".into(),
+                score: Some(85),
             }),
             pr_response_result: None,
         };

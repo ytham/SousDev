@@ -67,11 +67,20 @@ After all inline comments (or if there are no inline comments), output a summary
 SUMMARY
 <overall assessment — mention what looks good, what needs attention, and any patterns or themes across the changes>
 
+Score: <0-100>
 Verdict: <Approved or Not Approved>
 END_SUMMARY
 ```
 
-The `Verdict:` line MUST be the last line before `END_SUMMARY`. Use exactly one of:
+The `Score:` and `Verdict:` lines MUST be the last two lines before `END_SUMMARY`.
+
+**Score** — rate the PR quality from 0 to 100:
+- **90-100**: Excellent — clean, well-tested, no concerns
+- **70-89**: Good — minor suggestions but solid overall
+- **50-69**: Needs work — notable issues that should be addressed
+- **Below 50**: Significant problems — bugs, missing tests, or design issues
+
+**Verdict** — use exactly one of:
 - `Verdict: ✅ Approved` — the code is correct and ready to merge (minor suggestions are OK)
 - `Verdict: 🔴 Not Approved` — there are bugs, missing tests, or issues that must be fixed
 

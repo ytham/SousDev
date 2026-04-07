@@ -2496,7 +2496,7 @@ impl WorkflowExecutor {
             // ── Consolidate reviews ──────────────────────────────────────
             let consolidated = if reviews.len() >= 2 {
                 let display_names: Vec<&str> = reviews.iter().map(|(name, _)| name.as_str()).collect();
-                let example_row = format!("| {} | ✅ Approved |", display_names.first().unwrap_or(&"Model"));
+                let example_row = format!("| {} | 85 | ✅ Approved |", display_names.first().unwrap_or(&"Model"));
 
                 // Include info about failed models so the consolidation
                 // can note them in the Summary table.
@@ -2620,15 +2620,21 @@ impl WorkflowExecutor {
 
             self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
 
-            // Log per-model verdicts and consolidated verdict for the TUI.
+            // Log per-model verdicts with scores for the TUI.
+            let mut all_scores: Vec<u32> = Vec::new();
             for (name, review_text) in &reviews {
                 let v = crate::workflows::stages::pr_review_poster::parse_verdict_from_text(review_text);
+                let s = crate::workflows::stages::pr_review_poster::parse_score_from_text(review_text);
                 let emoji = if v == "approved" { "✅" } else { "🔴" };
+                let score_str = s.map(|n| format!(" ({})", n)).unwrap_or_default();
+                if let Some(n) = s {
+                    all_scores.push(n);
+                }
                 self.opts.tui_tx.send(TuiEvent::LogMessage {
                     workflow_name: self.config.name.clone(),
                     level: "info".to_string(),
                     stage: "verdict".to_string(),
-                    message: format!("{} {} {}", emoji, name, if v == "approved" { "Approved" } else { "Not Approved" }),
+                    message: format!("{} {}{} {}", emoji, name, score_str, if v == "approved" { "Approved" } else { "Not Approved" }),
                     run_id: run_id.clone(),
                 });
             }
@@ -2638,6 +2644,17 @@ impl WorkflowExecutor {
                     level: "error".to_string(),
                     stage: "verdict".to_string(),
                     message: format!("🔴 {} Failed", name),
+                    run_id: run_id.clone(),
+                });
+            }
+            // Log average score.
+            if !all_scores.is_empty() {
+                let avg = all_scores.iter().sum::<u32>() as f64 / all_scores.len() as f64;
+                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                    workflow_name: self.config.name.clone(),
+                    level: "info".to_string(),
+                    stage: "verdict".to_string(),
+                    message: format!("📊 Avg Score: {:.1}", avg),
                     run_id: run_id.clone(),
                 });
             }

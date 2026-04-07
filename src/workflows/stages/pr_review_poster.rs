@@ -247,8 +247,9 @@ impl Stage for PrReviewPosterStage {
             false
         };
 
-        // Parse the verdict from the review text.
+        // Parse the verdict and score from the review text.
         let verdict = parse_verdict(agent_output);
+        let score = parse_score(agent_output);
 
         ctx.pr_review_result = Some(PrReviewResult {
             inline_comment_count: inline_count,
@@ -256,6 +257,7 @@ impl Stage for PrReviewPosterStage {
             head_sha,
             errors,
             verdict,
+            score,
         });
         Ok(())
     }
@@ -264,6 +266,32 @@ impl Stage for PrReviewPosterStage {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Parse the score from review text. Public alias for use by the executor.
+pub fn parse_score_from_text(text: &str) -> Option<u32> {
+    parse_score(text)
+}
+
+/// Parse the score (0-100) from the review text.
+///
+/// Looks for a line matching `Score: <N>` (case-insensitive).
+/// Returns `None` if no score line is found or the value is out of range.
+fn parse_score(text: &str) -> Option<u32> {
+    for line in text.lines().rev() {
+        let trimmed = line.trim().to_lowercase();
+        if let Some(rest) = trimmed.strip_prefix("score:") {
+            let rest = rest.trim();
+            // Parse the number, ignoring anything after it (like "/100").
+            let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = num_str.parse::<u32>() {
+                if n <= 100 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Strip agent meta-commentary preamble from the review output.
 ///
@@ -710,5 +738,39 @@ END_INLINE_COMMENT";
         assert_eq!(parse_verdict("Verdict: ❌ Not Approved"), "not_approved");
         assert_eq!(parse_verdict("Verdict: ✅ Approved"), "approved");
         assert_eq!(parse_verdict("Verdict: 🔴 Not Approved"), "not_approved");
+    }
+
+    // ── parse_score tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_score_basic() {
+        assert_eq!(parse_score("Score: 87\nVerdict: Approved"), Some(87));
+        assert_eq!(parse_score("Score: 100"), Some(100));
+        assert_eq!(parse_score("Score: 0"), Some(0));
+        assert_eq!(parse_score("score: 72"), Some(72));
+    }
+
+    #[test]
+    fn test_parse_score_with_suffix() {
+        assert_eq!(parse_score("Score: 85/100"), Some(85));
+        assert_eq!(parse_score("Score: 90 out of 100"), Some(90));
+    }
+
+    #[test]
+    fn test_parse_score_missing() {
+        assert_eq!(parse_score("No score here"), None);
+        assert_eq!(parse_score(""), None);
+    }
+
+    #[test]
+    fn test_parse_score_out_of_range() {
+        assert_eq!(parse_score("Score: 150"), None);
+        assert_eq!(parse_score("Score: 999"), None);
+    }
+
+    #[test]
+    fn test_parse_score_in_summary_block() {
+        let text = "SUMMARY\nLooks good.\n\nScore: 88\nVerdict: Approved\nEND_SUMMARY";
+        assert_eq!(parse_score(text), Some(88));
     }
 }
