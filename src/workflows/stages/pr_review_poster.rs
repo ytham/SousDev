@@ -1,7 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use regex::Regex;
-use tokio::process::Command;
 use crate::workflows::github_prs::post_summary_comment;
 use crate::workflows::stage::{Stage, StageContext};
 use crate::workflows::stores::PrReviewResult;
@@ -104,8 +103,9 @@ impl Stage for PrReviewPosterStage {
         // 2. The dismiss logic could not distinguish agent-posted approvals from
         //    manual human approvals, causing legitimate approvals to be dismissed
 
-        // Resolve the HEAD SHA of the PR branch.
-        let head_sha = resolve_head_sha(&ctx.workspace_dir).await;
+        // Use the PR's HEAD SHA from the GitHub API (full SHA, not abbreviated).
+        // This is required for posting inline comments — abbreviated SHAs fail.
+        let head_sha = pr.head_ref_oid.clone();
 
         // Parse inline comments and summary from agent output.
         let inline_comments = parse_inline_comments(agent_output);
@@ -213,7 +213,7 @@ impl Stage for PrReviewPosterStage {
                 .await
                 {
                     Ok(()) => {
-                        ctx.logger.debug(&format!(
+                        ctx.logger.info(&format!(
                             "Posted inline comment on {}:{}",
                             comment.path, comment.line
                         ));
@@ -221,7 +221,7 @@ impl Stage for PrReviewPosterStage {
                     Err(e) => {
                         // Non-fatal: the comment is still in the timeline summary.
                         // Common failure: line number doesn't exist in the diff.
-                        ctx.logger.debug(&format!(
+                        ctx.logger.warn(&format!(
                             "Could not post inline comment on {}:{} — {}",
                             comment.path, comment.line, e
                         ));
@@ -398,19 +398,6 @@ fn strip_agent_preamble<'a>(lines: &[&'a str]) -> Vec<&'a str> {
 
 
 /// Resolve the current HEAD SHA in the workspace (short 7-char).
-async fn resolve_head_sha(workspace_dir: &std::path::Path) -> String {
-    Command::new("git")
-        .arg("rev-parse")
-        .arg("--short")
-        .arg("HEAD")
-        .current_dir(workspace_dir)
-        .output()
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
 /// Parse all `INLINE_COMMENT path:line … END_INLINE_COMMENT` blocks from
 /// `text`.
 fn parse_inline_comments(text: &str) -> Vec<ParsedInlineComment> {

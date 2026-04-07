@@ -529,6 +529,10 @@ pub async fn fetch_review_inline_comments(
 }
 
 /// Post an inline review comment on a specific diff line.
+///
+/// Uses `subject_type=line` for maximum compatibility — this tells GitHub
+/// the `line` refers to the line number in the new version of the file,
+/// even if the line is not at the exact start of a diff hunk.
 pub async fn post_inline_comment(
     repo: &str,
     pr_number: u64,
@@ -546,12 +550,16 @@ pub async fn post_inline_comment(
         .arg("-f").arg(format!("path={}", path))
         .arg("-F").arg(format!("line={}", line))
         .arg("-f").arg("side=RIGHT")
+        .arg("-f").arg("subject_type=line")
         .arg("-f").arg(format!("body={}", body))
         .output()
         .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("Failed to post inline comment: {}", stderr));
+        return Err(anyhow::anyhow!(
+            "Failed to post inline comment on {}:{} — {}",
+            path, line, stderr.trim()
+        ));
     }
     Ok(())
 }
