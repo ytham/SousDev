@@ -2724,35 +2724,52 @@ impl WorkflowExecutor {
             {
                 let mut all_inline_comments = Vec::new();
                 let mut seen_locations = std::collections::HashSet::new();
+                let mut from_individual = 0usize;
                 for (_name, review_text) in &reviews {
                     let comments = crate::workflows::stages::pr_review_poster::parse_inline_comments_from_text(review_text);
                     for c in comments {
                         let key = format!("{}:{}", c.path, c.line);
                         if seen_locations.insert(key) {
+                            from_individual += 1;
                             all_inline_comments.push(c);
                         }
                     }
                 }
                 // Also try parsing the consolidated text itself.
+                let mut from_consolidated = 0usize;
                 {
                     let consolidated_comments = crate::workflows::stages::pr_review_poster::parse_inline_comments_from_text(&consolidated);
                     for c in consolidated_comments {
                         let key = format!("{}:{}", c.path, c.line);
                         if seen_locations.insert(key) {
+                            from_consolidated += 1;
                             all_inline_comments.push(c);
                         }
                     }
                 }
+                logger.info(&format!(
+                    "Inline comment extraction: {} from individual reviews, {} from consolidated, {} total",
+                    from_individual, from_consolidated, all_inline_comments.len()
+                ));
 
                 if !all_inline_comments.is_empty() {
                     let head_sha = &pr.head_ref_oid;
                     let show_branding = self.config.pull_request.as_ref()
                         .and_then(|pr_cfg| pr_cfg.show_branding)
                         .unwrap_or(true);
-                    logger.info(&format!(
-                        "Posting {} inline comment(s) before timeline summary",
-                        all_inline_comments.len()
-                    ));
+                    self.opts.tui_tx.send(TuiEvent::LogMessage {
+                        workflow_name: self.config.name.clone(),
+                        level: "info".to_string(),
+                        stage: "inline-comments".to_string(),
+                        message: format!(
+                            "Posting {} inline comment(s) (head_sha: {})",
+                            all_inline_comments.len(),
+                            &head_sha[..7.min(head_sha.len())]
+                        ),
+                        run_id: run_id.clone(),
+                    });
+                    let mut posted = 0u32;
+                    let mut failed = 0u32;
                     for c in &all_inline_comments {
                         let body = if show_branding {
                             format!("🧑‍🍳 {}", c.body)
@@ -2762,10 +2779,42 @@ impl WorkflowExecutor {
                         match crate::workflows::github_prs::post_inline_comment(
                             &pr.repo, pr.number, head_sha, &c.path, c.line, &body,
                         ).await {
-                            Ok(()) => logger.info(&format!("Posted inline comment on {}:{}", c.path, c.line)),
-                            Err(e) => logger.warn(&format!("Could not post inline on {}:{} — {}", c.path, c.line, e)),
+                            Ok(()) => {
+                                posted += 1;
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                                    workflow_name: self.config.name.clone(),
+                                    level: "warn".to_string(),
+                                    stage: "inline-comments".to_string(),
+                                    message: format!(
+                                        "Failed to post inline on {}:{} — {}",
+                                        c.path, c.line, e
+                                    ),
+                                    run_id: run_id.clone(),
+                                });
+                            }
                         }
                     }
+                    self.opts.tui_tx.send(TuiEvent::LogMessage {
+                        workflow_name: self.config.name.clone(),
+                        level: "info".to_string(),
+                        stage: "inline-comments".to_string(),
+                        message: format!(
+                            "Inline comments: {} posted, {} failed",
+                            posted, failed
+                        ),
+                        run_id: run_id.clone(),
+                    });
+                } else {
+                    self.opts.tui_tx.send(TuiEvent::LogMessage {
+                        workflow_name: self.config.name.clone(),
+                        level: "info".to_string(),
+                        stage: "inline-comments".to_string(),
+                        message: "No inline comments found in model reviews".to_string(),
+                        run_id: run_id.clone(),
+                    });
                 }
             }
 
