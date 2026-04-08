@@ -530,9 +530,9 @@ pub async fn fetch_review_inline_comments(
 
 /// Post an inline review comment on a specific diff line.
 ///
-/// Uses `subject_type=line` for maximum compatibility — this tells GitHub
-/// the `line` refers to the line number in the new version of the file,
-/// even if the line is not at the exact start of a diff hunk.
+/// Uses the JSON body format with `subject_type: "line"` which tells
+/// GitHub the `line` refers to the line number in the new version of the
+/// file.
 pub async fn post_inline_comment(
     repo: &str,
     pr_number: u64,
@@ -542,18 +542,34 @@ pub async fn post_inline_comment(
     body: &str,
 ) -> Result<()> {
     let endpoint = format!("/repos/{}/pulls/{}/comments", repo, pr_number);
-    let output = Command::new("gh")
+    let json_body = serde_json::json!({
+        "body": body,
+        "commit_id": head_sha,
+        "path": path,
+        "subject_type": "line",
+        "line": line,
+        "side": "RIGHT"
+    });
+    let json_str = json_body.to_string();
+
+    let mut child = Command::new("gh")
         .arg("api")
         .arg("--method").arg("POST")
         .arg(&endpoint)
-        .arg("-f").arg(format!("commit_id={}", head_sha))
-        .arg("-f").arg(format!("path={}", path))
-        .arg("-F").arg(format!("line={}", line))
-        .arg("-f").arg("side=RIGHT")
-        .arg("-f").arg("subject_type=line")
-        .arg("-f").arg(format!("body={}", body))
-        .output()
-        .await?;
+        .arg("--input").arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    // Write the JSON body to stdin.
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(json_str.as_bytes()).await?;
+        // Drop stdin to close the pipe so gh knows input is complete.
+    }
+
+    let output = child.wait_with_output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!(
