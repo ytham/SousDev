@@ -809,6 +809,7 @@ impl WorkflowExecutor {
                                     updated_at: Utc::now().to_rfc3339(),
                                     state: None,
                                     branch: None,
+                                    approved_by: None,
                                 },
                             )
                             .await?;
@@ -1121,6 +1122,7 @@ impl WorkflowExecutor {
                                 updated_at: Utc::now().to_rfc3339(),
                                 state: Some(plan_state::PLAN_POSTED.to_string()),
                                 branch: Some(ctx.branch.clone()),
+                                approved_by: None,
                             },
                         )
                         .await?;
@@ -1255,11 +1257,13 @@ impl WorkflowExecutor {
 
         let mut approval_review_id: Option<u64> = None;
         let mut addendum: Option<String> = None;
+        let mut approved_by: Option<String> = None;
 
         for review in &reviews {
             if let Some(parsed) = parse_approval(&review.body) {
                 approval_review_id = Some(review.id);
                 addendum = parsed.addendum;
+                approved_by = Some(review.login.clone());
                 logger.info(&format!(
                     "Plan PR #{}: approval found in review by {}",
                     pr_number, review.login
@@ -1282,6 +1286,7 @@ impl WorkflowExecutor {
                 }
                 if let Some(parsed) = parse_approval(&comment.body) {
                     addendum = parsed.addendum;
+                    approved_by = Some(comment.login.clone());
                     logger.info(&format!(
                         "Plan PR #{}: approval found in timeline comment by {}",
                         pr_number, comment.login
@@ -1381,7 +1386,12 @@ impl WorkflowExecutor {
 
         // Transition to plan_approved.
         self.issue_store
-            .update_state(&self.config.name, issue_number, plan_state::PLAN_APPROVED)
+            .update_state_with_approval(
+                &self.config.name,
+                issue_number,
+                plan_state::PLAN_APPROVED,
+                approved_by.as_deref(),
+            )
             .await?;
 
         // Mark the "plan-approval" stage as done in the sidebar.
@@ -1517,9 +1527,10 @@ impl WorkflowExecutor {
 
             // Post the plan content as a temporary timeline comment
             // (will be deleted after the PR title/body are updated).
+            let approved_by = record.approved_by.as_deref().unwrap_or("a team member");
             let plan_comment = format!(
-                "## Implementation plan\n\n<details>\n<summary>Click to expand</summary>\n\n{}\n\n</details>",
-                plan_content
+                "## Implementation plan\n\nThe following implementation plan has been **approved** by @{}:\n\n<details>\n<summary>Click to expand</summary>\n\n{}\n\n</details>",
+                approved_by, plan_content
             );
             let plan_comment_id = crate::workflows::github_prs::post_summary_comment(
                 repo, pr_number, &plan_comment,
