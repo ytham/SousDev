@@ -1867,11 +1867,20 @@ impl WorkflowExecutor {
                                 vec![]
                             }
                         };
-                    // Re-review if any new non-bot, non-self comment exists.
-                    // This catches PR authors responding to review feedback
-                    // without requiring an explicit @mention.
+                    // Re-review if:
+                    // 1. Any new non-bot, non-self comment exists (PR author
+                    //    responding to review feedback), OR
+                    // 2. Any comment contains @sousdev focus: or @sousdev review:
+                    //    (even from the reviewer themselves — explicit re-review
+                    //    request with focus directives).
                     let has_new_human_comment = new_comments.iter().any(|c| {
-                        !is_bot(&c.login) && c.login != reviewer_login
+                        if is_bot(&c.login) {
+                            return false;
+                        }
+                        // Focus directives always trigger re-review, even from self.
+                        let has_focus = c.body.to_lowercase().contains("@sousdev focus:")
+                            || c.body.to_lowercase().contains("@sousdev review:");
+                        has_focus || c.login != reviewer_login
                     });
                     if has_new_human_comment {
                         logger.info(&format!(
