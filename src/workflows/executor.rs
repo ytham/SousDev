@@ -1515,15 +1515,17 @@ impl WorkflowExecutor {
                 stage_name: "pr-update".to_string(),
             });
 
-            // Post the plan content as a timeline comment.
+            // Post the plan content as a temporary timeline comment
+            // (will be deleted after the PR title/body are updated).
             let plan_comment = format!(
                 "## Implementation plan\n\n<details>\n<summary>Click to expand</summary>\n\n{}\n\n</details>",
                 plan_content
             );
-            crate::workflows::github_prs::post_summary_comment(
+            let plan_comment_id = crate::workflows::github_prs::post_summary_comment(
                 repo, pr_number, &plan_comment,
             )
-            .await?;
+            .await
+            .ok();
 
             // Delete the plan file and commit.
             if plan_path.exists() {
@@ -1622,6 +1624,14 @@ impl WorkflowExecutor {
                 });
             } else {
                 logger.info(&format!("PR #{} title/body updated successfully", pr_number));
+                // Delete the plan archive comment now that the PR has a proper
+                // title and body — the plan content is no longer needed as a
+                // separate comment.
+                if let Some(pid) = plan_comment_id {
+                    if let Err(e) = crate::workflows::github_prs::delete_comment(repo, pid).await {
+                        logger.warn(&format!("Could not delete plan comment: {}", e));
+                    }
+                }
             }
 
             self.opts.tui_tx.send(TuiEvent::StageCompleted {
