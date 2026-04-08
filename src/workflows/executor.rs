@@ -1569,14 +1569,19 @@ impl WorkflowExecutor {
                 "--title".to_string(),
                 new_title.to_string(),
             ];
+            // Keep the body temp file alive until after gh pr edit runs.
+            // NamedTempFile deletes on drop, so it must outlive the command.
+            let _body_file_handle;
             if let Some(ref body) = ctx.pr_generated_body {
                 let body_file = tempfile::NamedTempFile::new()?;
                 std::fs::write(body_file.path(), body)?;
                 edit_args.push("--body-file".to_string());
                 edit_args.push(body_file.path().to_string_lossy().to_string());
                 logger.info(&format!("PR body: {} chars", body.len()));
+                _body_file_handle = Some(body_file); // keep alive
             } else {
                 logger.info("No PR body generated — only updating title");
+                _body_file_handle = None;
             }
             // Add --repo flag.
             if let Some(repo_id) =
@@ -1594,6 +1599,7 @@ impl WorkflowExecutor {
                 .current_dir(&info.dir)
                 .output()
                 .await?;
+            drop(_body_file_handle); // now safe to delete
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
