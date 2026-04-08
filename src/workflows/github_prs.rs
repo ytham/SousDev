@@ -530,9 +530,9 @@ pub async fn fetch_review_inline_comments(
 
 /// Post an inline review comment on a specific diff line.
 ///
-/// Uses the JSON body format with `subject_type: "line"` which tells
-/// GitHub the `line` refers to the line number in the new version of the
-/// file.
+/// Uses the GitHub REST API directly via `reqwest` (not `gh` CLI) to avoid
+/// CLI parameter encoding issues.  Sends proper JSON body with
+/// `subject_type: "line"`.
 pub async fn post_inline_comment(
     repo: &str,
     pr_number: u64,
@@ -541,7 +541,13 @@ pub async fn post_inline_comment(
     line: u64,
     body: &str,
 ) -> Result<()> {
-    let endpoint = format!("/repos/{}/pulls/{}/comments", repo, pr_number);
+    // Get the GitHub token from gh CLI auth.
+    let token = get_github_token().await?;
+
+    let url = format!(
+        "https://api.github.com/repos/{}/pulls/{}/comments",
+        repo, pr_number
+    );
     let json_body = serde_json::json!({
         "body": body,
         "commit_id": head_sha,
@@ -550,34 +556,47 @@ pub async fn post_inline_comment(
         "line": line,
         "side": "RIGHT"
     });
-    let json_str = json_body.to_string();
 
-    let mut child = Command::new("gh")
-        .arg("api")
-        .arg("--method").arg("POST")
-        .arg(&endpoint)
-        .arg("--input").arg("-")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "SousDev")
+        .json(&json_body)
+        .send()
+        .await?;
 
-    // Write the JSON body to stdin.
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(json_str.as_bytes()).await?;
-        // Drop stdin to close the pipe so gh knows input is complete.
-    }
-
-    let output = child.wait_with_output().await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "Failed to post inline comment on {}:{} — {}",
-            path, line, stderr.trim()
+            "Failed to post inline comment on {}:{} — HTTP {} — {}",
+            path, line, status, body
         ));
     }
     Ok(())
+}
+
+/// Get the GitHub auth token from the `gh` CLI.
+async fn get_github_token() -> Result<String> {
+    // Check GITHUB_TOKEN env var first.
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+    // Fall back to `gh auth token`.
+    let output = Command::new("gh")
+        .arg("auth")
+        .arg("token")
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!("Failed to get GitHub token from gh CLI"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Post a top-level (summary) comment on a pull request.
