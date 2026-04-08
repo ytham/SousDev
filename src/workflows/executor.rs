@@ -1881,17 +1881,19 @@ impl WorkflowExecutor {
                     // Re-review if:
                     // 1. Any new non-bot, non-self comment exists (PR author
                     //    responding to review feedback), OR
-                    // 2. Any comment contains @sousdev focus: or @sousdev review:
-                    //    (even from the reviewer themselves — explicit re-review
-                    //    request with focus directives).
+                    // 2. Any comment contains "@sousdev focus:" (focus directive),
+                    //    "@sousdev review", or "@<reviewer> review" (explicit
+                    //    re-review request) — even from the reviewer themselves.
+                    let review_trigger_lower = format!("@{} review", reviewer_login).to_lowercase();
                     let has_new_human_comment = new_comments.iter().any(|c| {
                         if is_bot(&c.login) {
                             return false;
                         }
-                        // Focus directives always trigger re-review, even from self.
-                        let has_focus = c.body.to_lowercase().contains("@sousdev focus:")
-                            || c.body.to_lowercase().contains("@sousdev review:");
-                        has_focus || c.login != reviewer_login
+                        let lower = c.body.to_lowercase();
+                        let is_directive = lower.contains("@sousdev focus:")
+                            || lower.contains("@sousdev review")
+                            || lower.contains(&review_trigger_lower);
+                        is_directive || c.login != reviewer_login
                     });
                     if has_new_human_comment {
                         logger.info(&format!(
@@ -3560,7 +3562,9 @@ async fn collect_focus_directives(
         }
     }
 
-    // Source B: PR comments with "@sousdev focus:" or "@sousdev review:".
+    // Source B: PR comments with "@sousdev focus:".
+    // Note: "@sousdev review" (without colon) is a re-review trigger, NOT
+    // a focus directive — it has no text to extract.
     let comments = crate::workflows::github_prs::fetch_pr_comments(repo, pr_number, None)
         .await
         .unwrap_or_default();
@@ -3609,7 +3613,10 @@ fn extract_review_focus_section(body: &str) -> Option<String> {
     }
 }
 
-/// Parse `@sousdev focus:` or `@sousdev review:` directives from a comment.
+/// Parse `@sousdev focus:` directives from a comment.
+///
+/// Note: `@sousdev review` (without colon) is a re-review trigger, not
+/// a focus directive — it's handled by the re-review check, not here.
 fn parse_focus_directives_from_comment(body: &str) -> Vec<String> {
     let mut directives = Vec::new();
     let lower = body.to_lowercase();
@@ -3622,23 +3629,12 @@ fn parse_focus_directives_from_comment(body: &str) -> Vec<String> {
                 let original_rest = &line.trim()["@sousdev focus:".len()..];
                 directives.push(original_rest.trim().to_string());
             }
-        } else if let Some(rest) = line_lower.strip_prefix("@sousdev review:") {
-            let text = rest.trim();
-            if !text.is_empty() {
-                let original_rest = &line.trim()["@sousdev review:".len()..];
-                directives.push(original_rest.trim().to_string());
-            }
         }
     }
     // Also handle multiline: if the whole comment body starts with the directive
     // and has more text on subsequent lines.
-    if directives.is_empty() && (lower.starts_with("@sousdev focus:") || lower.starts_with("@sousdev review:")) {
-        let prefix_len = if lower.starts_with("@sousdev focus:") {
-            "@sousdev focus:".len()
-        } else {
-            "@sousdev review:".len()
-        };
-        let rest = body[prefix_len..].trim();
+    if directives.is_empty() && lower.starts_with("@sousdev focus:") {
+        let rest = body["@sousdev focus:".len()..].trim();
         if !rest.is_empty() {
             directives.push(rest.to_string());
         }
@@ -4152,11 +4148,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_focus_directives_review_prefix() {
-        let body = "@sousdev review: Is the error handling correct?";
+    fn test_parse_focus_directives_review_is_not_focus() {
+        // "@sousdev review" is a re-review trigger, not a focus directive.
+        let body = "@sousdev review";
         let directives = parse_focus_directives_from_comment(body);
-        assert_eq!(directives.len(), 1);
-        assert_eq!(directives[0], "Is the error handling correct?");
+        assert!(directives.is_empty());
+    }
+
+    #[test]
+    fn test_parse_focus_directives_review_with_colon_is_not_focus() {
+        // "@sousdev review:" with text is also not a focus directive.
+        let body = "@sousdev review: please re-review this";
+        let directives = parse_focus_directives_from_comment(body);
+        assert!(directives.is_empty());
     }
 
     #[test]
