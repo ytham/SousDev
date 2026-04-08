@@ -552,6 +552,7 @@ pub async fn post_inline_comment(
         "body": body,
         "commit_id": head_sha,
         "path": path,
+        "subject_type": "line",
         "line": line,
         "side": "RIGHT"
     });
@@ -561,7 +562,7 @@ pub async fn post_inline_comment(
         .post(&url)
         .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("X-GitHub-Api-Version", "2026-03-10")
         .header("User-Agent", "SousDev")
         .json(&json_body)
         .send()
