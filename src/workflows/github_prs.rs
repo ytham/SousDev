@@ -552,17 +552,9 @@ pub async fn post_inline_comment(
         "body": body,
         "commit_id": head_sha,
         "path": path,
-        "subject_type": "line",
         "line": line,
         "side": "RIGHT"
     });
-
-    // Log the request for debugging.
-    tracing::debug!(
-        "post_inline_comment: url={} body={}",
-        url,
-        serde_json::to_string(&json_body).unwrap_or_default()
-    );
 
     let client = reqwest::Client::new();
     let response = client
@@ -570,9 +562,9 @@ pub async fn post_inline_comment(
         .header("Authorization", format!("Bearer {}", token))
         .header("Accept", "application/vnd.github+json")
         .header("Content-Type", "application/json")
-        .header("X-GitHub-Api-Version", "2026-03-10")
+        .header("X-GitHub-Api-Version", "2022-11-28")
         .header("User-Agent", "SousDev")
-        .body(serde_json::to_string(&json_body)?)
+        .json(&json_body)
         .send()
         .await?;
 
