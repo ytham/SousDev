@@ -98,7 +98,7 @@ impl Stage for PrCommentResponderStage {
 
         let summary_posted =
             match post_summary_comment(&pr.repo, pr.number, &summary_body).await {
-                Ok(()) => {
+                Ok(_comment_id) => {
                     ctx.logger
                         .info("PrCommentResponderStage: summary comment posted");
                     true

@@ -48,6 +48,7 @@ SUMMARY
 ### Inline observations
 <brief summary of file-specific findings — one line per file:line>
 
+{{focus_directives_section}}
 ### Summary
 
 | Model | Score | Verdict |

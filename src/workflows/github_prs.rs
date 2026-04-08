@@ -565,20 +565,42 @@ pub async fn post_inline_comment(
 }
 
 /// Post a top-level (summary) comment on a pull request.
-pub async fn post_summary_comment(repo: &str, pr_number: u64, body: &str) -> Result<()> {
+///
+/// Returns the comment ID on success (useful for later deletion/editing).
+pub async fn post_summary_comment(repo: &str, pr_number: u64, body: &str) -> Result<u64> {
+    let endpoint = format!("/repos/{}/issues/{}/comments", repo, pr_number);
     let output = Command::new("gh")
-        .arg("pr")
-        .arg("comment")
-        .arg(pr_number.to_string())
-        .arg("--repo")
-        .arg(repo)
-        .arg("--body")
-        .arg(body)
+        .arg("api")
+        .arg("--method").arg("POST")
+        .arg(&endpoint)
+        .arg("-f").arg(format!("body={}", body))
         .output()
         .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!("Failed to post summary comment: {}", stderr));
+    }
+    // Parse the comment ID from the JSON response.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let id = serde_json::from_str::<serde_json::Value>(&stdout)
+        .ok()
+        .and_then(|v| v["id"].as_u64())
+        .unwrap_or(0);
+    Ok(id)
+}
+
+/// Delete a comment by ID.
+pub async fn delete_comment(repo: &str, comment_id: u64) -> Result<()> {
+    let endpoint = format!("/repos/{}/issues/comments/{}", repo, comment_id);
+    let output = Command::new("gh")
+        .arg("api")
+        .arg("--method").arg("DELETE")
+        .arg(&endpoint)
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("Failed to delete comment: {}", stderr));
     }
     Ok(())
 }

@@ -238,7 +238,7 @@ impl Stage for PrReviewPosterStage {
             let full_body = body_parts.join("\n");
             ctx.logger.info("PrReviewPosterStage: posting review comment");
             match post_summary_comment(&pr.repo, pr.number, &full_body).await {
-                Ok(()) => true,
+                Ok(_comment_id) => true,
                 Err(e) => {
                     let msg = format!("Failed to post review comment — {}", e);
                     ctx.logger.error(&msg);

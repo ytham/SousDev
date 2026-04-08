@@ -2114,6 +2114,32 @@ impl WorkflowExecutor {
             }
             self.run_stage(&PrCheckoutStage, &mut ctx).await?;
 
+            // ── Collect focus directives and post placeholder ─────────
+            let focus_directives = collect_focus_directives(
+                &pr.repo, pr.number, pr.body.as_deref(), &pr.author.login,
+            ).await;
+            let focus_prompt_section = format_focus_for_prompt(&focus_directives);
+
+            let show_branding = self.config.pull_request.as_ref()
+                .and_then(|pr_cfg| pr_cfg.show_branding)
+                .unwrap_or(true);
+            let technique = &self.config.agent_loop.technique;
+            let model_name = self.opts.models.first()
+                .map(|mc| multi_review::model_display_name(&mc.model))
+                .unwrap_or_else(|| technique.to_string());
+            let placeholder_body = format_review_placeholder(
+                &[model_name], &focus_directives, show_branding,
+            );
+            let placeholder_id = crate::workflows::github_prs::post_summary_comment(
+                &pr.repo, pr.number, &placeholder_body,
+            ).await.ok();
+
+            // Append focus directives to the task text.
+            if !focus_prompt_section.is_empty() {
+                let new_task = format!("{}{}", ctx.parsed_task.full_text(), focus_prompt_section);
+                ctx.parsed_task = ParsedTask::new(new_task);
+            }
+
             // Prefer API-based review when an API key is available.
             // Falls back to CLI-based AgentLoopStage otherwise.
             // Find the matching model config for the technique's provider and
@@ -2185,6 +2211,11 @@ impl WorkflowExecutor {
             } else {
                 logger.info("Using CLI-based review (no API key)");
                 self.run_stage(&AgentLoopStage, &mut ctx).await?;
+            }
+
+            // Delete the placeholder before posting the full review.
+            if let Some(pid) = placeholder_id {
+                let _ = crate::workflows::github_prs::delete_comment(&pr.repo, pid).await;
             }
 
             self.run_stage(&PrReviewPosterStage, &mut ctx).await?;
@@ -2317,6 +2348,49 @@ impl WorkflowExecutor {
             // ── Load workspace conventions for non-Claude models ─────────
             let conventions = load_workspace_conventions(&ctx.workspace_dir).await;
             let system_prompt = ctx.system_prompt.clone().unwrap_or_default();
+
+            // ── Collect focus directives ─────────────────────────────────
+            let focus_directives = collect_focus_directives(
+                &pr.repo, pr.number, pr.body.as_deref(), &pr.author.login,
+            ).await;
+            if !focus_directives.is_empty() {
+                logger.info(&format!(
+                    "PR #{}: {} focus directive(s) collected",
+                    pr.number, focus_directives.len()
+                ));
+            }
+
+            // Append focus directives to the review prompt.
+            let focus_prompt_section = format_focus_for_prompt(&focus_directives);
+            let review_prompt = format!("{}{}", review_prompt, focus_prompt_section);
+
+            // ── Post "review in progress" placeholder ────────────────────
+            let show_branding = self.config.pull_request.as_ref()
+                .and_then(|pr_cfg| pr_cfg.show_branding)
+                .unwrap_or(true);
+            let model_display_names: Vec<String> = models.iter().map(|m| {
+                let model_id = self.opts.models.iter()
+                    .find(|mc| mc.provider == match m {
+                        ReviewerModel::Claude => "anthropic",
+                        ReviewerModel::Codex => "openai",
+                        ReviewerModel::Gemini => "gemini",
+                    })
+                    .map(|mc| mc.model.as_str())
+                    .unwrap_or(m.name());
+                multi_review::model_display_name(model_id)
+            }).collect();
+            let placeholder_body = format_review_placeholder(
+                &model_display_names, &focus_directives, show_branding,
+            );
+            let placeholder_id = match crate::workflows::github_prs::post_summary_comment(
+                &pr.repo, pr.number, &placeholder_body,
+            ).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    logger.warn(&format!("Could not post review placeholder: {}", e));
+                    None
+                }
+            };
 
             let ext_cfg = self.config.agent_loop.external_agent.clone().unwrap_or_default();
             let workspace_cwd = ctx.workspace_dir.to_string_lossy().to_string();
@@ -2531,6 +2605,7 @@ impl WorkflowExecutor {
                         ("model_display_names_example", &example_row),
                         ("score_prefix", score_prefix),
                         ("verdict_prefix", verdict_prefix),
+                        ("focus_directives_section", &format_focus_for_display(&focus_directives)),
                     ],
                 );
 
@@ -2669,7 +2744,13 @@ impl WorkflowExecutor {
                 }
             }
 
-            // ── Then post the consolidated timeline summary ──────────────
+            // ── Delete the placeholder and post the full review ─────────
+            if let Some(pid) = placeholder_id {
+                if let Err(e) = crate::workflows::github_prs::delete_comment(&pr.repo, pid).await {
+                    logger.warn(&format!("Could not delete placeholder comment: {}", e));
+                }
+            }
+
             ctx.agent_result = Some(RunResult::success(
                 "multi-model-review",
                 consolidated,
@@ -3350,6 +3431,203 @@ fn is_bot(login: &str) -> bool {
     login.ends_with("[bot]") || login == "github-actions"
 }
 
+// ---------------------------------------------------------------------------
+// Focus directives
+// ---------------------------------------------------------------------------
+
+/// A focus directive requested by a PR participant.
+#[derive(Debug, Clone)]
+struct FocusDirective {
+    text: String,
+    source: String,       // "PR description" or "Comment"
+    requested_by: String, // GitHub login
+}
+
+/// Collect focus directives from the PR description and timeline comments.
+///
+/// - **Source A**: Parses `## Review focus` section from PR body
+/// - **Source B**: Scans comments for `@sousdev focus:` lines
+async fn collect_focus_directives(
+    repo: &str,
+    pr_number: u64,
+    pr_body: Option<&str>,
+    pr_author: &str,
+) -> Vec<FocusDirective> {
+    let mut directives = Vec::new();
+
+    // Source A: PR description "## Review focus" section.
+    if let Some(body) = pr_body {
+        if let Some(section) = extract_review_focus_section(body) {
+            for line in section.lines() {
+                let trimmed = line.trim();
+                let text = trimmed
+                    .strip_prefix("- ")
+                    .or_else(|| trimmed.strip_prefix("* "))
+                    .unwrap_or(trimmed);
+                if !text.is_empty() {
+                    directives.push(FocusDirective {
+                        text: text.to_string(),
+                        source: "PR description".into(),
+                        requested_by: pr_author.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Source B: PR comments with "@sousdev focus:" or "@sousdev review:".
+    let comments = crate::workflows::github_prs::fetch_pr_comments(repo, pr_number, None)
+        .await
+        .unwrap_or_default();
+    for comment in &comments {
+        if is_bot(&comment.login) {
+            continue;
+        }
+        for directive in parse_focus_directives_from_comment(&comment.body) {
+            directives.push(FocusDirective {
+                text: directive,
+                source: "Comment".into(),
+                requested_by: comment.login.clone(),
+            });
+        }
+    }
+
+    directives
+}
+
+/// Extract the `## Review focus` section from a PR description.
+///
+/// Returns the text between `## Review focus` and the next `##` heading
+/// (or end of text).
+fn extract_review_focus_section(body: &str) -> Option<String> {
+    let mut in_section = false;
+    let mut lines = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("## review focus")
+            || trimmed.eq_ignore_ascii_case("## review focus:")
+        {
+            in_section = true;
+            continue;
+        }
+        if in_section && trimmed.starts_with("## ") {
+            break; // Next heading — end of section.
+        }
+        if in_section {
+            lines.push(line);
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n").trim().to_string())
+    }
+}
+
+/// Parse `@sousdev focus:` or `@sousdev review:` directives from a comment.
+fn parse_focus_directives_from_comment(body: &str) -> Vec<String> {
+    let mut directives = Vec::new();
+    let lower = body.to_lowercase();
+    for line in body.lines() {
+        let line_lower = line.trim().to_lowercase();
+        if let Some(rest) = line_lower.strip_prefix("@sousdev focus:") {
+            let text = rest.trim();
+            if !text.is_empty() {
+                // Use the original-case text, not the lowercased version.
+                let original_rest = &line.trim()["@sousdev focus:".len()..];
+                directives.push(original_rest.trim().to_string());
+            }
+        } else if let Some(rest) = line_lower.strip_prefix("@sousdev review:") {
+            let text = rest.trim();
+            if !text.is_empty() {
+                let original_rest = &line.trim()["@sousdev review:".len()..];
+                directives.push(original_rest.trim().to_string());
+            }
+        }
+    }
+    // Also handle multiline: if the whole comment body starts with the directive
+    // and has more text on subsequent lines.
+    if directives.is_empty() && (lower.starts_with("@sousdev focus:") || lower.starts_with("@sousdev review:")) {
+        let prefix_len = if lower.starts_with("@sousdev focus:") {
+            "@sousdev focus:".len()
+        } else {
+            "@sousdev review:".len()
+        };
+        let rest = body[prefix_len..].trim();
+        if !rest.is_empty() {
+            directives.push(rest.to_string());
+        }
+    }
+    directives
+}
+
+/// Format focus directives for injection into the review prompt.
+fn format_focus_for_prompt(directives: &[FocusDirective]) -> String {
+    if directives.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\n## Reviewer-requested focus areas\n\n\
+         The following focus areas were requested by PR participants. Pay special\n\
+         attention to these items during your review.\n\n",
+    );
+    for d in directives {
+        out.push_str(&format!(
+            "- **{}** (from @{}, {})\n",
+            d.text, d.requested_by, d.source
+        ));
+    }
+    out
+}
+
+/// Format focus directives for display in the consolidated review comment.
+fn format_focus_for_display(directives: &[FocusDirective]) -> String {
+    if directives.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("### Focus directives\n\n");
+    // Group by (requested_by, source).
+    let mut current_key = String::new();
+    for d in directives {
+        let key = format!("@{} ({})", d.requested_by, d.source);
+        if key != current_key {
+            if !current_key.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("{}\n", key));
+            current_key = key;
+        }
+        out.push_str(&format!("{}\n", d.text));
+    }
+    out
+}
+
+/// Format the "review in progress" placeholder comment.
+fn format_review_placeholder(
+    model_names: &[String],
+    focus_directives: &[FocusDirective],
+    show_branding: bool,
+) -> String {
+    let mut body = String::new();
+    if show_branding {
+        body.push_str("🧑‍🍳 ");
+    }
+    body.push_str("Review in progress — the following models are reviewing this PR:\n\n");
+    for name in model_names {
+        body.push_str(&format!("- {}\n", name));
+    }
+    body.push('\n');
+    if focus_directives.is_empty() {
+        body.push_str("To request specific focus areas, comment with `@sousdev focus: <your request>`.\n");
+    } else {
+        body.push_str("Focus areas requested:\n");
+        for d in focus_directives {
+            body.push_str(&format!("- {} (from @{})\n", d.text, d.requested_by));
+        }
+    }
+    body
+}
+
 /// Run a `git` sub-command in `cwd` and return trimmed stdout.
 async fn exec_git(args: &[&str], cwd: &std::path::Path) -> anyhow::Result<String> {
     let output = tokio::process::Command::new("git")
@@ -3754,5 +4032,138 @@ mod tests {
         assert!(!is_bot("ytham"));
         assert!(!is_bot("graemecode"));
         assert!(!is_bot("tayyabmh"));
+    }
+
+    // ── Focus directive tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_review_focus_section() {
+        let body = "## Description\nSome text.\n\n## Review focus\n- Check migrations\n- Verify error handling\n\n## Notes\nOther stuff.";
+        let section = extract_review_focus_section(body).unwrap();
+        assert!(section.contains("Check migrations"));
+        assert!(section.contains("Verify error handling"));
+        assert!(!section.contains("Other stuff"));
+    }
+
+    #[test]
+    fn test_extract_review_focus_section_missing() {
+        let body = "## Description\nNo focus section here.";
+        assert!(extract_review_focus_section(body).is_none());
+    }
+
+    #[test]
+    fn test_extract_review_focus_section_at_end() {
+        let body = "## Description\nSome text.\n\n## Review focus\n- Check migrations";
+        let section = extract_review_focus_section(body).unwrap();
+        assert!(section.contains("Check migrations"));
+    }
+
+    #[test]
+    fn test_parse_focus_directives_from_comment() {
+        let body = "@sousdev focus: Check the SQL migration for backward compatibility";
+        let directives = parse_focus_directives_from_comment(body);
+        assert_eq!(directives.len(), 1);
+        assert_eq!(directives[0], "Check the SQL migration for backward compatibility");
+    }
+
+    #[test]
+    fn test_parse_focus_directives_review_prefix() {
+        let body = "@sousdev review: Is the error handling correct?";
+        let directives = parse_focus_directives_from_comment(body);
+        assert_eq!(directives.len(), 1);
+        assert_eq!(directives[0], "Is the error handling correct?");
+    }
+
+    #[test]
+    fn test_parse_focus_directives_case_insensitive() {
+        let body = "@SousDev Focus: Check auth module";
+        let directives = parse_focus_directives_from_comment(body);
+        assert_eq!(directives.len(), 1);
+        assert!(directives[0].contains("Check auth module"));
+    }
+
+    #[test]
+    fn test_parse_focus_directives_no_match() {
+        let body = "This is a regular comment with no directives.";
+        let directives = parse_focus_directives_from_comment(body);
+        assert!(directives.is_empty());
+    }
+
+    #[test]
+    fn test_format_focus_for_prompt_empty() {
+        assert!(format_focus_for_prompt(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_format_focus_for_prompt() {
+        let directives = vec![
+            FocusDirective {
+                text: "Check migrations".into(),
+                source: "PR description".into(),
+                requested_by: "alice".into(),
+            },
+        ];
+        let output = format_focus_for_prompt(&directives);
+        assert!(output.contains("Reviewer-requested focus areas"));
+        assert!(output.contains("Check migrations"));
+        assert!(output.contains("@alice"));
+    }
+
+    #[test]
+    fn test_format_focus_for_display() {
+        let directives = vec![
+            FocusDirective {
+                text: "Check migrations".into(),
+                source: "PR description".into(),
+                requested_by: "alice".into(),
+            },
+            FocusDirective {
+                text: "Verify auth".into(),
+                source: "Comment".into(),
+                requested_by: "bob".into(),
+            },
+        ];
+        let output = format_focus_for_display(&directives);
+        assert!(output.contains("### Focus directives"));
+        assert!(output.contains("@alice (PR description)"));
+        assert!(output.contains("Check migrations"));
+        assert!(output.contains("@bob (Comment)"));
+        assert!(output.contains("Verify auth"));
+    }
+
+    #[test]
+    fn test_format_focus_for_display_empty() {
+        assert!(format_focus_for_display(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_format_review_placeholder_with_focus() {
+        let models = vec!["Claude Opus 4.6".to_string(), "GPT-5.4".to_string()];
+        let directives = vec![FocusDirective {
+            text: "Check auth".into(),
+            source: "Comment".into(),
+            requested_by: "bob".into(),
+        }];
+        let body = format_review_placeholder(&models, &directives, true);
+        assert!(body.contains("🧑‍🍳"));
+        assert!(body.contains("Claude Opus 4.6"));
+        assert!(body.contains("GPT-5.4"));
+        assert!(body.contains("Focus areas requested:"));
+        assert!(body.contains("Check auth"));
+    }
+
+    #[test]
+    fn test_format_review_placeholder_no_focus() {
+        let models = vec!["Claude Opus 4.6".to_string()];
+        let body = format_review_placeholder(&models, &[], true);
+        assert!(body.contains("@sousdev focus:"));
+    }
+
+    #[test]
+    fn test_format_review_placeholder_no_branding() {
+        let models = vec!["Claude Opus 4.6".to_string()];
+        let body = format_review_placeholder(&models, &[], false);
+        assert!(!body.contains("🧑‍🍳"));
+        assert!(body.contains("Review in progress"));
     }
 }
