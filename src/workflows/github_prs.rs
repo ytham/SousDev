@@ -142,6 +142,10 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("rate limit") || stderr.contains("API rate limit") {
+                tracing::warn!("GraphQL rate limit exceeded — falling back to REST API");
+                return fetch_prs_via_rest(&repo, limit).await;
+            }
             return Err(anyhow::anyhow!("gh pr list failed: {}", stderr));
         }
 
@@ -178,6 +182,11 @@ pub async fn fetch_github_prs(options: &FetchPRsOptions) -> Result<Vec<GitHubPR>
 
     if !output1.status.success() {
         let stderr = String::from_utf8_lossy(&output1.stderr);
+        // If GraphQL rate limit is exceeded, fall back to REST API.
+        if stderr.contains("rate limit") || stderr.contains("API rate limit") {
+            tracing::warn!("GraphQL rate limit exceeded — falling back to REST API");
+            return fetch_prs_via_rest(&repo, limit).await;
+        }
         return Err(anyhow::anyhow!("gh pr list failed: {}", stderr));
     }
 
@@ -694,6 +703,123 @@ pub async fn detect_github_login() -> Result<String> {
         return Err(anyhow::anyhow!("gh api user failed: {}", stderr));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// REST API fallback for PR listing (when GraphQL rate limit is exceeded)
+// ---------------------------------------------------------------------------
+
+/// Fetch open PRs via the REST API as a fallback when GraphQL is rate-limited.
+///
+/// The REST API `/repos/{repo}/pulls` doesn't support search queries, so this
+/// fetches all open PRs and lets the caller filter. The REST API has a separate
+/// rate limit (5,000/hour) from GraphQL (5,000/hour).
+async fn fetch_prs_via_rest(repo: &str, limit: usize) -> Result<Vec<GitHubPR>> {
+    let token = get_github_token().await?;
+    let per_page = limit.min(100);
+    let url = format!(
+        "https://api.github.com/repos/{}/pulls?state=open&per_page={}",
+        repo, per_page
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "SousDev")
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "REST API PR list failed ({}): {}",
+            status, body
+        ));
+    }
+
+    let prs: Vec<serde_json::Value> = response.json().await?;
+
+    let mut result = Vec::new();
+    for pr in prs {
+        let number = pr["number"].as_u64().unwrap_or(0);
+        if number == 0 {
+            continue;
+        }
+
+        // Map REST API fields to our GitHubPR struct.
+        let author_login = pr["user"]["login"].as_str().unwrap_or("").to_string();
+
+        let requested_reviewers: Vec<String> = pr["requested_reviewers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r["login"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let assignees: Vec<String> = pr["assignees"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|a| a["login"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let labels: Vec<PRLabel> = pr["labels"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|l| {
+                        l["name"].as_str().map(|s| PRLabel { name: s.to_string() })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let requested_teams: Vec<String> = pr["requested_teams"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t["slug"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        result.push(GitHubPR {
+            number,
+            title: pr["title"].as_str().unwrap_or("").to_string(),
+            body: pr["body"].as_str().map(|s| s.to_string()),
+            url: pr["html_url"].as_str().unwrap_or("").to_string(),
+            head_ref_name: pr["head"]["ref"].as_str().unwrap_or("").to_string(),
+            head_ref_oid: pr["head"]["sha"].as_str().unwrap_or("").to_string(),
+            base_ref_name: pr["base"]["ref"].as_str().unwrap_or("").to_string(),
+            author: PRAuthor { login: author_login },
+            labels,
+            review_decision: String::new(), // REST API doesn't return this
+            created_at: pr["created_at"].as_str().unwrap_or("").to_string(),
+            updated_at: pr["updated_at"].as_str().unwrap_or("").to_string(),
+            requested_reviewers,
+            requested_teams,
+            assignees,
+            additions: 0, // REST list doesn't include these
+            deletions: 0,
+            repo: repo.to_string(),
+        });
+    }
+
+    tracing::info!(
+        "REST API fallback: fetched {} open PRs from {}",
+        result.len(),
+        repo
+    );
+
+    Ok(result)
 }
 
 /// Single-quote escape a string for use in a shell command.
