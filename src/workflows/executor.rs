@@ -3735,9 +3735,16 @@ fn filter_posted_inline_observations(
         }
         if in_inline_section {
             // Check if this line references a path:line that was posted.
+            // The observation may use a short filename (e.g. "generated.d.ts:720")
+            // while the posted key uses the full path ("frontend/.../generated.d.ts:720").
+            // Match if any posted key ends with the observation's path:line.
             if let Some(caps) = path_line_re.captures(line) {
-                let key = format!("{}:{}", &caps[1], &caps[2]);
-                if posted_keys.contains(&key) {
+                let short_key = format!("{}:{}", &caps[1], &caps[2]);
+                let was_posted = posted_keys.contains(&short_key)
+                    || posted_keys.iter().any(|pk| {
+                        pk.ends_with(&format!("/{}",  short_key)) || pk == &short_key
+                    });
+                if was_posted {
                     continue; // Skip — already posted inline.
                 }
             }
@@ -4358,5 +4365,17 @@ mod tests {
         let result = filter_posted_inline_observations(text, &posted);
         assert!(!result.contains("Inline observation"));
         assert!(result.contains("### Summary"));
+    }
+
+    #[test]
+    fn test_filter_posted_with_short_filenames() {
+        // Observation uses short filename, posted key uses full path.
+        let text = "### Inline observations\n- `generated.d.ts:720` — Type mismatch\n- `admin_types.rs:451` — Missing field\n\n### Summary\nTable.";
+        let mut posted = std::collections::HashSet::new();
+        posted.insert("frontend-firekeeper/src/lib/api/generated.d.ts:720".to_string());
+        let result = filter_posted_inline_observations(text, &posted);
+        assert!(!result.contains("Type mismatch")); // posted (matched via suffix)
+        assert!(result.contains("Missing field"));  // not posted
+        assert!(result.contains("failed to post"));
     }
 }
