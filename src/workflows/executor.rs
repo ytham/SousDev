@@ -2606,7 +2606,7 @@ impl WorkflowExecutor {
             });
 
             // ── Consolidate reviews ──────────────────────────────────────
-            let consolidated = if reviews.len() >= 2 {
+            let mut consolidated = if reviews.len() >= 2 {
                 let display_names: Vec<&str> = reviews.iter().map(|(name, _)| name.as_str()).collect();
                 let example_row = format!("| {} | 85 | ✅ Approved |", display_names.first().unwrap_or(&"Model"));
 
@@ -2783,6 +2783,7 @@ impl WorkflowExecutor {
                     });
                     let mut posted = 0u32;
                     let mut failed = 0u32;
+                    let mut posted_keys = std::collections::HashSet::new();
                     for c in &all_inline_comments {
                         let body = if show_branding {
                             format!("🧑‍🍳 {}", c.body)
@@ -2794,6 +2795,7 @@ impl WorkflowExecutor {
                         ).await {
                             Ok(()) => {
                                 posted += 1;
+                                posted_keys.insert(format!("{}:{}", c.path, c.line));
                             }
                             Err(e) => {
                                 failed += 1;
@@ -2809,6 +2811,15 @@ impl WorkflowExecutor {
                                 });
                             }
                         }
+                    }
+
+                    // Remove successfully-posted inline observations from the
+                    // consolidated text so the timeline comment only shows
+                    // observations that failed to post inline.
+                    if !posted_keys.is_empty() {
+                        consolidated = filter_posted_inline_observations(
+                            &consolidated, &posted_keys,
+                        );
                     }
                     self.opts.tui_tx.send(TuiEvent::LogMessage {
                         workflow_name: self.config.name.clone(),
@@ -3683,6 +3694,73 @@ fn format_focus_for_display(directives: &[FocusDirective]) -> String {
     out
 }
 
+/// Remove successfully-posted inline observations from the consolidated
+/// review text.
+///
+/// Replaces the `### Inline observations` section with
+/// `### Inline observations that failed to post` containing only the
+/// observations whose `path:line` is NOT in `posted_keys`.  If all
+/// observations were posted, the section is removed entirely.
+fn filter_posted_inline_observations(
+    text: &str,
+    posted_keys: &std::collections::HashSet<String>,
+) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut result = Vec::new();
+    let mut in_inline_section = false;
+    let mut failed_observations: Vec<String> = Vec::new();
+
+    let path_line_re = regex::Regex::new(
+        r"`?([^\s`*:]+\.\w+):(\d+)`?"
+    ).unwrap();
+
+    for line in &lines {
+        if line.contains("### Inline observation") {
+            in_inline_section = true;
+            continue;
+        }
+        if in_inline_section && line.starts_with("### ") {
+            // End of inline section — emit filtered observations.
+            if !failed_observations.is_empty() {
+                result.push("### Inline observations that failed to post".to_string());
+                result.push(String::new());
+                for obs in &failed_observations {
+                    result.push(obs.clone());
+                }
+                result.push(String::new());
+            }
+            in_inline_section = false;
+            result.push(line.to_string());
+            continue;
+        }
+        if in_inline_section {
+            // Check if this line references a path:line that was posted.
+            if let Some(caps) = path_line_re.captures(line) {
+                let key = format!("{}:{}", &caps[1], &caps[2]);
+                if posted_keys.contains(&key) {
+                    continue; // Skip — already posted inline.
+                }
+            }
+            if !line.trim().is_empty() {
+                failed_observations.push(line.to_string());
+            }
+        } else {
+            result.push(line.to_string());
+        }
+    }
+
+    // If the inline section was the last section (no ### after it).
+    if in_inline_section && !failed_observations.is_empty() {
+        result.push("### Inline observations that failed to post".to_string());
+        result.push(String::new());
+        for obs in &failed_observations {
+            result.push(obs.clone());
+        }
+    }
+
+    result.join("\n")
+}
+
 /// Format the "review in progress" placeholder comment.
 fn format_review_placeholder(
     model_names: &[String],
@@ -4254,5 +4332,31 @@ mod tests {
         let body = format_review_placeholder(&models, &[], false);
         assert!(!body.contains("🧑‍🍳"));
         assert!(body.contains("Review in progress"));
+    }
+
+    // ── filter_posted_inline_observations tests ───────────────────────────
+
+    #[test]
+    fn test_filter_posted_inline_observations() {
+        let text = "### Consensus findings\nSome text.\n\n### Inline observations\n- `src/a.rs:10` — Issue A\n- `src/b.rs:20` — Issue B\n- `src/c.rs:30` — Issue C\n\n### Summary\n| Model | Verdict |";
+        let mut posted = std::collections::HashSet::new();
+        posted.insert("src/a.rs:10".to_string());
+        posted.insert("src/c.rs:30".to_string());
+        let result = filter_posted_inline_observations(text, &posted);
+        assert!(!result.contains("Issue A")); // posted — removed
+        assert!(result.contains("Issue B"));  // failed — kept
+        assert!(!result.contains("Issue C")); // posted — removed
+        assert!(result.contains("failed to post"));
+        assert!(result.contains("### Summary")); // preserved
+    }
+
+    #[test]
+    fn test_filter_all_posted_removes_section() {
+        let text = "### Consensus findings\nText.\n\n### Inline observations\n- `src/a.rs:10` — Issue A\n\n### Summary\nTable.";
+        let mut posted = std::collections::HashSet::new();
+        posted.insert("src/a.rs:10".to_string());
+        let result = filter_posted_inline_observations(text, &posted);
+        assert!(!result.contains("Inline observation"));
+        assert!(result.contains("### Summary"));
     }
 }
