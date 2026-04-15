@@ -126,7 +126,8 @@ max_retries = 1               # 2 total attempts
 max_review_rounds = 1         # 1 reviewer → agent feedback round
 
 [workflows.agent_loop.external_agent]
-timeout_secs = 300            # 5 minutes per agent invocation
+timeout_secs = 900            # 15 minutes per agent invocation (plan generation
+                              # and complex issues need time for thorough research)
 
 [workflows.workspace]
 base_branch = "main"

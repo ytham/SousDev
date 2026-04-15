@@ -20,24 +20,15 @@ reporters who may not know the full code context. Understand the underlying
 problem and devise the correct approach, even if it differs from what was
 suggested.
 
-### Step 2 — Research the codebase (spend no more than 2-3 minutes here)
+### Step 2 — Research the codebase
 
-Do targeted research — do NOT exhaustively explore the entire codebase.
-Focus on:
-- The specific files mentioned in or related to the issue
-- The immediate dependencies of those files
-- Existing patterns you should follow
+Before writing the plan:
+- Identify ALL files that need to change
+- Find existing patterns, utilities, or abstractions that should be reused
+- Understand the test infrastructure (what framework, where tests live)
+- Check for sibling code that could be affected by the changes
 
-Do NOT:
-- Browse every file in the repo
-- Read files unrelated to the issue
-- Spawn multiple sub-agents for research
-- Spend more than ~20 tool calls on exploration
-
-If you're unsure about something, note it as a question in the plan
-rather than spending time investigating.
-
-### Step 3 — Write the plan (do this EARLY — don't wait until you've read everything)
+### Step 3 — Write the plan
 
 Create the file `tmp/plan-issue-{{issue_number}}.md` with this exact structure:
 
