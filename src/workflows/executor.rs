@@ -810,6 +810,7 @@ impl WorkflowExecutor {
                                     state: None,
                                     branch: None,
                                     approved_by: None,
+                                    last_plan_comment_id: None,
                                 },
                             )
                             .await?;
@@ -1123,6 +1124,7 @@ impl WorkflowExecutor {
                                 state: Some(plan_state::PLAN_POSTED.to_string()),
                                 branch: Some(ctx.branch.clone()),
                                 approved_by: None,
+                                last_plan_comment_id: None,
                             },
                         )
                         .await?;
@@ -1307,18 +1309,22 @@ impl WorkflowExecutor {
             .await
             .unwrap_or_default();
 
-            // Filter to comments on the plan file that we haven't addressed yet.
+            // Filter to comments on the plan file that are NEW (after the
+            // last processed comment ID) to avoid re-processing on every tick.
             let plan_filename = format!("tmp/plan-issue-{}.md", issue_number);
+            let last_processed_id = record.last_plan_comment_id.unwrap_or(0);
             let plan_comments: Vec<_> = all_inline
                 .iter()
                 .filter(|c| {
-                    c.path == plan_filename && !is_bot(&c.login)
+                    c.path == plan_filename
+                        && !is_bot(&c.login)
+                        && c.id > last_processed_id
                 })
                 .collect();
 
             if !plan_comments.is_empty() {
                 logger.info(&format!(
-                    "PR #{}: {} review comment(s) on plan — updating plan",
+                    "PR #{}: {} new review comment(s) on plan — running agent to revise",
                     pr_number,
                     plan_comments.len()
                 ));
@@ -1327,13 +1333,13 @@ impl WorkflowExecutor {
                     level: "info".to_string(),
                     stage: "plan-approval".to_string(),
                     message: format!(
-                        "PR #{}: {} review comment(s) on plan — updating",
+                        "PR #{}: {} new comment(s) — revising plan",
                         pr_number, plan_comments.len()
                     ),
                     run_id: String::new(),
                 });
 
-                // Check out the branch and update the plan file.
+                // Check out the branch.
                 let branch = record.branch.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("No branch for plan-posted issue #{}", issue_number)
                 })?;
@@ -1348,41 +1354,83 @@ impl WorkflowExecutor {
 
                 let plan_path = dir.join(&plan_filename);
                 if plan_path.exists() {
-                    let mut plan_content = tokio::fs::read_to_string(&plan_path).await?;
+                    let plan_content = tokio::fs::read_to_string(&plan_path).await?;
 
-                    // Append reviewer feedback section.
-                    plan_content.push_str("\n\n## Reviewer feedback\n\n");
+                    // Build feedback text for the agent.
+                    let mut feedback = String::new();
                     for c in &plan_comments {
                         let line = c.line.unwrap_or(0);
-                        plan_content.push_str(&format!(
-                            "- **{}** (line {}): {}\n",
+                        feedback.push_str(&format!(
+                            "- @{} (line {}): {}\n",
                             c.login, line, c.body
                         ));
                     }
 
-                    tokio::fs::write(&plan_path, &plan_content).await?;
+                    // Run the agent to revise the plan incorporating the feedback.
+                    let revision_prompt = format!(
+                        "You are revising an implementation plan based on reviewer feedback.\n\n\
+                         ## Current plan\n\n{}\n\n\
+                         ## Reviewer feedback to address\n\n{}\n\n\
+                         ## Instructions\n\n\
+                         Update the plan file at `{}` to incorporate ALL of the reviewer's \
+                         feedback above. Modify the relevant sections of the plan (Approach, \
+                         Files to modify, Testing strategy, etc.) — do NOT just append the \
+                         feedback at the bottom.\n\n\
+                         After updating, commit with:\n\
+                         ```\n\
+                         git add -f {}\n\
+                         git commit -m \"plan: revise plan for issue #{} based on review feedback\"\n\
+                         ```\n\n\
+                         Do NOT implement any code changes. Only update the plan file.",
+                        plan_content, feedback, plan_filename, plan_filename, issue_number
+                    );
 
-                    exec_git(&["add", "-f", "tmp/"], dir).await?;
+                    let parsed_task = ParsedTask::new(revision_prompt);
+                    let run_id = Uuid::new_v4().to_string();
+                    let wf_log = WorkflowLog::with_tui_sender_and_label(
+                        &self.opts.harness_root.clone().unwrap_or_else(|| PathBuf::from(".")),
+                        &self.config.name,
+                        &run_id,
+                        Some(&format!("plan-revise-{}", issue_number)),
+                        self.opts.tui_tx.clone(),
+                    ).await.ok();
+                    let mut ctx = self.make_base_ctx(&run_id, parsed_task, 0, wf_log.clone());
+                    ctx.workspace_dir = info.dir.clone();
+                    ctx.branch = branch.to_string();
+
+                    // Run the agent.
+                    if let Err(e) = AgentLoopStage.run(&mut ctx).await {
+                        logger.error(&format!("Plan revision agent failed: {}", e));
+                    }
+
+                    // Commit any uncommitted changes.
                     let status = exec_git(&["status", "--porcelain"], dir).await?;
                     if !status.trim().is_empty() {
-                        exec_git(
-                            &[
-                                "commit",
-                                "-m",
-                                &format!(
-                                    "plan: address review feedback for issue #{}",
-                                    issue_number
-                                ),
-                            ],
+                        let _ = exec_git(&["add", "-f", "tmp/"], dir).await;
+                        let _ = exec_git(
+                            &["commit", "-m", &format!("plan: revise plan for issue #{} based on review feedback", issue_number)],
                             dir,
-                        )
-                        .await?;
-                        exec_git(&["push", "origin", branch], dir).await?;
-                        logger.info(&format!(
-                            "PR #{}: plan updated with reviewer feedback",
-                            pr_number
-                        ));
+                        ).await;
                     }
+                    exec_git(&["push", "origin", branch], dir).await?;
+
+                    if let Some(ref log) = wf_log {
+                        let _ = log.complete("success").await;
+                    }
+
+                    logger.info(&format!("PR #{}: plan revised with reviewer feedback", pr_number));
+                }
+
+                // Update the last processed comment ID so we don't re-process.
+                let max_comment_id = plan_comments.iter().map(|c| c.id).max().unwrap_or(0);
+                if max_comment_id > 0 {
+                    let _ = self.issue_store
+                        .update_last_plan_comment_id(
+                            &self.config.name,
+                            issue_number,
+                            max_comment_id,
+                        )
+                        .await;
                 }
             } else {
                 logger.info(&format!(

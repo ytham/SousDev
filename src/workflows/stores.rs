@@ -169,6 +169,10 @@ pub struct HandledIssueRecord {
     /// GitHub login of the user who approved the plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_by: Option<String>,
+    /// ID of the last inline review comment processed on the plan PR.
+    /// Used to avoid re-processing the same feedback on every poll tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_plan_comment_id: Option<u64>,
 }
 
 /// Tracks which issues each workflow has already handled, preventing duplicate
@@ -320,6 +324,25 @@ impl HandledIssueStore {
         {
             rec.state = Some(new_state.to_string());
             rec.approved_by = approved_by.map(|s| s.to_string());
+            rec.updated_at = chrono::Utc::now().to_rfc3339();
+        }
+        self.write_all(&data).await
+    }
+
+    /// Update the `last_plan_comment_id` for a handled issue.
+    pub async fn update_last_plan_comment_id(
+        &self,
+        workflow_name: &str,
+        issue_number: u64,
+        comment_id: u64,
+    ) -> Result<()> {
+        let mut data = self.read_all().await.unwrap_or_default();
+        if let Some(rec) = data
+            .entry(workflow_name.to_string())
+            .or_default()
+            .get_mut(&issue_number.to_string())
+        {
+            rec.last_plan_comment_id = Some(comment_id);
             rec.updated_at = chrono::Utc::now().to_rfc3339();
         }
         self.write_all(&data).await
@@ -652,6 +675,7 @@ mod tests {
                     state: None,
                     branch: None,
                     approved_by: None,
+                    last_plan_comment_id: None,
                 },
             )
             .await
@@ -679,6 +703,7 @@ mod tests {
                     state: None,
                     branch: None,
                     approved_by: None,
+                    last_plan_comment_id: None,
                 },
             )
             .await
@@ -707,6 +732,7 @@ mod tests {
                     state: None,
                     branch: None,
                     approved_by: None,
+                    last_plan_comment_id: None,
                 },
             )
             .await
@@ -1098,6 +1124,7 @@ mod tests {
                         state: None,
                         branch: None,
                         approved_by: None,
+                        last_plan_comment_id: None,
                     },
                 )
                 .await
@@ -1127,6 +1154,7 @@ mod tests {
                     state: None,
                     branch: None,
                     approved_by: None,
+                    last_plan_comment_id: None,
                 },
             )
             .await
@@ -1154,6 +1182,7 @@ mod tests {
                     state: None,
                     branch: None,
                     approved_by: None,
+                    last_plan_comment_id: None,
                 },
             )
             .await
@@ -1190,6 +1219,7 @@ mod tests {
                         state: None,
                         branch: None,
                         approved_by: None,
+                        last_plan_comment_id: None,
                     },
                 )
                 .await
@@ -1221,6 +1251,7 @@ mod tests {
                     state: None,
                     branch: None,
                     approved_by: None,
+                    last_plan_comment_id: None,
                 },
             )
             .await
@@ -1241,6 +1272,7 @@ mod tests {
                     state: None,
                     branch: None,
                     approved_by: None,
+                    last_plan_comment_id: None,
                 },
             )
             .await
@@ -1296,6 +1328,7 @@ mod tests {
                 state: Some("plan_posted".into()),
                 branch: Some("sousdev/1".into()),
                 approved_by: None,
+                last_plan_comment_id: None,
             })
             .await
             .unwrap();
@@ -1313,6 +1346,7 @@ mod tests {
                 state: Some("plan_approved".into()),
                 branch: Some("sousdev/2".into()),
                 approved_by: None,
+                last_plan_comment_id: None,
             })
             .await
             .unwrap();
@@ -1330,6 +1364,7 @@ mod tests {
                 state: None,  // Legacy issue, no state
                 branch: None,
                 approved_by: None,
+                last_plan_comment_id: None,
             })
             .await
             .unwrap();
@@ -1364,6 +1399,7 @@ mod tests {
                 state: Some("plan_posted".into()),
                 branch: Some("sousdev/42".into()),
                 approved_by: None,
+                last_plan_comment_id: None,
             })
             .await
             .unwrap();
@@ -1402,6 +1438,7 @@ mod tests {
                 state: Some("plan_posted".into()),
                 branch: Some("sousdev/42".into()),
                 approved_by: None,
+                last_plan_comment_id: None,
             })
             .await
             .unwrap();
