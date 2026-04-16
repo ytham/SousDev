@@ -2526,6 +2526,9 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
                     Event::Mouse(mouse_event) => {
                         app.handle_mouse(mouse_event);
                     }
+                    Event::Resize(_, _) => {
+                        app.needs_redraw = true;
+                    }
                     _ => {}
                 }
                 // Check if more events are immediately available (0ms timeout).
