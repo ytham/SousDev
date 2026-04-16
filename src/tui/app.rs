@@ -2515,14 +2515,23 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
             500
         };
         if event::poll(Duration::from_millis(poll_ms))? {
-            match event::read()? {
-                Event::Key(key_event) => {
-                    app.handle_key(key_event.code, key_event.modifiers);
+            // Drain ALL pending terminal events before rendering.  This
+            // batches rapid-fire scroll events (free-scrolling mousewheel)
+            // into a single render instead of render-per-scroll.
+            loop {
+                match event::read()? {
+                    Event::Key(key_event) => {
+                        app.handle_key(key_event.code, key_event.modifiers);
+                    }
+                    Event::Mouse(mouse_event) => {
+                        app.handle_mouse(mouse_event);
+                    }
+                    _ => {}
                 }
-                Event::Mouse(mouse_event) => {
-                    app.handle_mouse(mouse_event);
+                // Check if more events are immediately available (0ms timeout).
+                if !event::poll(Duration::from_millis(0))? {
+                    break;
                 }
-                _ => {}
             }
         }
 
