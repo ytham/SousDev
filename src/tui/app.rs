@@ -296,6 +296,8 @@ pub struct App {
     pub disabled_workflows: Arc<Mutex<HashSet<String>>>,
     /// Flag set when session needs to be persisted to disk.
     pub session_dirty: bool,
+    /// Flag set when the UI needs to be redrawn.  Cleared after each render.
+    pub needs_redraw: bool,
     /// Computed panel layout (updated each frame by `ui::draw`).
     pub layout: PanelLayout,
     /// Current text selection state.
@@ -348,6 +350,7 @@ impl App {
             project_root: None,
             disabled_workflows: Arc::new(Mutex::new(HashSet::new())),
             session_dirty: false,
+            needs_redraw: true, // initial render
             layout: PanelLayout::default(),
             selection: TextSelection::default(),
             toast: None,
@@ -392,6 +395,7 @@ impl App {
 
     /// Process a TUI event and update state accordingly.
     pub fn handle_tui_event(&mut self, event: TuiEvent) {
+        self.needs_redraw = true;
         let mut dirty_workflow: Option<String> = None;
 
         match event {
@@ -726,6 +730,7 @@ impl App {
     /// (`Ctrl+C`) are handled first, then the context stack is checked
     /// in priority order: CronEdit > Command > InfoPanel > Normal.
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) {
+        self.needs_redraw = true;
         // Universal: Ctrl+C always quits.
         if key == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
@@ -967,6 +972,7 @@ impl App {
 
     /// Handle a mouse event.
     pub fn handle_mouse(&mut self, event: MouseEvent) {
+        self.needs_redraw = true;
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let panel = self.layout.hit_test(event.column, event.row);
@@ -1089,6 +1095,7 @@ impl App {
         if let Some(ref toast) = self.toast {
             if std::time::Instant::now() >= toast.expires_at {
                 self.toast = None;
+                self.needs_redraw = true;
             }
         }
     }
@@ -2441,8 +2448,12 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
 
     // Main event loop.
     loop {
-        // Draw the UI.
-        terminal.draw(|f| ui::draw(f, &mut app))?;
+        // Only redraw when something changed — avoids burning CPU on
+        // full widget-tree traversal + terminal buffer diff at 10 Hz.
+        if app.needs_redraw {
+            terminal.draw(|f| ui::draw(f, &mut app))?;
+            app.needs_redraw = false;
+        }
 
         // Process all pending TUI events (non-blocking drain).
         while let Ok(tui_event) = rx.try_recv() {
@@ -2495,9 +2506,15 @@ pub async fn run_app(config: HarnessConfig, no_workspace: bool) -> Result<()> {
             }
         }
 
-        // Poll for terminal input events with a short timeout so we keep
-        // re-rendering even when no keys are pressed (to show new log lines).
-        if event::poll(Duration::from_millis(100))? {
+        // Poll for terminal input events.  Use a shorter timeout when a toast
+        // is visible (for smooth expiry) or when we need to redraw.  Otherwise
+        // use a longer timeout to save CPU when idle.
+        let poll_ms = if app.toast.is_some() || app.needs_redraw {
+            100
+        } else {
+            500
+        };
+        if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(key_event) => {
                     app.handle_key(key_event.code, key_event.modifiers);
