@@ -1299,10 +1299,97 @@ impl WorkflowExecutor {
         }
 
         if approval_review_id.is_none() {
-            logger.info(&format!(
-                "PR #{}: no approval found yet — will check next tick",
-                pr_number
-            ));
+            // No approval yet — but check if there are new review comments
+            // requesting changes to the plan.  If so, update the plan.
+            let all_inline = crate::workflows::github_prs::fetch_inline_review_comments(
+                repo, pr_number, None,
+            )
+            .await
+            .unwrap_or_default();
+
+            // Filter to comments on the plan file that we haven't addressed yet.
+            let plan_filename = format!("tmp/plan-issue-{}.md", issue_number);
+            let plan_comments: Vec<_> = all_inline
+                .iter()
+                .filter(|c| {
+                    c.path == plan_filename && !is_bot(&c.login)
+                })
+                .collect();
+
+            if !plan_comments.is_empty() {
+                logger.info(&format!(
+                    "PR #{}: {} review comment(s) on plan — updating plan",
+                    pr_number,
+                    plan_comments.len()
+                ));
+                self.opts.tui_tx.send(TuiEvent::LogMessage {
+                    workflow_name: self.config.name.clone(),
+                    level: "info".to_string(),
+                    stage: "plan-approval".to_string(),
+                    message: format!(
+                        "PR #{}: {} review comment(s) on plan — updating",
+                        pr_number, plan_comments.len()
+                    ),
+                    run_id: String::new(),
+                });
+
+                // Check out the branch and update the plan file.
+                let branch = record.branch.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("No branch for plan-posted issue #{}", issue_number)
+                })?;
+                let ws = WorkspaceManager::new(
+                    self.config.workspace.clone().unwrap_or_default(),
+                    logger.clone(),
+                    self.opts.target_repo.clone(),
+                    self.opts.git_method.as_deref().unwrap_or("https"),
+                );
+                let info = ws.setup_existing(branch, Some(issue_number)).await?;
+                let dir = &info.dir;
+
+                let plan_path = dir.join(&plan_filename);
+                if plan_path.exists() {
+                    let mut plan_content = tokio::fs::read_to_string(&plan_path).await?;
+
+                    // Append reviewer feedback section.
+                    plan_content.push_str("\n\n## Reviewer feedback\n\n");
+                    for c in &plan_comments {
+                        let line = c.line.unwrap_or(0);
+                        plan_content.push_str(&format!(
+                            "- **{}** (line {}): {}\n",
+                            c.login, line, c.body
+                        ));
+                    }
+
+                    tokio::fs::write(&plan_path, &plan_content).await?;
+
+                    exec_git(&["add", "-f", "tmp/"], dir).await?;
+                    let status = exec_git(&["status", "--porcelain"], dir).await?;
+                    if !status.trim().is_empty() {
+                        exec_git(
+                            &[
+                                "commit",
+                                "-m",
+                                &format!(
+                                    "plan: address review feedback for issue #{}",
+                                    issue_number
+                                ),
+                            ],
+                            dir,
+                        )
+                        .await?;
+                        exec_git(&["push", "origin", branch], dir).await?;
+                        logger.info(&format!(
+                            "PR #{}: plan updated with reviewer feedback",
+                            pr_number
+                        ));
+                    }
+                }
+            } else {
+                logger.info(&format!(
+                    "PR #{}: no approval found yet — will check next tick",
+                    pr_number
+                ));
+            }
             return Ok(()); // Not yet approved — check next tick.
         }
 
