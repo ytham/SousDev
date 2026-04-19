@@ -189,7 +189,16 @@ impl Stage for PrReviewPosterStage {
 
         // Inline observations: include a summary in the timeline comment AND
         // post each as an actual inline PR comment on the specific line.
-        if !inline_comments.is_empty() {
+        //
+        // Skip the inline section if the summary text already contains one
+        // (i.e., the multi-model executor already handled inline display
+        // with proper posted/failed filtering).
+        let summary_has_inline_section = summary_text
+            .as_ref()
+            .map(|t| t.contains("### Inline observation"))
+            .unwrap_or(false);
+
+        if !inline_comments.is_empty() && !summary_has_inline_section {
             let mut inline_section = String::from("\n### Inline observations\n");
             for comment in &inline_comments {
                 inline_section.push_str(&format!(
@@ -198,7 +207,9 @@ impl Stage for PrReviewPosterStage {
                 ));
             }
             body_parts.push(inline_section);
+        }
 
+        if !inline_comments.is_empty() {
             // Post each inline comment as an actual PR review comment on the diff.
             for comment in &inline_comments {
                 let inline_body = if show_branding {
