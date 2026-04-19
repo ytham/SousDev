@@ -2226,13 +2226,25 @@ async fn refresh_info_from_remote(
             let reviewer_login = crate::workflows::github_prs::detect_github_login()
                 .await
                 .unwrap_or_default();
-            let prs: Vec<_> = all_prs
-                .into_iter()
-                .filter(|pr| {
-                    pr.requested_reviewers.iter().any(|r| r == &reviewer_login)
-                        || pr.assignees.iter().any(|a| a == &reviewer_login)
-                })
-                .collect();
+            // Filter PRs the same way as run_prs_mode in the executor:
+            // individually requested, assigned, or already reviewed.
+            let mut prs = Vec::new();
+            for pr in all_prs {
+                let individually_requested = pr
+                    .requested_reviewers
+                    .iter()
+                    .any(|r| r == &reviewer_login);
+                let is_assignee = pr.assignees.iter().any(|a| a == &reviewer_login);
+                let has_review_record = review_store
+                    .get_record(wf_name, pr.number)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if individually_requested || is_assignee || has_review_record {
+                    prs.push(pr);
+                }
+            }
 
             let mut summaries: Vec<ItemSummary> = Vec::new();
             for pr in &prs {
