@@ -1,7 +1,7 @@
 # 🧑‍🍳 SousDev — Project Context
 
 This document describes the current state of SousDev for agent context.
-Last updated after plan-first workflow, multi-model review, and API-based review additions.
+Last updated after focus directives, review scoring, plan revision, REST API fallback, and inline comments via reqwest.
 
 ---
 
@@ -104,12 +104,12 @@ sousdev/
     │   ├── cron_runner.rs           tokio-cron-scheduler + live rescheduling + info refresh
     │   ├── workspace.rs             WorkspaceManager (clone, checkout, reset, teardown)
     │   ├── github_issues.rs         fetch issues (OR-logic labels), comment, close
-    │   ├── github_prs.rs            fetch PRs (3 searches), reviews, inline comments
+    │   ├── github_prs.rs            fetch PRs (4 searches), reviews, inline comments via reqwest
     │   ├── linear_issues.rs         Linear GraphQL API issue fetching
     │   ├── stores.rs                RunStore + HandledIssueStore + PrReviewStore +
     │   │                            PrResponseStore + FailureCooldownStore.
-    │   │                            HandledIssueRecord gains `state` and `branch` fields (plan_state module).
-    │   ├── multi_review.rs          Multi-model PR review: ReviewerModel, detection, consolidation
+    │   │                            HandledIssueRecord gains `state`, `branch`, and `last_plan_comment_id` fields (plan_state module).
+    │   ├── multi_review.rs          Multi-model PR review: ReviewerModel, detection, consolidation, scoring (0-100), focus directives
     │   ├── workflow_log.rs          Per-run structured log files
     │   └── stages/
     │       ├── trigger.rs           Shell command → stdout
@@ -132,6 +132,13 @@ sousdev/
 ## TUI Dashboard
 
 Three-column layout: `Sidebar (26) | Info pane (34) | Log pane (remaining)`
+
+### Rendering performance
+
+- **`needs_redraw` flag**: Render only when state changes (idle CPU ~10% → near-zero)
+- **Adaptive poll timeout**: 500ms when idle, 100ms when active
+- **Mouse scroll batching**: Drain ALL pending terminal events before rendering (0ms poll)
+- **Terminal resize handling**: `Event::Resize` triggers immediate redraw
 
 ### Key routing (context stack, highest priority first)
 
@@ -202,24 +209,35 @@ Each context owns its keys exclusively. Universal: `Ctrl+C` quits.
 - State machine: `plan_posted` → `plan_approved` → `code_complete`
 - Agent creates a plan PR for human review before writing code
 - 60-second background polling for approval
-- `HandledIssueRecord` tracks `state` and `branch` fields
+- **Plan revision on feedback**: when reviewer leaves non-approval comments on plan PR, agent re-runs to revise the plan (not just append). `last_plan_comment_id` tracks processed comments to prevent re-processing.
+- `HandledIssueRecord` tracks `state`, `branch`, and `last_plan_comment_id` fields
 - TUI shows `[Pl]` PlanPending badge while awaiting approval
 - New prompts: `plan-generation.md`, `plan-pr-body.md`, `plan-execution.md`
 
 ### Mode 2: PR reviewer (`github_prs`)
 
-- **Three GitHub searches** merged: `user-review-requested:@me`, `assignee:@me`, `review-requested:@me`
-- Post-fetch filter: individually requested OR assigned to user
+- **Four GitHub searches** merged: `user-review-requested:@me`, `assignee:@me`, `review-requested:@me`, `reviewed-by:@me`
+- Post-fetch filter: individually requested OR assigned to user OR has review record
+- Re-review trigger: any new human comment OR `@sousdev focus:` OR `@sousdev review` OR `@<user> review` (even from self for focus directives)
 - `max_retries` defaults to 0 for PR review (no retries)
 - Reviews posted as **timeline comments only** (NOT formal GitHub reviews — no approval/rejection)
+- **"Review in progress" placeholder**: posted when review starts (lists models + focus areas), deleted when full review is posted
 - Duplicate detection: checks if agent already posted via `gh pr review` (10-min window)
 - Rebase detection: SHA changed but additions/deletions same → skip (not a real code change)
 - PR review prompt has **IMPORTANT CONSTRAINTS** at top: no build/test/install, no `gh pr review`
 - `has_concerns` tracked in `PrReviewRecord` for `[A✓]` vs `[A✗]` status
+- **Focus directives**: `@sousdev focus: <text>` in PR comments and `## Review focus` in PR descriptions inject focus areas into review prompts. Displayed in consolidated review under "### Focus directives" with attribution.
+- **Review scoring**: Each model scores PR 0-100. Summary table includes Score column. `Avg Score:` line. Parsed via `parse_score()`.
+- **Verdict calibration**: Only reject for real harm (bugs, security, data loss). Approve with comments for everything else.
 - **Multi-model review**: When 2+ model CLIs/API keys available (from `[[models]]` config), runs parallel reviews and consolidates. Auto-detects available models.
 - **API-based review**: Uses native tool-use APIs (Anthropic, OpenAI) instead of CLI binaries. Falls back to CLI when no API key. Read-only tool set with allowlisted shell commands (`api_review_loop.rs`).
-- **Review verdicts**: Each model outputs `Verdict: ✅ Approved` or `Verdict: 🔴 Not Approved`. Consolidated reviews include per-model verdict table.
-- **`--disallowedTools`** for Claude CLI blocks `gh pr review`, `gh pr comment`, etc. deterministically.
+- **Review verdicts**: Each model outputs `Verdict: ✅ Approved` or `Verdict: 🔴 Not Approved`. Consolidated reviews include per-model verdict table. `PrReviewResult` includes `score` and `verdict` fields.
+- **REST API fallback**: When GraphQL rate limit exceeded, falls back to REST API `/repos/{repo}/pulls` with separate rate limit.
+- **Inline comments via reqwest**: Posted directly via GitHub API (not `gh` CLI). API version `2022-11-28` with `line` + `side` parameters. Only failed inline observations shown in timeline; successfully-posted ones removed. If all posted, inline section removed entirely.
+- **Inline comment path matching**: Short filenames from models matched against full paths via suffix matching.
+- **Markdown inline comment parser**: Fallback when models don't use structured `INLINE_COMMENT` markers. Parses `**path:line**`, `- \`path:line\``, etc.
+- **Verdict parsing**: `strip_leading_emojis()` handles emoji/branding prefixes like `🧑‍🍳 Verdict:` and `📊 Avg Score:`.
+- **`--disallowedTools`** for Claude CLI is the primary enforcement layer (deterministic). Blocks `gh pr review`, `gh pr comment`, etc.
 - **`--permission-mode auto`** for PR review (instead of `--dangerously-skip-permissions`) — read-only review doesn't need bypass.
 - `github_prs` mode accepts `claude-loop`, `codex-loop`, or `gemini-loop` techniques.
 - `[✓✓]` Approved badge shows when PR has GitHub reviewDecision == APPROVED
@@ -277,7 +295,7 @@ review, 1 for all others.
 | Store | File | Key fields |
 |---|---|---|
 | `RunStore` | `output/runs.json` | Append-only history |
-| `HandledIssueStore` | `output/handled-issues.json` | issue_number → record |
+| `HandledIssueStore` | `output/handled-issues.json` | issue_number → record (state, branch, last_plan_comment_id) |
 | `PrReviewStore` | `output/reviewed-prs.json` | pr_number → record (has_concerns, additions, deletions, head_sha) |
 | `PrResponseStore` | `output/pr-responses.json` | pr_number → record (responded_at for timestamp filtering) |
 | `FailureCooldownStore` | `output/failure-cooldowns.json` | Exponential backoff: 60min → 24h cap |
@@ -310,10 +328,11 @@ ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications (dark green backgroun
 ## Security notes
 
 - All `gh api` calls use direct `Command::new("gh").arg(...)` — no shell injection
+- Inline comments posted via `reqwest` with GitHub token from `gh auth token` — API version `2022-11-28`
 - `safe_truncate()` in `src/utils/truncate.rs` prevents UTF-8 boundary panics
 - `--dangerously-skip-permissions` grants Claude full system access (by design, for code-writing modes)
 - `--permission-mode auto` used for PR review (read-only, no bypass needed)
-- `--disallowedTools` for Claude CLI deterministically blocks `gh pr review`, `gh pr comment`, etc.
+- `--disallowedTools` for Claude CLI is the primary enforcement layer (deterministic) — blocks `gh pr review`, `gh pr comment`, etc.
 - `blocked_commands` is prompt-level only — not technically enforced
 - Issue bodies are a prompt injection vector
 - PR reviews are posted as timeline comments, never formal GitHub reviews
@@ -324,7 +343,7 @@ ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications (dark green backgroun
 
 | Metric | Value |
 |---|---|
-| Test count | 608+ |
+| Test count | 642+ |
 | Clippy warnings | 0 |
 | Default agent timeout | 900s (15 min) |
 | Default PR review timeout | 600s (10 min) |
@@ -342,7 +361,7 @@ ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications (dark green backgroun
 
 ## Key invariants
 
-1. `cargo test` — 608+ tests, zero failures
+1. `cargo test` — 642+ tests, zero failures
 2. `cargo clippy` — zero warnings
 3. Every Stage returns `Ok(())` for business failures; only `Err` for unrecoverable errors
 4. `HandledIssueStore.mark_handled()` only when `success && pr_url.is_some()`
@@ -362,3 +381,4 @@ ACCENT_TOAST       Rgb(40, 130, 70)    Toast notifications (dark green backgroun
 18. Multiple labels in issue config use OR logic (separate query per label)
 19. `open_url_in_browser()` is a no-op during `#[cfg(test)]`
 20. Background `refresh_info_from_remote` uses owned types (runs in `tokio::spawn`)
+21. Initial PR list matches cron tick filter (individually requested, assigned, or has review record)

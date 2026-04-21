@@ -17,7 +17,7 @@ maintain state across turns. This directory is gitignored — treat it as your w
 ## Build, test, lint
 
 ```bash
-cargo test          # 608+ tests — run before every commit
+cargo test          # 642+ tests — run before every commit
 cargo clippy        # must pass with zero warnings
 cargo build         # debug build
 ```
@@ -41,11 +41,11 @@ src/
     executor.rs            WorkflowExecutor — routes all 5 modes. Most critical file.
     stage.rs               Stage trait + StageContext (shared mutable context).
     stores.rs              RunStore, HandledIssueStore, PrReviewStore, PrResponseStore.
-                           HandledIssueRecord gains `state` and `branch` fields (plan_state module).
+                           HandledIssueRecord gains `state`, `branch`, and `last_plan_comment_id` fields (plan_state module).
     workspace.rs           WorkspaceManager — clone, checkout, reset, teardown.
     github_issues.rs       gh issue list/comment/close wrappers.
-    github_prs.rs          gh pr list, inline comments, replies, login detection.
-    multi_review.rs        Multi-model PR review: ReviewerModel, detection, consolidation.
+    github_prs.rs          gh pr list (GraphQL + REST API fallback), inline comments via reqwest, replies, login detection.
+    multi_review.rs        Multi-model PR review: ReviewerModel, detection, consolidation, scoring (0-100), focus directives.
     cron_runner.rs         tokio-cron-scheduler daemon with overlap guard.
     stages/                12 workflow stages (trigger → parse → agent → review → PR).
       api_review_loop.rs   API-based review agent loop with read-only tools.
@@ -83,7 +83,7 @@ config.toml                Reference config. Must stay valid and well-commented.
 
 ## Invariants
 
-1. `cargo test` — 608+ tests, zero failures.
+1. `cargo test` — 642+ tests, zero failures.
 2. `cargo clippy` — zero warnings.
 3. `HandledIssueStore.mark_handled()` only called when `success && pr_url.is_some()`.
 4. `PrReviewStore.mark_reviewed()` and `PrResponseStore.mark_responded()` only after `success && !skipped`.

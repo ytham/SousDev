@@ -92,7 +92,71 @@ prompts.
   (`pr-review.md`), (2) the system prompt (appended blocked commands), and
   (3) a post-hoc cleanup step in the harness that detects and undoes
   unauthorized actions (e.g., dismiss formal reviews the agent posted).
+- **`--disallowedTools` is the primary enforcement layer.** Deterministically
+  blocks `gh pr review`, `gh pr comment`, etc. via Claude CLI flags. This is
+  more reliable than prompt-level prohibitions.
+- **`--permission-mode auto`** for PR review (read-only). No need for
+  `--dangerously-skip-permissions` since review doesn't write code.
+- **Dismiss mechanism removed.** Was causing false positives on manual
+  approvals — if a human approved a PR while the agent was reviewing, the
+  dismiss step would revoke the human's approval. Removed entirely.
 - **PR reviews must be comments, not formal reviews.** The harness posts
   reviews as timeline comments so they don't count as approvals or
-  "changes requested." If the agent posts a formal APPROVED review, the
-  `PrReviewPosterStage` dismisses it automatically.
+  "changes requested."
+
+## Focus directives
+
+- **`@sousdev focus: <text>`** in PR comments injects focus areas into the
+  review prompt. Multiple focus directives accumulate across comments.
+- **`## Review focus`** section in PR descriptions is also collected as a
+  focus directive (attributed to "PR description").
+- Focus directives are injected into the review prompt as a dedicated section
+  so each model sees them before starting analysis.
+- In the consolidated review, focus directives are displayed under
+  **"### Focus directives"** with attribution (who requested what).
+- Focus directives are separate from re-review triggers — `@sousdev focus:`
+  adds focus text AND triggers re-review, while `@sousdev review` triggers
+  re-review without adding focus text.
+
+## Review scoring
+
+- Each model scores the PR **0-100** as part of its review output.
+- The score appears in a `Score:` line before `Verdict:` in the SUMMARY block.
+- Consolidated review summary table includes a **Score** column.
+- An `Avg Score:` line is included in the consolidated summary.
+- Parsed via `parse_score()` which extracts the numeric value.
+- **Verdict calibration**: Only reject (`🔴 Not Approved`) for real harm —
+  bugs, security vulnerabilities, data loss. Approve with comments (`✅ Approved`)
+  for everything else (style, naming, minor improvements).
+
+## Plan revision
+
+- When a reviewer leaves non-approval comments on a plan PR, the agent
+  **re-runs to revise the plan** (not just append to existing plan).
+- `last_plan_comment_id` in `HandledIssueRecord` tracks which comments
+  have been processed, preventing re-processing on subsequent polls.
+- The plan PR body is updated in-place with the revised plan.
+
+## Inline comment posting
+
+- Inline comments are posted via **`reqwest`** directly to the GitHub API,
+  not through the `gh` CLI. This provides better control over the request body.
+- API version: `2022-11-28` header required.
+- Uses `line` + `side` parameters. Do NOT include `subject_type`.
+- Short filenames from models are matched against full paths via suffix matching.
+- **Markdown inline comment parser**: Fallback when models don't use structured
+  `INLINE_COMMENT` markers. Parses `**path:line**`, `- \`path:line\``, etc.
+- Only **failed** inline observations appear in the timeline comment. Successfully
+  posted inline comments are removed from the timeline. Section renamed to
+  "Inline observations that failed to post". If all posted successfully, the
+  section is removed entirely.
+- `PrReviewPosterStage` skips inline section when the executor handles it
+  (prevents duplicate inline observation sections).
+
+## Re-review triggers
+
+- **`@sousdev review`** — triggers re-review without adding focus text.
+- **`@<user> review`** — same as above (matches the bot's own login).
+- **Any new human comment** — if a new non-bot comment appears since last
+  review, triggers re-review.
+- **`@sousdev focus: <text>`** — adds focus text AND triggers re-review.
